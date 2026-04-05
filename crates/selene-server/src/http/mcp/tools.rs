@@ -1201,4 +1201,27 @@ impl SeleneTools {
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
         Ok(CallToolResult::success(vec![Content::text(data)]))
     }
+
+    // ── Text2GQL Toolkit ─────────────────────────────────────────────
+
+    #[tool(
+        name = "schema_dump",
+        description = "Get a compact, LLM-optimized dump of the graph schema. Returns all node types, edge types, properties, constraints, and statistics in a format designed for minimal token usage. Use before writing GQL queries to understand the data model."
+    )]
+    async fn schema_dump(&self) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let query = "CALL graph.schemaDump() YIELD schema RETURN schema";
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        Ok(CallToolResult::success(vec![Content::text(data)]))
+    }
 }
