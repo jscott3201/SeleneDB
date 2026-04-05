@@ -3,7 +3,7 @@ ignore = [
     # paste is unmaintained but is a transitive dep of parquet -- no action we can take
     { id = "RUSTSEC-2024-0436", reason = "transitive dep via parquet, no alternative available" },
     # rsa timing sidechannel -- transitive dep via jsonwebtoken, no safe upgrade available yet
-    { id = "RUSTSEC-2023-0071", reason = "transitive dep via jsonwebtoken, awaiting upstream fix" },
+    { id = "RUSTSEC-2023-0071", reason = "transitive dep via jsonwebtoken; Selene only performs JWT signature verification and does not do RSA decryption, so the advisory is not applicable here; awaiting upstream fix" },
 ]
 
 [licenses]
