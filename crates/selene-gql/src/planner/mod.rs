@@ -16,22 +16,26 @@ use std::sync::Arc;
 use selene_core::IStr;
 use selene_graph::{EdgeStatistics, SeleneGraph};
 
-// Thread-local cache for EdgeStatistics keyed by graph generation.
-// Avoids O(E) rebuild on every plan_query/plan_mutation call.
+// Thread-local cache for EdgeStatistics keyed by graph identity + generation.
+// Avoids O(E) rebuild on every plan_query/plan_mutation call. The pointer
+// discriminator prevents false hits across distinct graph instances that
+// share the same generation (e.g., multiple fresh graphs at generation 0).
+type EdgeStatsEntry = ((usize, u64), Arc<EdgeStatistics>);
 thread_local! {
-    static EDGE_STATS_CACHE: RefCell<Option<(u64, Arc<EdgeStatistics>)>> = const { RefCell::new(None) };
+    static EDGE_STATS_CACHE: RefCell<Option<EdgeStatsEntry>> = const { RefCell::new(None) };
 }
 
 fn cached_edge_statistics(graph: &SeleneGraph) -> Arc<EdgeStatistics> {
     EDGE_STATS_CACHE.with(|cache| {
         let mut c = cache.borrow_mut();
-        if let Some((cached_gen, stats)) = c.as_ref()
-            && *cached_gen == graph.generation()
+        let key = (std::ptr::from_ref(graph) as usize, graph.generation());
+        if let Some((cached_key, stats)) = c.as_ref()
+            && *cached_key == key
         {
             return Arc::clone(stats);
         }
         let stats = Arc::new(EdgeStatistics::build(graph));
-        *c = Some((graph.generation(), Arc::clone(&stats)));
+        *c = Some((key, Arc::clone(&stats)));
         stats
     })
 }

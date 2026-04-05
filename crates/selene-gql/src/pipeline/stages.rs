@@ -54,11 +54,7 @@ fn compare_column_direct(
     let ord = match col {
         Column::Int64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
         Column::UInt64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
-        Column::Float64(arr) => {
-            let a = arr.value(a_idx);
-            let b = arr.value(b_idx);
-            a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        Column::Float64(arr) => arr.value(a_idx).total_cmp(&arr.value(b_idx)),
         Column::Bool(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
         Column::Utf8(arr) => arr.value(a_idx).cmp(arr.value(b_idx)),
         Column::NodeIds(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
@@ -255,13 +251,15 @@ pub(crate) fn execute_pipeline_op_chunk(
             && having.is_none()
             && !projections.iter().any(|p| p.expr.is_aggregate()) =>
         {
-            if let Ok(projected) = try_return_chunk(&chunk, projections, ctx) {
-                Ok(projected)
-            } else {
-                // eval_vec unsupported for some projection; fall back
-                let bindings = chunk.to_bindings();
-                let result = execute_pipeline_op(op, bindings, ctx)?;
-                Ok(bindings_to_chunk_generic(&result))
+            match try_return_chunk(&chunk, projections, ctx) {
+                Ok(projected) => Ok(projected),
+                Err(GqlError::Unsupported { .. }) => {
+                    // eval_vec unsupported for some projection; fall back
+                    let bindings = chunk.to_bindings();
+                    let result = execute_pipeline_op(op, bindings, ctx)?;
+                    Ok(bindings_to_chunk_generic(&result))
+                }
+                Err(err) => Err(err),
             }
         }
 
