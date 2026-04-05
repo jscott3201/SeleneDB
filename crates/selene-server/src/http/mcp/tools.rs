@@ -1420,6 +1420,58 @@ impl SeleneTools {
         let text = format!("Enriched {enriched} community summaries with embeddings.");
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "graphrag_search",
+        description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth."
+    )]
+    async fn graphrag_search(
+        &self,
+        params: Parameters<GraphRagSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let p = params.0;
+        let k = p.k.unwrap_or(10);
+        let max_hops = p.max_hops.unwrap_or(2);
+        let mode = p.mode.unwrap_or_else(|| "local".to_string());
+
+        if k <= 0 {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: "k must be a positive integer".into(),
+                data: None,
+            });
+        }
+
+        let query = "CALL graphrag.search($queryText, $k, $maxHops, $mode) \
+                     YIELD nodeId, score, source, context, depth \
+                     RETURN nodeId, score, source, context, depth";
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert("queryText".into(), Value::from(p.query.as_str()));
+        gql_params.insert("k".into(), Value::Int(k));
+        gql_params.insert("maxHops".into(), Value::Int(max_hops));
+        gql_params.insert("mode".into(), Value::from(mode.as_str()));
+
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            Some(&gql_params),
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let text = format!(
+            "GraphRAG search for '{}': {} results\n{data}",
+            p.query, result.row_count
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 /// Produce a syntax hint based on common GQL parse error patterns.

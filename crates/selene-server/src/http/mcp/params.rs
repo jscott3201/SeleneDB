@@ -345,3 +345,19 @@ pub(crate) struct BuildCommunitiesParams {
     #[serde(default)]
     pub(crate) min_community_size: Option<usize>,
 }
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct GraphRagSearchParams {
+    /// Natural language query text.
+    pub(crate) query: String,
+    /// Number of vector search results (default: 10).
+    #[serde(default)]
+    pub(crate) k: Option<i64>,
+    /// BFS expansion depth (default: 2).
+    #[serde(default)]
+    pub(crate) max_hops: Option<i64>,
+    /// Search mode: "local" (default), "global", or "hybrid".
+    #[serde(default)]
+    pub(crate) mode: Option<String>,
+}
