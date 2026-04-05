@@ -322,15 +322,28 @@ fn execute_factorized_core(
             }
         }
 
-        // Check row limit on the factorized chunk without materializing.
-        // fc.active_len() returns the deepest level's active count, which
-        // equals the flattened row count (each leaf traces one ancestor path).
+        // Check row and memory limits on the factorized chunk without
+        // materializing. active_len() returns the deepest level's active
+        // count, which equals the flattened row count. The memory estimate
+        // uses the total column count across all levels as a proxy for the
+        // flattened width (conservative: matches check_chunk_limit's model).
         if let Some(ref fc) = chunk {
             let active = fc.active_len();
             let limit = super::max_bindings();
             if active > limit {
                 return Err(GqlError::ResourcesExhausted {
                     message: format!("query produced {active} rows (max {limit})"),
+                });
+            }
+            let total_cols: usize = fc.levels.iter().map(|l| l.columns.len()).sum();
+            let estimated_bytes = active * total_cols * 8;
+            if estimated_bytes > super::MAX_QUERY_BYTES {
+                return Err(GqlError::ResourcesExhausted {
+                    message: format!(
+                        "query memory estimate {:.1} MB exceeds budget {:.1} MB ({active} rows, {total_cols} cols)",
+                        estimated_bytes as f64 / (1024.0 * 1024.0),
+                        super::MAX_QUERY_BYTES as f64 / (1024.0 * 1024.0),
+                    ),
                 });
             }
         }

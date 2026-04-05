@@ -895,7 +895,7 @@ fn execute_plan_inner(
 }
 
 /// Maximum memory budget for a single query's bindings (in bytes).
-const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024; // 64 MB
+pub(super) const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024; // 64 MB
 /// Default maximum number of bindings.
 const DEFAULT_MAX_BINDINGS: usize = 100_000;
 
