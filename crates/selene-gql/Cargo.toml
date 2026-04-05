@@ -11,6 +11,7 @@ description = "ISO GQL (ISO/IEC 39075) query engine for Selene"
 default = ["rayon"]
 rayon = ["dep:rayon"]
 vector = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+ai = ["vector"]
 
 [dependencies]
 selene-core.workspace = true
