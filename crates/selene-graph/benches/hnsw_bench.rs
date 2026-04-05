@@ -34,8 +34,9 @@ fn bench_hnsw_build(c: &mut Criterion) {
     let params = HnswParams::default();
 
     for &n in &[1_000usize, 10_000] {
-        // HNSW build is O(n * M * ef_construction); 10K takes ~25s per iteration.
-        // Skip 10K in quick/full profiles to stay within time budget.
+        // HNSW build is O(n * M * ef_construction); the 10K case is the expensive
+        // benchmark in this group, so skip it in quick/full profiles to stay within
+        // the overall benchmark time budget.
         if BenchProfile::should_skip_expensive(n as u64, 10_000) {
             continue;
         }
