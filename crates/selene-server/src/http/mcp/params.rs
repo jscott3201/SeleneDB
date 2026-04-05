@@ -329,3 +329,9 @@ pub(crate) struct SparqlQueryParams {
     /// SPARQL query to execute against the graph.
     pub(crate) query: String,
 }
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ParseCheckParams {
+    /// The GQL query to parse and check.
+    pub(crate) query: String,
+}

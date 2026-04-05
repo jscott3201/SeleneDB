@@ -1224,4 +1224,75 @@ impl SeleneTools {
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
         Ok(CallToolResult::success(vec![Content::text(data)]))
     }
+
+    #[tool(
+        name = "gql_parse_check",
+        description = "Parse a GQL query and return structured errors if it fails. Returns {valid: true} on success, or {valid: false, errors: [{message, suggestion}]} on failure. Use to validate GQL before execution or to get repair hints."
+    )]
+    async fn gql_parse_check(
+        &self,
+        params: Parameters<ParseCheckParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = &params.0.query;
+        match selene_gql::parse_statement(query) {
+            Ok(_) => {
+                let result = serde_json::json!({
+                    "valid": true,
+                    "query": query,
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                )]))
+            }
+            Err(e) => {
+                let message = e.to_string();
+                let suggestion = parse_error_suggestion(&message);
+                let result = serde_json::json!({
+                    "valid": false,
+                    "query": query,
+                    "errors": [{
+                        "message": message,
+                        "suggestion": suggestion,
+                    }],
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                )]))
+            }
+        }
+    }
+}
+
+/// Produce a syntax hint based on common GQL parse error patterns.
+fn parse_error_suggestion(message: &str) -> String {
+    let msg = message.to_lowercase();
+    if msg.contains("expected") && msg.contains("match") {
+        return "Queries typically start with MATCH, INSERT, MERGE, DELETE, or CALL.".to_string();
+    }
+    if msg.contains("filter") {
+        return "FILTER clauses use: FILTER n.property operator value. \
+                Operators: =, <>, <, >, <=, >=, AND, OR, NOT."
+            .to_string();
+    }
+    if msg.contains("return") {
+        return "RETURN clause syntax: RETURN expr AS alias. \
+                Use commas to separate multiple return items."
+            .to_string();
+    }
+    if msg.contains("insert") {
+        return "INSERT syntax: INSERT (:Label {prop: value}) or \
+                INSERT (src)-[:EDGE_TYPE]->(tgt)."
+            .to_string();
+    }
+    if msg.contains("set") {
+        return "SET syntax: SET n.property = value. \
+                Separate multiple assignments with commas."
+            .to_string();
+    }
+    if msg.contains("call") || msg.contains("yield") {
+        return "Procedure syntax: CALL proc.name(args) YIELD col1, col2 RETURN col1.".to_string();
+    }
+    "Check GQL syntax: queries use MATCH/FILTER/RETURN for reads, \
+     INSERT/MERGE/SET/DELETE for writes, and CALL/YIELD for procedures."
+        .to_string()
 }
