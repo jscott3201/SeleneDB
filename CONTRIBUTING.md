@@ -110,6 +110,18 @@ Key design decisions:
 The `selene-testing` crate provides test factories for nodes, edges, schemas, and a
 scalable reference building model for deterministic benchmarking.
 
+## Utility Scripts
+
+The `scripts/` directory contains development utilities:
+
+| Script | Purpose |
+|--------|---------|
+| `bench-compare.sh` | Save and compare Criterion benchmark baselines |
+| `bench-docker.sh` | HTTP throughput benchmarking against a running container |
+| `fetch-model.sh` | Download the MiniLM-L6-v2 embedding model from HuggingFace |
+| `memory-profile.sh` | Measure RSS at various graph scales (cross-platform) |
+| `pgo-build.sh` | Two-pass Profile-Guided Optimization build |
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
