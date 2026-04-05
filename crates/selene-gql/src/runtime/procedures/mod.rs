@@ -19,6 +19,7 @@ pub mod graph;
 pub mod history;
 pub mod rdf;
 pub mod schema_audit;
+pub mod schema_dump;
 pub mod search;
 pub mod ts;
 pub mod ts_aggregate;
@@ -161,6 +162,8 @@ impl ProcedureRegistry {
         // Schema audit
         reg.register(Arc::new(schema_audit::SchemaAudit));
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
+        // Schema dump (LLM-friendly)
+        reg.register(Arc::new(schema_dump::SchemaDump));
         reg
     }
 
