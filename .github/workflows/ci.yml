@@ -56,6 +56,8 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Security audit
         run: cargo audit
+      - name: License and advisory check
+        uses: EmbarkStudios/cargo-deny-action@v2
 
   # Snapshot: build and push main-<sha> multi-arch image on every green
   # main push. Each platform builds natively (no QEMU), then a merge job
