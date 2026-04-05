@@ -301,7 +301,7 @@
 | build | 1.31 s |
 | search top-10 | 140 us |
 
-> 10K HNSW build is skipped in quick/full profiles (~25s per iteration). Search at 10K: 241 us.
+> 10K HNSW build is currently skipped in this benchmark run (~25s per iteration), rather than being profile-dependent. Search at 10K: 241 us.
 
 ---
 
