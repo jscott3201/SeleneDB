@@ -1475,10 +1475,13 @@ impl SeleneTools {
 
     // ── Agent Memory Tools (feature-gated: ai) ─────────────────────
 
+    /// Concurrent calls on the same namespace may briefly exceed max_memories
+    /// by the number of in-flight calls, because the count read and the
+    /// evict-then-insert write are not atomic.
     #[cfg(feature = "ai")]
     #[tool(
         name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-recently-used memory when the namespace reaches capacity (configurable via configure_memory)."
+        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory)."
     )]
     async fn remember(
         &self,
@@ -1559,7 +1562,8 @@ impl SeleneTools {
             let mut mem_params = HashMap::new();
             mem_params.insert("ns".into(), Value::from(namespace.as_str()));
             let mem_query = "MATCH (m:__Memory {namespace: $ns}) \
-                             RETURN id(m) AS nodeId, m.created_at AS created_at \
+                             RETURN id(m) AS nodeId, m.created_at AS created_at, \
+                             m.valid_until AS valid_until \
                              ORDER BY m.created_at ASC";
             let mem_result = ops::gql::execute_gql(
                 &self.state,
@@ -1575,19 +1579,38 @@ impl SeleneTools {
             let mem_rows: Vec<serde_json::Value> =
                 serde_json::from_str(&mem_str).unwrap_or_default();
 
-            let memories: Vec<(u64, i64)> = mem_rows
+            let now_ms_evict = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+
+            let memories: Vec<(u64, i64, i64)> = mem_rows
                 .iter()
                 .filter_map(|r| {
                     let nid = r.get("nodeId")?.as_u64()?;
                     let ca = r.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                    Some((nid, ca))
+                    let vu = r.get("valid_until").and_then(|v| v.as_i64()).unwrap_or(0);
+                    Some((nid, ca, vu))
                 })
                 .collect();
 
             if let Some(evict_id) = {
-                let mut counters = self.state.clock_counters.write();
-                let ns_counters = counters.entry(namespace.clone()).or_default();
-                find_eviction_candidate(&memories, ns_counters)
+                // Prefer evicting expired memories before running the clock sweep
+                let expired_candidate = memories
+                    .iter()
+                    .filter(|&&(_, _, vu)| vu > 0 && vu < now_ms_evict)
+                    .min_by_key(|&&(_, ca, _)| ca)
+                    .map(|&(nid, _, _)| nid);
+
+                if let Some(eid) = expired_candidate {
+                    Some(eid)
+                } else {
+                    let clock_mems: Vec<(u64, i64)> =
+                        memories.iter().map(|&(nid, ca, _)| (nid, ca)).collect();
+                    let mut counters = self.state.clock_counters.write();
+                    let ns_counters = counters.entry(namespace.clone()).or_default();
+                    find_eviction_candidate(&clock_mems, ns_counters)
+                }
             } {
                 // Delete the eviction candidate
                 let mut del_params = HashMap::new();
@@ -1595,7 +1618,7 @@ impl SeleneTools {
                 del_params.insert("ns".into(), Value::from(namespace.as_str()));
                 let del_query = "MATCH (m:__Memory {namespace: $ns}) \
                                  FILTER id(m) = $evict_id \
-                                 DELETE m";
+                                 DETACH DELETE m";
                 let st = Arc::clone(&self.state);
                 let auth2 = auth.clone();
                 self.submit_mut(move || {
@@ -1611,10 +1634,13 @@ impl SeleneTools {
                 })
                 .await?;
 
-                // Remove evicted node from counters
+                // Remove evicted node from counters; drop empty namespace entry
                 let mut counters = self.state.clock_counters.write();
                 if let Some(ns_counters) = counters.get_mut(&namespace) {
                     ns_counters.remove(&evict_id);
+                    if ns_counters.is_empty() {
+                        counters.remove(&namespace);
+                    }
                 }
             }
         }
@@ -1678,7 +1704,11 @@ impl SeleneTools {
             .first()
             .and_then(|r| r.get("nodeId"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+            .ok_or_else(|| {
+                op_err(ops::OpError::Internal(
+                    "failed to get node ID from INSERT result".into(),
+                ))
+            })?;
 
         // 6. If entities provided: MERGE __Entity nodes and create __MENTIONS edges
         if !entities.is_empty() {
@@ -1831,7 +1861,7 @@ impl SeleneTools {
             del_params.insert("ns".into(), Value::from(namespace.as_str()));
             let del_query = "MATCH (m:__Memory {namespace: $ns}) \
                              FILTER id(m) = $nid \
-                             DELETE m";
+                             DETACH DELETE m";
 
             let st = Arc::clone(&self.state);
             let auth2 = auth.clone();
@@ -1889,7 +1919,7 @@ impl SeleneTools {
             // Delete matching nodes
             let del_query = "MATCH (m:__Memory {namespace: $ns}) \
                              FILTER m.content CONTAINS $q \
-                             DELETE m";
+                             DETACH DELETE m";
             let st = Arc::clone(&self.state);
             let auth2 = auth.clone();
             self.submit_mut(move || {
@@ -1928,7 +1958,7 @@ impl SeleneTools {
     #[cfg(feature = "ai")]
     #[tool(
         name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy. Settings persist in a __MemoryConfig node."
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited) and auto-expiry (default_ttl_ms). Settings persist in a __MemoryConfig node."
     )]
     async fn configure_memory(
         &self,
@@ -1939,31 +1969,17 @@ impl SeleneTools {
         let p = params.0;
         let namespace = p.namespace;
 
-        // Build SET clauses dynamically based on provided fields
-        let mut set_parts: Vec<String> = Vec::new();
         let mut gql_params = HashMap::new();
         gql_params.insert("ns".into(), Value::from(namespace.as_str()));
+        gql_params.insert("max".into(), p.max_memories.map_or(Value::Null, Value::Int));
+        gql_params.insert(
+            "ttl".into(),
+            p.default_ttl_ms.map_or(Value::Null, Value::Int),
+        );
 
-        if let Some(max_mem) = p.max_memories {
-            set_parts.push("c.max_memories = $max_mem".to_string());
-            gql_params.insert("max_mem".into(), Value::Int(max_mem));
-        }
-        if let Some(ttl) = p.default_ttl_ms {
-            set_parts.push("c.default_ttl_ms = $ttl".to_string());
-            gql_params.insert("ttl".into(), Value::Int(ttl));
-        }
-        if let Some(policy) = p.eviction_policy {
-            set_parts.push("c.eviction_policy = $policy".to_string());
-            gql_params.insert("policy".into(), Value::from(policy.as_str()));
-        }
-
-        let set_clause = if set_parts.is_empty() {
-            String::new()
-        } else {
-            format!(" SET {}", set_parts.join(", "))
-        };
-
-        let query = format!("MERGE (c:__MemoryConfig {{namespace: $ns}}){set_clause}");
+        let query = "MERGE (c:__MemoryConfig {namespace: $ns}) \
+                     SET c.max_memories = COALESCE($max, c.max_memories), \
+                     c.default_ttl_ms = COALESCE($ttl, c.default_ttl_ms)";
 
         let st = Arc::clone(&self.state);
         let auth2 = auth.clone();
@@ -1971,7 +1987,7 @@ impl SeleneTools {
             ops::gql::execute_gql(
                 &st,
                 &auth2,
-                &query,
+                query,
                 Some(&gql_params),
                 false,
                 false,
@@ -2143,6 +2159,11 @@ fn find_eviction_candidate(
         return None;
     }
 
+    // Prune counter entries for nodes no longer in the memories list.
+    // This prevents a slow leak when memories are deleted outside the forget tool.
+    let live_ids: std::collections::HashSet<u64> = memories.iter().map(|&(nid, _)| nid).collect();
+    counters.retain(|nid, _| live_ids.contains(nid));
+
     // First pass: find a node with counter == 0, decrementing as we go
     for &(node_id, _created_at) in memories {
         let counter = counters.entry(node_id).or_insert(0);
@@ -2311,27 +2332,54 @@ mod memory_eviction_tests {
     }
 
     #[test]
-    fn configure_sets_policy() {
-        // Verify configuration logic (unit test of the SET clause builder)
-        let mut set_parts: Vec<String> = Vec::new();
-        let max_memories = Some(500i64);
-        let default_ttl_ms = Some(3_600_000_i64);
-        let eviction_policy = Some("clock".to_string());
+    fn clock_frequently_recalled_survives_multiple_rounds() {
+        // A node with counter 3 (popular) should survive eviction rounds
+        // as long as there are colder candidates. When alone, it is eventually evicted.
+        let memories = vec![(10, 100), (20, 200)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 3u8);
+        counters.insert(20, 0);
 
-        if max_memories.is_some() {
-            set_parts.push("c.max_memories = $max_mem".to_string());
-        }
-        if default_ttl_ms.is_some() {
-            set_parts.push("c.default_ttl_ms = $ttl".to_string());
-        }
-        if eviction_policy.is_some() {
-            set_parts.push("c.eviction_policy = $policy".to_string());
-        }
+        // Round 1: node 20 has counter 0, evicted immediately
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(evicted, Some(20), "round 1: cold node evicted");
 
-        let set_clause = format!(" SET {}", set_parts.join(", "));
-        assert!(set_clause.contains("max_memories"));
-        assert!(set_clause.contains("default_ttl_ms"));
-        assert!(set_clause.contains("eviction_policy"));
+        // Simulate that node 20 was removed and a new cold node 30 arrives
+        let memories = vec![(10, 100), (30, 300)];
+        counters.remove(&20);
+        counters.insert(30, 0);
+
+        // Round 2: node 30 has counter 0, evicted; node 10 still at 3 (untouched)
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(
+            evicted,
+            Some(30),
+            "round 2: cold node evicted, popular survives"
+        );
+
+        // Round 3: only node 10 remains, add new cold node 40
+        let memories = vec![(10, 100), (40, 400)];
+        counters.remove(&30);
+        counters.insert(40, 0);
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(
+            evicted,
+            Some(40),
+            "round 3: cold node evicted, popular survives"
+        );
+
+        // Round 4: only node 10 left, counter is still 3 from recall
+        // Each solo round decrements: 3 -> 2, safety net picks it
+        let memories = vec![(10, 100)];
+        counters.remove(&40);
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(
+            evicted,
+            Some(10),
+            "round 4: popular node finally evicted when alone"
+        );
     }
 
     #[test]
