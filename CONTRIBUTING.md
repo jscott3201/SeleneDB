@@ -113,4 +113,5 @@ scalable reference building model for deterministic benchmarking.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-[MIT License](LICENSE).
+[MIT License](LICENSE-MIT) OR [Apache License 2.0](LICENSE-APACHE), at the
+user's option.

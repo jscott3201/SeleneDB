@@ -65,7 +65,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: |
             org.opencontainers.image.description=Lightweight in-memory property graph runtime for IoT and smart buildings
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
 
       - name: Build and push by digest
         id: build
