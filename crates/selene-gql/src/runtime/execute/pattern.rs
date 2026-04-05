@@ -117,15 +117,16 @@ pub(super) fn execute_pattern_ops_as_chunk(
 /// IntermediateFilter + DifferentEdgesFilter. Falls back to flat for
 /// VarExpand, Join, Optional, CycleJoin (these require full row context).
 fn is_factorizable(ops: &[PatternOp]) -> bool {
-    ops.iter().all(|op| {
-        matches!(
-            op,
-            PatternOp::LabelScan { .. }
-                | PatternOp::Expand { .. }
-                | PatternOp::IntermediateFilter { .. }
-                | PatternOp::DifferentEdgesFilter { .. }
-        )
-    })
+    !ops.is_empty()
+        && ops.iter().all(|op| {
+            matches!(
+                op,
+                PatternOp::LabelScan { .. }
+                    | PatternOp::Expand { .. }
+                    | PatternOp::IntermediateFilter { .. }
+                    | PatternOp::DifferentEdgesFilter { .. }
+            )
+        })
 }
 
 /// Execute pattern operations as a factorized chunk.

@@ -196,7 +196,11 @@ fn bench_flush_to_parquet(c: &mut Criterion) {
 fn bench_hot_drain_before(c: &mut Criterion) {
     let mut group = c.benchmark_group("hot_drain_before");
     for &scale in &profile_scales() {
-        let n = scale.min(10_000) as i64;
+        // drain_before is O(n) scan; skip scales above 10K to keep iteration time sane
+        if scale > 10_000 {
+            continue;
+        }
+        let n = scale as i64;
         group.throughput(Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::from_parameter(n), |b| {
             b.iter_with_setup(
