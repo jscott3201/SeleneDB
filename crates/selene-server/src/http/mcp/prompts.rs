@@ -8,12 +8,20 @@ use rmcp::{prompt, prompt_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::SeleneTools;
+use super::{SeleneTools, mcp_auth};
+use crate::ops;
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct QueryHelperParams {
     /// Natural language description of what you want to query.
     /// Example: "find all sensors with temperature above 72"
+    pub intent: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct Text2GqlParams {
+    /// Natural language description of the desired query.
+    /// Example: "find all rooms with temperature above 72 and list their floor"
     pub intent: String,
 }
 
@@ -188,5 +196,62 @@ impl SeleneTools {
             ),
             PromptMessage::new_text(PromptMessageRole::Assistant, guide.to_string()),
         ]
+    }
+
+    #[prompt(
+        name = "text2gql",
+        description = "Convert natural language to a GQL query. Provides the graph schema, GQL syntax reference, and examples so the agent can produce an accurate query."
+    )]
+    async fn text2gql(&self, params: Parameters<Text2GqlParams>) -> Vec<PromptMessage> {
+        let intent = &params.0.intent;
+
+        // Get schema dump via the procedure for a compact, LLM-friendly overview.
+        let schema_text = {
+            let Ok(auth) = mcp_auth(self) else {
+                return vec![PromptMessage::new_text(
+                    PromptMessageRole::Assistant,
+                    "Error: could not resolve auth context for schema lookup.",
+                )];
+            };
+            let query = "CALL graph.schemaDump() YIELD schema RETURN schema";
+            match ops::gql::execute_gql(
+                &self.state,
+                &auth,
+                query,
+                None,
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            ) {
+                Ok(result) => result.data_json.unwrap_or_else(|| "[]".to_string()),
+                Err(_) => "(schema unavailable)".to_string(),
+            }
+        };
+
+        let examples = super::resources::GQL_EXAMPLES;
+
+        vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            format!(
+                "Write a GQL query for: {intent}\n\n\
+                 ## Graph Schema\n{schema_text}\n\n\
+                 ## GQL Syntax Reference\n\
+                 - Pattern matching: MATCH (n:Label)-[:EDGE_TYPE]->(m:Label)\n\
+                 - Filtering: FILTER n.property > value\n\
+                 - Return: RETURN n.prop AS alias\n\
+                 - Aggregation: RETURN count(*), avg(n.value), sum(n.value)\n\
+                 - Group by: implied by non-aggregate columns in RETURN\n\
+                 - Variable-length paths: MATCH (a)-[:type]->{{1,3}}(b)\n\
+                 - Insert: INSERT (:Label {{prop: value}})\n\
+                 - Merge: MERGE (:Label {{prop: value}})\n\
+                 - Set: MATCH (n) FILTER ... SET n.prop = value\n\
+                 - Delete: MATCH (n) FILTER ... DELETE n\n\
+                 - Detach delete: MATCH (n) FILTER ... DETACH DELETE n\n\
+                 - Procedures: CALL proc.name(args) YIELD col RETURN col\n\
+                 - Parameters: use $param for safe binding\n\n\
+                 ## Examples\n{examples}\n\n\
+                 Return only the GQL query, no explanation."
+            ),
+        )]
     }
 }

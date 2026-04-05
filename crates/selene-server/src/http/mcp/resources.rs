@@ -43,6 +43,15 @@ impl SeleneTools {
                     .with_description("Server metadata: version, profile, dev mode, feature flags")
                     .with_mime_type("application/json"),
             },
+            Annotated {
+                annotations: None,
+                raw: RawResource::new("selene://gql-examples", "gql-examples")
+                    .with_description(
+                        "Curated GQL query examples covering MATCH, INSERT, MERGE, \
+                         aggregation, procedures, and parameterized queries",
+                    )
+                    .with_mime_type("text/plain"),
+            },
         ];
 
         Ok(ListResourcesResult {
@@ -81,50 +90,69 @@ impl SeleneTools {
         let uri = &request.uri;
         let auth = mcp_auth(self)?;
 
-        let content = match uri.as_str() {
+        let (content, mime) = match uri.as_str() {
             "selene://health" => {
                 let resp = ops::health::health(&self.state);
-                serde_json::to_string_pretty(&resp).unwrap_or_default()
+                (
+                    serde_json::to_string_pretty(&resp).unwrap_or_default(),
+                    "application/json",
+                )
             }
             "selene://stats" => {
                 let stats = ops::graph_stats::graph_stats(&self.state, &auth);
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "node_count": stats.node_count,
-                    "edge_count": stats.edge_count,
-                    "node_labels": stats.node_labels,
-                    "edge_labels": stats.edge_labels,
-                }))
-                .unwrap_or_default()
+                (
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "node_count": stats.node_count,
+                        "edge_count": stats.edge_count,
+                        "node_labels": stats.node_labels,
+                        "edge_labels": stats.edge_labels,
+                    }))
+                    .unwrap_or_default(),
+                    "application/json",
+                )
             }
             "selene://schemas" => {
                 let node_schemas =
                     ops::schema::list_node_schemas(&self.state, &auth).map_err(op_err)?;
                 let edge_schemas =
                     ops::schema::list_edge_schemas(&self.state, &auth).map_err(op_err)?;
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "node_schemas": node_schemas.iter().map(|s| &*s.label).collect::<Vec<_>>(),
-                    "edge_schemas": edge_schemas.iter().map(|s| &*s.label).collect::<Vec<_>>(),
-                }))
-                .unwrap_or_default()
+                (
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "node_schemas": node_schemas.iter().map(|s| &*s.label).collect::<Vec<_>>(),
+                        "edge_schemas": edge_schemas.iter().map(|s| &*s.label).collect::<Vec<_>>(),
+                    }))
+                    .unwrap_or_default(),
+                    "application/json",
+                )
             }
             "selene://info" => {
                 let info = ops::info::server_info(&self.state);
-                serde_json::to_string_pretty(&info).unwrap_or_default()
+                (
+                    serde_json::to_string_pretty(&info).unwrap_or_default(),
+                    "application/json",
+                )
             }
+            "selene://gql-examples" => (GQL_EXAMPLES.to_string(), "text/plain"),
             _ if uri.starts_with("selene://schemas/") => {
                 let label = &uri["selene://schemas/".len()..];
                 if let Ok(schema) = ops::schema::get_node_schema(&self.state, &auth, label) {
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "type": "node",
-                        "schema": schema,
-                    }))
-                    .unwrap_or_default()
+                    (
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "type": "node",
+                            "schema": schema,
+                        }))
+                        .unwrap_or_default(),
+                        "application/json",
+                    )
                 } else if let Ok(schema) = ops::schema::get_edge_schema(&self.state, &auth, label) {
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "type": "edge",
-                        "schema": schema,
-                    }))
-                    .unwrap_or_default()
+                    (
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "type": "edge",
+                            "schema": schema,
+                        }))
+                        .unwrap_or_default(),
+                        "application/json",
+                    )
                 } else {
                     return Err(McpError {
                         code: rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -143,7 +171,98 @@ impl SeleneTools {
         };
 
         Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(content, uri.clone()).with_mime_type("application/json"),
+            ResourceContents::text(content, uri.clone()).with_mime_type(mime),
         ]))
     }
 }
+
+/// Curated GQL examples for the `selene://gql-examples` resource.
+/// Also used by the `text2gql` prompt.
+pub(super) const GQL_EXAMPLES: &str = "\
+# Selene GQL Examples
+
+## MATCH patterns
+
+# Single node by label
+MATCH (s:sensor) RETURN s.name AS name, s.temp AS temp
+
+# Traversal (one hop)
+MATCH (b:building)-[:contains]->(f:floor) RETURN b.name AS building, f.name AS floor
+
+# Multi-hop traversal
+MATCH (b:building)-[:contains]->(f:floor)-[:contains]->(r:room) \
+RETURN b.name AS building, f.name AS floor, r.name AS room
+
+# Variable-length path (1 to 3 hops)
+MATCH (a)-[:contains]->{1,3}(b) RETURN a.name AS ancestor, b.name AS descendant
+
+# Filtering
+MATCH (s:sensor) FILTER s.temp > 72.0 RETURN s.name AS name, s.temp AS temp
+
+# Multiple filters
+MATCH (s:sensor) FILTER s.temp > 68.0 AND s.status = 'active' RETURN s.name AS name
+
+# Optional match
+OPTIONAL MATCH (s:sensor)-[:monitors]->(e:equipment) RETURN s.name AS sensor, e.name AS equipment
+
+## Aggregation
+
+# Count by label
+MATCH (n) RETURN DISTINCT labels(n) AS labels, count(*) AS count
+
+# Average value
+MATCH (s:sensor) RETURN avg(s.temp) AS avg_temp
+
+# Sum with grouping
+MATCH (f:floor)-[:contains]->(r:room) RETURN f.name AS floor, count(r) AS room_count
+
+# Multiple aggregates
+MATCH (s:sensor) RETURN min(s.temp) AS min_temp, max(s.temp) AS max_temp, avg(s.temp) AS avg_temp
+
+## Write patterns
+
+# Insert a node
+INSERT (:sensor {name: 'TempSensor1', temp: 72.5, status: 'active'})
+
+# Insert an edge
+MATCH (s:sensor), (r:room) FILTER s.name = 'TempSensor1' AND r.name = 'Room101' \
+INSERT (r)-[:contains]->(s)
+
+# Merge (create if not exists)
+MERGE (:building {name: 'Main Building'})
+
+# Set properties
+MATCH (s:sensor) FILTER s.name = 'TempSensor1' SET s.temp = 73.0, s.updated = TRUE
+
+# Delete a node
+MATCH (s:sensor) FILTER s.name = 'OldSensor' DELETE s
+
+# Delete with detach (removes edges too)
+MATCH (s:sensor) FILTER s.name = 'OldSensor' DETACH DELETE s
+
+## Procedures
+
+# Schema dump (LLM-friendly overview)
+CALL graph.schemaDump() YIELD schema RETURN schema
+
+# Latest time-series value
+CALL ts.latest($entityId, $property) YIELD value, timestamp RETURN value, timestamp
+
+# Vector search (requires vector feature)
+CALL graph.vectorSearch($queryVector, $k) YIELD nodeId, score RETURN nodeId, score
+
+# Semantic search by text (requires vector feature)
+CALL graph.semanticSearch($queryText, $k) YIELD nodeId, score RETURN nodeId, score
+
+## Parameterized queries
+
+# Use $param syntax for safe parameter binding
+MATCH (s:sensor) FILTER s.name = $name RETURN s.temp AS temp
+# Parameters: {\"name\": \"TempSensor1\"}
+
+MATCH (n) FILTER id(n) = $nodeId RETURN n
+# Parameters: {\"nodeId\": 42}
+
+INSERT (:sensor {name: $name, temp: $temp})
+# Parameters: {\"name\": \"NewSensor\", \"temp\": 72.5}
+";
