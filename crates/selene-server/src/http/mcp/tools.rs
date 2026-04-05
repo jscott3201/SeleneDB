@@ -1261,6 +1261,86 @@ impl SeleneTools {
             }
         }
     }
+
+    // ── GraphRAG AI Tools (feature-gated: ai) ───────────────────────
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "build_communities",
+        description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). Use enrich_communities afterwards to add embeddings for global search mode."
+    )]
+    async fn build_communities(
+        &self,
+        params: Parameters<BuildCommunitiesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let min_size = params.0.min_community_size.unwrap_or(2);
+        let start = std::time::Instant::now();
+
+        // 1. Build projection excluding __ labels and run Louvain
+        let communities = self
+            .state
+            .graph
+            .read(|graph| build_community_data(graph, min_size));
+
+        if communities.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No communities found (graph may be empty or fully disconnected).",
+            )]));
+        }
+
+        // 2. MERGE __CommunitySummary nodes via parameterized GQL
+        let community_count = communities.len();
+        let mut total_nodes_covered = 0usize;
+        for community in &communities {
+            total_nodes_covered += community.node_count;
+            let mut params_map = HashMap::new();
+            params_map.insert("cid".into(), Value::UInt(community.community_id));
+            params_map.insert(
+                "label_dist".into(),
+                Value::from(community.label_distribution.as_str()),
+            );
+            params_map.insert(
+                "key_entities".into(),
+                Value::from(community.key_entities.as_str()),
+            );
+            params_map.insert("node_count".into(), Value::Int(community.node_count as i64));
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            params_map.insert("updated_at".into(), Value::Int(now_ms));
+
+            let query = "MERGE (c:__CommunitySummary {community_id: $cid}) \
+                         SET c.label_distribution = $label_dist, \
+                         c.key_entities = $key_entities, \
+                         c.node_count = $node_count, \
+                         c.updated_at = $updated_at";
+
+            let st = Arc::clone(&self.state);
+            let auth2 = auth.clone();
+            self.submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    query,
+                    Some(&params_map),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+            })
+            .await?;
+        }
+
+        let elapsed = start.elapsed();
+        let text = format!(
+            "Built {community_count} communities covering {total_nodes_covered} nodes in {:.1}s",
+            elapsed.as_secs_f64()
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 /// Produce a syntax hint based on common GQL parse error patterns.
@@ -1295,4 +1375,107 @@ fn parse_error_suggestion(message: &str) -> String {
     "Check GQL syntax: queries use MATCH/FILTER/RETURN for reads, \
      INSERT/MERGE/SET/DELETE for writes, and CALL/YIELD for procedures."
         .to_string()
+}
+
+// ── GraphRAG community detection helpers ────────────────────────────
+
+/// Structural profile for a detected community.
+#[cfg(feature = "ai")]
+struct CommunityData {
+    community_id: u64,
+    label_distribution: String,
+    key_entities: String,
+    node_count: usize,
+}
+
+/// Build community data from the graph using Louvain detection.
+///
+/// Creates a projection excluding system labels (__ prefix), runs Louvain,
+/// groups results by community, and computes structural profiles.
+#[cfg(feature = "ai")]
+fn build_community_data(graph: &selene_graph::SeleneGraph, min_size: usize) -> Vec<CommunityData> {
+    use std::collections::HashMap as StdHashMap;
+
+    // Build a full-graph projection, but we want to exclude __ labels.
+    // Use ProjectionConfig with empty filters (includes all), then we filter
+    // the Louvain results to skip __ nodes.
+    let config = selene_algorithms::ProjectionConfig {
+        name: "__build_communities".to_string(),
+        node_labels: vec![],
+        edge_labels: vec![],
+        weight_property: None,
+    };
+    let proj = selene_algorithms::GraphProjection::build(graph, &config, None);
+    let louvain_result = selene_algorithms::louvain(&proj);
+
+    // Group nodes by community, excluding __ label nodes
+    let mut community_nodes: StdHashMap<u64, Vec<selene_core::NodeId>> = StdHashMap::new();
+    for (nid, cid, _level) in &louvain_result {
+        // Skip nodes with only system labels
+        if let Some(node) = graph.get_node(*nid) {
+            let has_user_label = node.labels.iter().any(|l| !l.as_str().starts_with("__"));
+            if has_user_label {
+                community_nodes.entry(*cid).or_default().push(*nid);
+            }
+        }
+    }
+
+    let name_key = selene_core::IStr::new("name");
+    let desc_key = selene_core::IStr::new("description");
+
+    let mut result = Vec::new();
+    for (cid, members) in &community_nodes {
+        if members.len() < min_size {
+            continue;
+        }
+
+        // Label distribution
+        let mut label_counts: StdHashMap<&str, usize> = StdHashMap::new();
+        for &nid in members {
+            if let Some(node) = graph.get_node(nid) {
+                for label in node.labels.iter() {
+                    if !label.as_str().starts_with("__") {
+                        *label_counts.entry(label.as_str()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut label_pairs: Vec<_> = label_counts.into_iter().collect();
+        label_pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let label_dist = label_pairs
+            .iter()
+            .map(|(l, c)| format!("{l}:{c}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // Key entities: top-5 nodes by name or description
+        let mut entity_names: Vec<String> = Vec::new();
+        for &nid in members {
+            if entity_names.len() >= 5 {
+                break;
+            }
+            if let Some(node) = graph.get_node(nid) {
+                if let Some(selene_core::Value::String(s)) = node.properties.get(name_key) {
+                    entity_names.push(s.to_string());
+                } else if let Some(selene_core::Value::InternedStr(s)) =
+                    node.properties.get(name_key)
+                {
+                    entity_names.push(s.as_str().to_string());
+                } else if let Some(selene_core::Value::String(s)) = node.properties.get(desc_key) {
+                    entity_names.push(s.to_string());
+                }
+            }
+        }
+        let key_entities = entity_names.join(", ");
+
+        result.push(CommunityData {
+            community_id: *cid,
+            label_distribution: label_dist,
+            key_entities,
+            node_count: members.len(),
+        });
+    }
+
+    result.sort_by(|a, b| b.node_count.cmp(&a.node_count));
+    result
 }

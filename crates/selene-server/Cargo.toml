@@ -19,6 +19,7 @@ path = "src/main.rs"
 selene-core.workspace = true
 selene-graph.workspace = true
 selene-gql.workspace = true
+selene-algorithms.workspace = true
 selene-ts.workspace = true
 selene-persist.workspace = true
 selene-wire.workspace = true

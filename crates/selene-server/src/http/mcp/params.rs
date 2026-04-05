@@ -335,3 +335,13 @@ pub(crate) struct ParseCheckParams {
     /// The GQL query to parse and check.
     pub(crate) query: String,
 }
+
+// ── AI / GraphRAG ────────────────────────────────────────────────────
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BuildCommunitiesParams {
+    /// Minimum community size to persist. Communities smaller than this are skipped. Default: 2.
+    #[serde(default)]
+    pub(crate) min_community_size: Option<usize>,
+}
