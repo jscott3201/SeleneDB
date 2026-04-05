@@ -39,21 +39,6 @@ pub(crate) fn bit_test(words: &[u64], idx: usize) -> bool {
     (words[idx / 64] >> (idx % 64)) & 1 != 0
 }
 
-/// Build a `RoaringBitmap` from a `Vec<u64>` alive mask.
-/// O(N/64) where N = max slot index. Uses word-at-a-time insertion.
-pub(crate) fn alive_to_roaring(words: &[u64]) -> roaring::RoaringBitmap {
-    let mut bitmap = roaring::RoaringBitmap::new();
-    for (word_idx, &word) in words.iter().enumerate() {
-        let mut w = word;
-        while w != 0 {
-            let bit = w.trailing_zeros() as usize;
-            bitmap.insert((word_idx * 64 + bit) as u32);
-            w &= w - 1;
-        }
-    }
-    bitmap
-}
-
 /// Iterator over set bits in a single u64 word, yielding raw indices
 /// (base + bit position within the word).
 pub(crate) struct BitIter {

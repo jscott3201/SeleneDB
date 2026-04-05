@@ -17,6 +17,54 @@ use crate::types::chunk::DataChunk;
 use crate::types::error::GqlError;
 use crate::types::value::GqlValue;
 
+/// Compare two column values directly without GqlValue intermediation.
+///
+/// For typed columns (Int64, UInt64, Float64, Utf8, Bool, NodeIds, EdgeIds),
+/// compares native values. Falls back to GqlValue for Values/Null columns.
+fn compare_column_direct(
+    col: &crate::types::chunk::Column,
+    a_idx: usize,
+    b_idx: usize,
+    term: &OrderTerm,
+) -> std::cmp::Ordering {
+    use crate::types::chunk::Column;
+
+    let a_null = col.is_null(a_idx);
+    let b_null = col.is_null(b_idx);
+
+    if a_null || b_null {
+        if a_null && b_null {
+            return std::cmp::Ordering::Equal;
+        }
+        let nulls_first = term.nulls_first.unwrap_or(term.descending);
+        let ord = if a_null {
+            if nulls_first {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        } else if nulls_first {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Less
+        };
+        return ord;
+    }
+
+    let ord = match col {
+        Column::Int64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::UInt64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Float64(arr) => arr.value(a_idx).total_cmp(&arr.value(b_idx)),
+        Column::Bool(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Utf8(arr) => arr.value(a_idx).cmp(arr.value(b_idx)),
+        Column::NodeIds(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::EdgeIds(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Values(v) => v[a_idx].sort_order(&v[b_idx]),
+        Column::Null(_) => std::cmp::Ordering::Equal,
+    };
+    if term.descending { ord.reverse() } else { ord }
+}
+
 /// Compare two values with NULL handling per GQL spec (NULLS FIRST/LAST).
 ///
 /// Default: NULLS LAST for ASC, NULLS FIRST for DESC.
@@ -188,6 +236,33 @@ pub(crate) fn execute_pipeline_op_chunk(
             Ok(chunk)
         }
 
+        // Simple RETURN: project columns without bridging through bindings.
+        // Handles the common case of RETURN expr1, expr2, ... with no
+        // GROUP BY, DISTINCT, HAVING, or RETURN *.
+        PipelineOp::Return {
+            projections,
+            group_by,
+            distinct,
+            having,
+            all,
+        } if !*all
+            && group_by.is_empty()
+            && !*distinct
+            && having.is_none()
+            && !projections.iter().any(|p| p.expr.is_aggregate()) =>
+        {
+            match try_return_chunk(&chunk, projections, ctx) {
+                Ok(projected) => Ok(projected),
+                Err(GqlError::Unsupported { .. }) => {
+                    // eval_vec unsupported for some projection; fall back
+                    let bindings = chunk.to_bindings();
+                    let result = execute_pipeline_op(op, bindings, ctx)?;
+                    Ok(bindings_to_chunk_generic(&result))
+                }
+                Err(err) => Err(err),
+            }
+        }
+
         // Stages that bridge through bindings.
         _ => {
             let bindings = chunk.to_bindings();
@@ -281,6 +356,50 @@ fn execute_let_chunk(
     Ok(chunk)
 }
 
+/// Native chunk RETURN for simple projections (no GROUP BY, DISTINCT, HAVING).
+///
+/// Evaluates each projection expression as a column via eval_vec, building
+/// a new DataChunk with only the projected columns. Avoids the
+/// chunk->binding->chunk round-trip that allocates ~5-8MB for 10K rows.
+fn try_return_chunk(
+    chunk: &DataChunk,
+    projections: &[PlannedProjection],
+    ctx: &EvalContext<'_>,
+) -> Result<DataChunk, GqlError> {
+    use crate::runtime::vector::eval_vec;
+    use crate::runtime::vector::gather::GraphPropertyGatherer;
+    use crate::types::chunk::{ChunkSchema, ColumnKind};
+
+    // Compact to dense so physical and logical indices align
+    let chunk = chunk.compact();
+    let len = chunk.len();
+
+    // Empty result: build a zero-row chunk with correct schema
+    if len == 0 {
+        let mut columns = smallvec::SmallVec::<[crate::types::chunk::Column; 8]>::new();
+        let mut schema = ChunkSchema::new();
+        for proj in projections {
+            schema.extend(proj.alias, ColumnKind::Null);
+            columns.push(crate::types::chunk::Column::Null(0));
+        }
+        return Ok(DataChunk::from_columns(columns, schema, 0));
+    }
+
+    let gatherer = GraphPropertyGatherer::new(ctx.graph);
+
+    let mut columns = smallvec::SmallVec::<[crate::types::chunk::Column; 8]>::new();
+    let mut schema = ChunkSchema::new();
+
+    for proj in projections {
+        let col = eval_vec(&proj.expr, &chunk, &gatherer, ctx)?;
+        let kind = col.kind();
+        schema.extend(proj.alias, kind);
+        columns.push(col);
+    }
+
+    Ok(DataChunk::from_columns(columns, schema, len))
+}
+
 /// Native chunk sort using eval_vec for sort key pre-evaluation.
 ///
 /// Evaluates sort keys as columns, compacts the chunk, sorts an index
@@ -288,7 +407,6 @@ fn execute_let_chunk(
 fn execute_sort_chunk(chunk: DataChunk, terms: &[OrderTerm], ctx: &EvalContext<'_>) -> DataChunk {
     use crate::runtime::vector::eval_vec;
     use crate::runtime::vector::gather::GraphPropertyGatherer;
-    use crate::types::chunk::column_to_gql_value_pub;
 
     if chunk.active_len() <= 1 {
         return chunk;
@@ -315,13 +433,11 @@ fn execute_sort_chunk(chunk: DataChunk, terms: &[OrderTerm], ctx: &EvalContext<'
         })
         .collect();
 
-    // Sort index array by comparing key column values
+    // Sort index array by comparing key column values directly (no GqlValue allocation)
     let mut indices: Vec<u32> = (0..len as u32).collect();
     indices.sort_by(|&ai, &bi| {
         for (ti, term) in terms.iter().enumerate() {
-            let a_val = column_to_gql_value_pub(&key_columns[ti], ai as usize);
-            let b_val = column_to_gql_value_pub(&key_columns[ti], bi as usize);
-            let ord = compare_with_nulls(&a_val, &b_val, term);
+            let ord = compare_column_direct(&key_columns[ti], ai as usize, bi as usize, term);
             if ord != std::cmp::Ordering::Equal {
                 return ord;
             }

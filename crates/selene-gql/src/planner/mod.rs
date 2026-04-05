@@ -9,11 +9,36 @@ pub mod optimize;
 pub mod plan;
 pub(crate) mod wco_rule;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use selene_core::IStr;
 use selene_graph::{EdgeStatistics, SeleneGraph};
+
+// Thread-local cache for EdgeStatistics keyed by graph identity + generation.
+// Avoids O(E) rebuild on every plan_query/plan_mutation call. The pointer
+// discriminator prevents false hits across distinct graph instances that
+// share the same generation (e.g., multiple fresh graphs at generation 0).
+type EdgeStatsEntry = ((usize, u64), Arc<EdgeStatistics>);
+thread_local! {
+    static EDGE_STATS_CACHE: RefCell<Option<EdgeStatsEntry>> = const { RefCell::new(None) };
+}
+
+fn cached_edge_statistics(graph: &SeleneGraph) -> Arc<EdgeStatistics> {
+    EDGE_STATS_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        let key = (std::ptr::from_ref(graph) as usize, graph.generation());
+        if let Some((cached_key, stats)) = c.as_ref()
+            && *cached_key == key
+        {
+            return Arc::clone(stats);
+        }
+        let stats = Arc::new(EdgeStatistics::build(graph));
+        *c = Some((key, Arc::clone(&stats)));
+        stats
+    })
+}
 
 use crate::ast::expr::Expr;
 use crate::ast::pattern::*;
@@ -93,7 +118,7 @@ pub fn plan_query(
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
     let mut bound_vars: HashSet<IStr> = HashSet::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
 
     for stmt in &pipeline.statements {
         match stmt {
@@ -178,7 +203,7 @@ pub fn plan_mutation(
 ) -> Result<ExecutionPlan, GqlError> {
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
 
     if let Some(query) = &mp.query {
         for stmt in &query.statements {
@@ -231,7 +256,7 @@ pub fn plan_match_public(
     ops: &mut Vec<PatternOp>,
     graph: &SeleneGraph,
 ) -> Result<(), GqlError> {
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
     plan_match(m, ops, graph, &edge_stats)
 }
 

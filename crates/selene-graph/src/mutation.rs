@@ -219,6 +219,7 @@ impl<'g> TrackedMutation<'g> {
         for &label in &node_labels {
             let index_key = (label, key);
             if let Some(idx) = self.graph.property_index.get_mut(&index_key) {
+                let idx = std::sync::Arc::make_mut(idx);
                 // Remove old value entry
                 if let Some(old_val) = &old {
                     idx.remove(old_val, id);
@@ -294,13 +295,13 @@ impl<'g> TrackedMutation<'g> {
                 if let Some(old_vals) = old_vals {
                     let refs: Vec<&Value> = old_vals.iter().collect();
                     if let Some(cidx) = self.graph.composite_indexes.get_mut(&idx_key) {
-                        cidx.remove(&refs, id);
+                        std::sync::Arc::make_mut(cidx).remove(&refs, id);
                     }
                 }
                 if let Some(new_vals) = new_vals {
                     let refs: Vec<&Value> = new_vals.iter().collect();
                     if let Some(cidx) = self.graph.composite_indexes.get_mut(&idx_key) {
-                        cidx.insert(&refs, id);
+                        std::sync::Arc::make_mut(cidx).insert(&refs, id);
                     }
                 }
             }
@@ -352,7 +353,7 @@ impl<'g> TrackedMutation<'g> {
                 for &label in &node_labels {
                     let index_key = (label, ikey);
                     if let Some(idx) = self.graph.property_index.get_mut(&index_key) {
-                        idx.remove(old_val, id);
+                        std::sync::Arc::make_mut(idx).remove(old_val, id);
                     }
                 }
 
@@ -389,7 +390,7 @@ impl<'g> TrackedMutation<'g> {
                     let idx_key = (*label, props.clone());
                     let refs: Vec<&Value> = vals.iter().collect();
                     if let Some(cidx) = self.graph.composite_indexes.get_mut(&idx_key) {
-                        cidx.remove(&refs, id);
+                        std::sync::Arc::make_mut(cidx).remove(&refs, id);
                     }
                 }
             }
@@ -900,6 +901,7 @@ impl<'g> TrackedMutation<'g> {
                     for &label in &node_labels {
                         let index_key = (label, key);
                         if let Some(idx) = self.graph.property_index.get_mut(&index_key) {
+                            let idx = std::sync::Arc::make_mut(idx);
                             if let Some(cur) = &current_value {
                                 idx.remove(cur, id);
                             }
@@ -974,13 +976,13 @@ impl<'g> TrackedMutation<'g> {
                             if let Some(fwd) = fwd_vals {
                                 let refs: Vec<&Value> = fwd.iter().collect();
                                 if let Some(cidx) = self.graph.composite_indexes.get_mut(&idx_key) {
-                                    cidx.remove(&refs, id);
+                                    std::sync::Arc::make_mut(cidx).remove(&refs, id);
                                 }
                             }
                             if let Some(old_v) = old_vals {
                                 let refs: Vec<&Value> = old_v.iter().collect();
                                 if let Some(cidx) = self.graph.composite_indexes.get_mut(&idx_key) {
-                                    cidx.insert(&refs, id);
+                                    std::sync::Arc::make_mut(cidx).insert(&refs, id);
                                 }
                             }
                         }
