@@ -19,6 +19,8 @@ pub mod graph;
 #[cfg(feature = "ai")]
 pub mod graphrag;
 pub mod history;
+#[cfg(feature = "ai")]
+pub mod memory;
 pub mod rdf;
 pub mod schema_audit;
 pub mod schema_dump;
@@ -169,6 +171,9 @@ impl ProcedureRegistry {
         // GraphRAG hybrid retriever (ai feature)
         #[cfg(feature = "ai")]
         reg.register(Arc::new(graphrag::GraphRagSearch));
+        // Agent memory recall (ai feature)
+        #[cfg(feature = "ai")]
+        reg.register(Arc::new(memory::MemoryRecall));
         reg
     }
 
