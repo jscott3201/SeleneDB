@@ -43,6 +43,11 @@ data/
 # Worktrees
 .worktrees/
 
+# Environment files
+.env
+.env.*
+.env.local
+
 # OS
 .DS_Store
 Thumbs.db
