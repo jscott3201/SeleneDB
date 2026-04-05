@@ -41,7 +41,7 @@ Optional feature flags (compile-time, all opt-in):
 
 ## Pull Request Process
 
-1. **Fork and branch** from `main`. Use a descriptive branch name
+1. **Fork and branch** from `dev`. Use a descriptive branch name
    (`fix/wal-recovery-timestamp`, `feat/graph-slice-pagination`).
 
 2. **Write tests first.** Selene enforces test coverage for new functionality. Add
@@ -60,9 +60,28 @@ Optional feature flags (compile-time, all opt-in):
 4. **Keep commits focused.** One logical change per commit. Use conventional commit
    messages: `fix:`, `feat:`, `refactor:`, `docs:`, `chore:`, `perf:`, `bench:`.
 
-5. **Open a PR** against `main`. Fill out the PR template. Link any related issues.
+5. **Open a PR** against `dev`. Fill out the PR template. Link any related issues.
 
 6. **Respond to review.** All PRs require review before merge.
+
+## Branch Model
+
+SeleneDB uses a three-tier branching model:
+
+- **`main`** -- Production releases only. Tagged releases (`vX.Y.Z`) are created
+  by merging `dev` into `main` and tagging.
+- **`dev`** -- Integration branch. All feature PRs target `dev`. CI runs on every
+  push and PR. Snapshot Docker images (`dev-<sha>`) are published to GHCR.
+- **Feature branches** -- Created from `dev`, merged back via PR. Name them
+  descriptively: `feat/`, `fix/`, `refactor/`, `docs/`, `chore/`.
+
+### Release flow
+
+1. Ensure `dev` is green and CHANGELOG.md is updated.
+2. Open a PR from `dev` into `main`.
+3. After merge, tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+4. The release workflow runs CI, builds multi-arch Docker images, and creates
+   a GitHub Release automatically.
 
 ## Coding Standards
 
