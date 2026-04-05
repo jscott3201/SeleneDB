@@ -22,9 +22,25 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/selenedb
 
 jobs:
+  preflight:
+    name: Verify tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check tag is reachable from main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag is not on main branch. Release aborted."
+            exit 1
+          fi
+
   # Gate: CI must pass before building images.
   ci:
     name: CI Gate
+    needs: preflight
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -117,7 +133,8 @@ jobs:
             type=semver,pattern=v{{version}}
             type=semver,pattern=v{{major}}.{{minor}}
             type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
+          flavor: |
+            latest=true
 
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -135,3 +152,18 @@ jobs:
 
       - name: Inspect manifest
         run: docker buildx imagetools inspect $(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+
+  release:
+    name: Create GitHub Release
+    needs: [create-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
