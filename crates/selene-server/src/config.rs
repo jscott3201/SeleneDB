@@ -246,9 +246,6 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
-    /// HNSW staging buffer capacity before rebuild (default: 256).
-    #[serde(default)]
-    pub hnsw_staging_capacity: Option<usize>,
 }
 
 impl VectorConfig {
@@ -263,9 +260,6 @@ impl VectorConfig {
         }
         if let Some(ef) = self.hnsw_ef_search {
             params.ef_search = ef;
-        }
-        if let Some(cap) = self.hnsw_staging_capacity {
-            params.staging_capacity = cap;
         }
         params
     }

@@ -152,14 +152,15 @@ impl HnswIndex {
             std::mem::take(&mut *ts)
         };
 
+        // Hold the write lock for the entire clone-and-replace to prevent
+        // concurrent inserts from being lost between the clone and swap.
         let new_graph = {
-            let wg = self.write_graph.read();
-            wg.clone_without(&tombstones)
+            let mut wg = self.write_graph.write();
+            let clean = wg.clone_without(&tombstones);
+            *wg = clean.clone();
+            clean
         };
 
-        // Update the write_graph to the clean (tombstone-free) version too,
-        // so future inserts build on the cleaned graph.
-        *self.write_graph.write() = new_graph.clone();
         self.read_snapshot.store(Arc::new(new_graph));
 
         let current_gen = self.generation.load(Ordering::Acquire);
@@ -230,10 +231,12 @@ impl HnswIndex {
 
         let ef = ef.unwrap_or(self.params.ef_search);
 
+        // Snapshot tombstones once to avoid locking twice.
+        let tombstones_snapshot = self.tombstones.lock().clone();
+        let k_expanded = k.saturating_add(tombstones_snapshot.len() as usize);
+
         // --- Phase 1: Search the immutable read snapshot ---
         let guard = self.read_snapshot.load();
-        let tombstone_count = self.tombstones.lock().len() as usize;
-        let k_expanded = k.saturating_add(tombstone_count);
 
         let mut results: Vec<(NodeId, f32)> = if guard.is_empty() {
             Vec::new()
@@ -248,28 +251,23 @@ impl HnswIndex {
                 let write_results = search::search(&wg, query, k_expanded, ef, filter);
 
                 // Merge: union by NodeId, keep highest similarity score.
-                // Build a set of NodeIds already in results for dedup.
-                use std::collections::HashMap;
-                let mut best: HashMap<NodeId, f32> = results.drain(..).collect();
+                // For small result sets (typical k < 64), linear scan is
+                // faster than HashMap allocation.
                 for (id, sim) in write_results {
-                    best.entry(id)
-                        .and_modify(|existing| {
-                            if sim > *existing {
-                                *existing = sim;
-                            }
-                        })
-                        .or_insert(sim);
+                    if let Some(pos) = results.iter().position(|(eid, _)| *eid == id) {
+                        if sim > results[pos].1 {
+                            results[pos].1 = sim;
+                        }
+                    } else {
+                        results.push((id, sim));
+                    }
                 }
-                results = best.into_iter().collect();
             }
         }
 
         // --- Phase 3: Filter tombstones ---
-        {
-            let tombstones = self.tombstones.lock();
-            if !tombstones.is_empty() {
-                results.retain(|(node_id, _)| !tombstones.contains(node_id.0 as u32));
-            }
+        if !tombstones_snapshot.is_empty() {
+            results.retain(|(node_id, _)| !tombstones_snapshot.contains(node_id.0 as u32));
         }
 
         // --- Phase 4: Sort by descending similarity and return top-k ---
@@ -284,6 +282,12 @@ impl HnswIndex {
     ///
     /// After the rebuild, tombstones are cleared and snapshot_generation is
     /// updated. Used for bulk operations (initial build, full rebuild).
+    ///
+    /// # Concurrency
+    ///
+    /// Not safe to call concurrently with `insert()`. The build phase runs
+    /// without holding the write lock, so inserts between build and swap are
+    /// lost. The caller must ensure no inserts are in flight during rebuild.
     pub fn rebuild(&self, vectors: Vec<(NodeId, Arc<[f32]>)>) {
         let new_graph = build::build(vectors, &self.params);
         // Update write_graph.

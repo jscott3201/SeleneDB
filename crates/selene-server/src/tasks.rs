@@ -1067,9 +1067,9 @@ async fn vector_store_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 /// Background task: watches for vector property changes and maintains the HNSW index.
 ///
 /// On startup, if the graph has vector properties but no HNSW index, builds one.
-/// Then watches the changelog for vector property changes, stages inserts and
-/// tombstones for deletions, and triggers a full rebuild when staging exceeds
-/// capacity (controlled by `hnsw_staging_capacity` in `[vector]` config).
+/// Then watches the changelog for vector property changes, applies incremental
+/// inserts and tombstones, and periodically snapshots the mutable graph into the
+/// lock-free read path.
 async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     use selene_core::Value;
     use selene_core::changeset::Change;
@@ -1145,8 +1145,14 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                             Change::PropertySet {
                                 node_id,
                                 value: Value::Vector(v),
+                                old_value,
                                 ..
                             } => {
+                                // Tombstone the old entry when updating an
+                                // existing vector to prevent ghost nodes.
+                                if matches!(old_value, Some(Value::Vector(_))) {
+                                    hnsw.remove(*node_id);
+                                }
                                 hnsw.insert(*node_id, Arc::clone(v));
                             }
                             Change::NodeDeleted { node_id, .. } => {
