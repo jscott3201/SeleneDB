@@ -16,6 +16,8 @@
 pub mod algorithms;
 pub mod community_search;
 pub mod graph;
+#[cfg(feature = "ai")]
+pub mod graphrag;
 pub mod history;
 pub mod rdf;
 pub mod schema_audit;
@@ -164,6 +166,9 @@ impl ProcedureRegistry {
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
         // Schema dump (LLM-friendly)
         reg.register(Arc::new(schema_dump::SchemaDump));
+        // GraphRAG hybrid retriever (ai feature)
+        #[cfg(feature = "ai")]
+        reg.register(Arc::new(graphrag::GraphRagSearch));
         reg
     }
 

@@ -91,6 +91,51 @@ pub fn dfs(
     result
 }
 
+/// BFS from `start` returning (NodeId, depth) pairs.
+///
+/// Like [`bfs`] but also tracks the depth at which each node was discovered.
+/// The start node itself is NOT included in the results.
+/// Respects `max_depth` -- depth 1 returns only direct neighbors (at depth 1).
+pub fn bfs_with_depth(
+    graph: &SeleneGraph,
+    start: NodeId,
+    edge_label: Option<&str>,
+    max_depth: u32,
+) -> Vec<(NodeId, u32)> {
+    if !graph.contains_node(start) || max_depth == 0 {
+        return vec![];
+    }
+
+    let mut visited = HashSet::new();
+    visited.insert(start);
+    let mut queue = VecDeque::new();
+    queue.push_back((start, 0u32));
+    let mut result = Vec::new();
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        for &edge_id in graph.outgoing(current) {
+            let Some(edge) = graph.get_edge(edge_id) else {
+                continue;
+            };
+            if let Some(label) = edge_label
+                && edge.label.as_str() != label
+            {
+                continue;
+            }
+            if visited.insert(edge.target) {
+                let node_depth = depth + 1;
+                result.push((edge.target, node_depth));
+                queue.push_back((edge.target, node_depth));
+            }
+        }
+    }
+
+    result
+}
+
 /// All nodes reachable from `start` within `max_depth` hops.
 ///
 /// Returns a set (no duplicates, no ordering guarantee).
@@ -249,6 +294,33 @@ mod tests {
         g.insert_edge_raw(edge(2, 2, 1, "link"));
         let result = dfs(&g, NodeId(1), None, 100);
         assert_eq!(result, vec![NodeId(2)]);
+    }
+
+    #[test]
+    fn bfs_with_depth_chain() {
+        let g = chain_graph();
+        let result = bfs_with_depth(&g, NodeId(1), None, 3);
+        // Chain: 1 -> 2 -> 3 -> 4, so depths are 1, 2, 3
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&(NodeId(2), 1)));
+        assert!(result.contains(&(NodeId(3), 2)));
+        assert!(result.contains(&(NodeId(4), 3)));
+    }
+
+    #[test]
+    fn bfs_with_depth_respects_max_depth() {
+        let g = chain_graph();
+        let result = bfs_with_depth(&g, NodeId(1), None, 2);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&(NodeId(2), 1)));
+        assert!(result.contains(&(NodeId(3), 2)));
+    }
+
+    #[test]
+    fn bfs_with_depth_zero_and_nonexistent() {
+        let g = chain_graph();
+        assert!(bfs_with_depth(&g, NodeId(1), None, 0).is_empty());
+        assert!(bfs_with_depth(&SeleneGraph::new(), NodeId(999), None, 10).is_empty());
     }
 
     #[test]
