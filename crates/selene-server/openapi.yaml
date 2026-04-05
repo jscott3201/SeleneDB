@@ -1,0 +1,2131 @@
+openapi: '3.1.0'
+info:
+  title: Selene API
+  version: 0.2.0
+  description: Lightweight in-memory property graph runtime for IoT, smart buildings, and any domain requiring a living graph of connected entities with real-time state.
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Info
+    description: Server metadata and health checks
+  - name: Nodes
+    description: Node CRUD operations
+  - name: Edges
+    description: Edge CRUD operations
+  - name: TimeSeries
+    description: Time-series sample ingestion and query
+  - name: GQL
+    description: ISO GQL query and mutation interface
+  - name: Graph
+    description: Graph slicing, statistics, and React Flow interop
+  - name: Schemas
+    description: Node and edge schema management
+  - name: CSV
+    description: CSV import and export
+  - name: RDF
+    description: RDF import and export (requires --features rdf)
+  - name: SPARQL
+    description: SPARQL Protocol endpoint (requires --features rdf-sparql)
+  - name: WebSocket
+    description: Real-time graph change subscriptions
+  - name: Metrics
+    description: Prometheus metrics endpoint
+
+paths:
+  /:
+    get:
+      operationId: apiIndex
+      summary: API index with endpoint documentation
+      tags: [Info]
+      security: []
+      responses:
+        '200':
+          description: API index listing all available endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Server health status
+      description: |
+        Returns minimal status for unauthenticated callers (load balancer probes).
+        Authenticated callers receive full operational details including node/edge counts,
+        replication role, and lag.
+      tags: [Info]
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /info:
+    get:
+      operationId: serverInfo
+      summary: Server version, profile, and enabled features
+      tags: [Info]
+      security: []
+      responses:
+        '200':
+          description: Server information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfo'
+
+  # ── Nodes ─────────────────────────────────────────────────────────
+
+  /nodes:
+    get:
+      operationId: listNodes
+      summary: List nodes with optional label filter
+      tags: [Nodes]
+      parameters:
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Filter by node label
+          example: sensor
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 1000
+            maximum: 10000
+          description: Maximum number of nodes to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: Number of nodes to skip
+      responses:
+        '200':
+          description: Paginated list of nodes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createNode
+      summary: Create a new node
+      tags: [Nodes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNodeRequest'
+            example:
+              labels: [sensor]
+              properties:
+                name: "Temperature Sensor 1"
+                floor: 3
+                unit: "celsius"
+              parent_id: 1
+      responses:
+        '201':
+          description: Node created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '422':
+          $ref: '#/components/responses/SchemaViolation'
+
+  /nodes/{id}:
+    get:
+      operationId: getNode
+      summary: Get a node by ID
+      tags: [Nodes]
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+      responses:
+        '200':
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: modifyNode
+      summary: Modify a node (set/remove properties and labels)
+      tags: [Nodes]
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifyNodeRequest'
+            example:
+              set_properties:
+                temp: 72.5
+                status: "active"
+              remove_properties: [old_field]
+              add_labels: [active]
+              remove_labels: [inactive]
+      responses:
+        '200':
+          description: Updated node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '422':
+          $ref: '#/components/responses/SchemaViolation'
+    delete:
+      operationId: deleteNode
+      summary: Delete a node and its connected edges
+      tags: [Nodes]
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+      responses:
+        '204':
+          description: Node deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  /nodes/{id}/edges:
+    get:
+      operationId: listNodeEdges
+      summary: List all edges connected to a node
+      tags: [Nodes]
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+            maximum: 10000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Edges connected to the node
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node_id, edges, total]
+                properties:
+                  node_id:
+                    type: integer
+                    format: uint64
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+                  total:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Edges ─────────────────────────────────────────────────────────
+
+  /edges:
+    get:
+      operationId: listEdges
+      summary: List edges with optional label filter
+      tags: [Edges]
+      parameters:
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Filter by edge label
+          example: contains
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 1000
+            maximum: 10000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of edges
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createEdge
+      summary: Create a new edge between two nodes
+      tags: [Edges]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEdgeRequest'
+            example:
+              source: 1
+              target: 2
+              label: contains
+              properties:
+                priority: 1
+      responses:
+        '201':
+          description: Edge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '422':
+          $ref: '#/components/responses/SchemaViolation'
+
+  /edges/{id}:
+    get:
+      operationId: getEdge
+      summary: Get an edge by ID
+      tags: [Edges]
+      parameters:
+        - $ref: '#/components/parameters/EdgeId'
+      responses:
+        '200':
+          description: Edge details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: modifyEdge
+      summary: Modify edge properties
+      tags: [Edges]
+      parameters:
+        - $ref: '#/components/parameters/EdgeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifyEdgeRequest'
+            example:
+              set_properties:
+                weight: 0.95
+              remove_properties: [old_field]
+      responses:
+        '200':
+          description: Updated edge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Edge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+    delete:
+      operationId: deleteEdge
+      summary: Delete an edge
+      tags: [Edges]
+      parameters:
+        - $ref: '#/components/parameters/EdgeId'
+      responses:
+        '204':
+          description: Edge deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  # ── Time-Series ───────────────────────────────────────────────────
+
+  /ts/samples:
+    post:
+      operationId: writeTsSamples
+      summary: Write time-series samples
+      tags: [TimeSeries]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TsWriteRequest'
+            example:
+              samples:
+                - entity_id: 42
+                  property: temperature
+                  timestamp_nanos: 1711699200000000000
+                  value: 72.5
+                - entity_id: 42
+                  property: humidity
+                  timestamp_nanos: 1711699200000000000
+                  value: 45.0
+      responses:
+        '200':
+          description: Samples written
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [written]
+                properties:
+                  written:
+                    type: integer
+                    description: Number of samples written
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /ts/write:
+    post:
+      operationId: writeTsSamplesDeprecated
+      summary: Write time-series samples (deprecated alias for /ts/samples)
+      deprecated: true
+      tags: [TimeSeries]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TsWriteRequest'
+      responses:
+        '200':
+          description: Samples written
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [written]
+                properties:
+                  written:
+                    type: integer
+
+  /ts/{entity_id}/{property}:
+    get:
+      operationId: queryTimeSeries
+      summary: Query time-series samples for an entity property
+      tags: [TimeSeries]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: uint64
+          description: Node ID
+        - name: property
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Property name
+          example: temperature
+        - name: start
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: Start timestamp (nanoseconds since Unix epoch)
+        - name: end
+          in: query
+          schema:
+            type: integer
+            format: int64
+          description: End timestamp (nanoseconds since Unix epoch)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Maximum number of samples to return
+      responses:
+        '200':
+          description: Time-series samples
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TsSample'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── GQL ───────────────────────────────────────────────────────────
+
+  /gql:
+    post:
+      operationId: executeGql
+      summary: Execute a GQL query or mutation
+      description: |
+        Primary query interface. Supports ISO GQL (ISO 39075) queries, mutations,
+        DDL statements, and CALL procedures. Returns GQLSTATUS codes in the response.
+        Read-only queries bypass the mutation batcher for lower latency.
+      tags: [GQL]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GqlRequest'
+            examples:
+              simple_query:
+                summary: Match sensors by temperature
+                value:
+                  query: "MATCH (s:sensor) FILTER s.temp > 72 RETURN s.name AS name, s.temp AS temp"
+              parameterized:
+                summary: Parameterized query
+                value:
+                  query: "MATCH (n:equipment) FILTER n.floor = $floor RETURN n"
+                  parameters:
+                    floor: 3
+              explain:
+                summary: Explain query plan
+                value:
+                  query: "MATCH (a:sensor)-[:monitors]->(b:equipment) RETURN a, b"
+                  explain: true
+              mutation:
+                summary: Insert a node
+                value:
+                  query: "INSERT (s:sensor {name: 'Temp-01', unit: 'celsius'})"
+      responses:
+        '200':
+          description: GQL execution result (includes GQLSTATUS even on query errors)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GqlResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Graph ─────────────────────────────────────────────────────────
+
+  /graph/slice:
+    post:
+      operationId: graphSlice
+      summary: Retrieve a graph slice (full, by labels, or containment tree)
+      tags: [Graph]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GraphSliceRequest'
+            examples:
+              full:
+                summary: Full graph slice
+                value:
+                  slice_type: full
+                  limit: 100
+                  offset: 0
+              labels:
+                summary: Filter by labels
+                value:
+                  slice_type: labels
+                  labels: [sensor, equipment]
+              containment:
+                summary: Containment tree from root
+                value:
+                  slice_type: containment
+                  root_id: 1
+                  max_depth: 5
+      responses:
+        '200':
+          description: Graph slice with nodes and edges
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes, edges]
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Node'
+                  edges:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Edge'
+                  total_nodes:
+                    type: integer
+                    description: Total node count (present for full/labels slices)
+                  total_edges:
+                    type: integer
+                    description: Total edge count (present for full/labels slices)
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /graph/stats:
+    get:
+      operationId: graphStats
+      summary: Graph statistics (node/edge counts by label)
+      tags: [Graph]
+      responses:
+        '200':
+          description: Graph statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node_count, edge_count, node_labels, edge_labels]
+                properties:
+                  node_count:
+                    type: integer
+                    format: uint64
+                  edge_count:
+                    type: integer
+                    format: uint64
+                  node_labels:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                      format: uint64
+                    example:
+                      sensor: 150
+                      equipment: 40
+                      building: 1
+                  edge_labels:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                      format: uint64
+                    example:
+                      contains: 190
+                      monitors: 75
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /graph/reactflow:
+    get:
+      operationId: exportReactFlow
+      summary: Export graph as React Flow nodes and edges
+      tags: [Graph]
+      parameters:
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Filter exported nodes by label
+      responses:
+        '200':
+          description: React Flow graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReactFlowGraph'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: importReactFlow
+      summary: Import a React Flow graph into Selene
+      tags: [Graph]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReactFlowGraph'
+      responses:
+        '201':
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes_created, edges_created, id_map]
+                properties:
+                  nodes_created:
+                    type: integer
+                  edges_created:
+                    type: integer
+                  id_map:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                      format: uint64
+                    description: Mapping from React Flow string IDs to Selene numeric IDs
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  # ── Schemas ───────────────────────────────────────────────────────
+
+  /schemas:
+    get:
+      operationId: listSchemas
+      summary: List all registered node and edge schemas
+      tags: [Schemas]
+      responses:
+        '200':
+          description: All registered schemas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node_schemas, edge_schemas]
+                properties:
+                  node_schemas:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NodeSchema'
+                  edge_schemas:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EdgeSchema'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /schemas/nodes:
+    post:
+      operationId: registerNodeSchema
+      summary: Register a new node schema
+      tags: [Schemas]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeSchema'
+            example:
+              label: sensor
+              description: "A sensor device"
+              properties:
+                - name: unit
+                  value_type: String
+                  required: false
+                  description: "Unit of measure"
+                  indexed: false
+                - name: floor
+                  value_type: Int
+                  required: true
+                  description: "Floor number"
+                  indexed: true
+              valid_edge_labels: [monitors, located_in]
+              annotations: {}
+      responses:
+        '201':
+          description: Schema registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeSchema'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /schemas/edges:
+    post:
+      operationId: registerEdgeSchema
+      summary: Register a new edge schema
+      tags: [Schemas]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EdgeSchema'
+            example:
+              label: monitors
+              description: "Sensor monitors equipment"
+              properties: []
+              source_labels: [sensor]
+              target_labels: [equipment]
+              annotations: {}
+      responses:
+        '201':
+          description: Schema registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeSchema'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /schemas/nodes/{label}:
+    get:
+      operationId: getNodeSchema
+      summary: Get a node schema by label
+      tags: [Schemas]
+      parameters:
+        - $ref: '#/components/parameters/SchemaLabel'
+      responses:
+        '200':
+          description: Node schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeSchema'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateNodeSchema
+      summary: Replace a node schema (compatibility checked via semver)
+      tags: [Schemas]
+      parameters:
+        - $ref: '#/components/parameters/SchemaLabel'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeSchema'
+      responses:
+        '200':
+          description: Schema updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeSchema'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      operationId: deleteNodeSchema
+      summary: Unregister a node schema
+      tags: [Schemas]
+      parameters:
+        - $ref: '#/components/parameters/SchemaLabel'
+      responses:
+        '204':
+          description: Schema deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  /schemas/edges/{label}:
+    get:
+      operationId: getEdgeSchema
+      summary: Get an edge schema by label
+      tags: [Schemas]
+      parameters:
+        - $ref: '#/components/parameters/SchemaLabel'
+      responses:
+        '200':
+          description: Edge schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeSchema'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: deleteEdgeSchema
+      summary: Unregister an edge schema
+      tags: [Schemas]
+      parameters:
+        - $ref: '#/components/parameters/SchemaLabel'
+      responses:
+        '204':
+          description: Schema deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  /schemas/import:
+    post:
+      operationId: importSchemaPack
+      summary: Import a schema pack (TOML body)
+      tags: [Schemas]
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              description: TOML-encoded schema pack
+      responses:
+        '201':
+          description: Schema pack imported
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack, node_schemas_registered, node_schemas_skipped, edge_schemas_registered, edge_schemas_skipped]
+                properties:
+                  pack:
+                    type: string
+                    description: Pack name
+                  node_schemas_registered:
+                    type: integer
+                  node_schemas_skipped:
+                    type: integer
+                  edge_schemas_registered:
+                    type: integer
+                  edge_schemas_skipped:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  # ── CSV ───────────────────────────────────────────────────────────
+
+  /graph/csv:
+    post:
+      operationId: csvImport
+      summary: Import nodes or edges from CSV
+      tags: [CSV]
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [nodes, edges]
+            default: nodes
+          description: Import type
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Node label (required for node import)
+          example: sensor
+        - name: delimiter
+          in: query
+          schema:
+            type: string
+            default: ","
+          description: CSV delimiter character
+        - name: parent_id_column
+          in: query
+          schema:
+            type: string
+          description: Column name for parent node ID (auto-creates containment edges)
+        - name: source_column
+          in: query
+          schema:
+            type: string
+            default: source_id
+          description: Source node ID column (edge import only)
+        - name: target_column
+          in: query
+          schema:
+            type: string
+            default: target_id
+          description: Target node ID column (edge import only)
+        - name: label_column
+          in: query
+          schema:
+            type: string
+            default: label
+          description: Edge label column (edge import only)
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsvImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+    get:
+      operationId: csvExport
+      summary: Export nodes or edges as CSV
+      tags: [CSV]
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [nodes, edges]
+            default: nodes
+          description: Export type
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Filter by label
+      responses:
+        '200':
+          description: CSV data
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /import/csv:
+    post:
+      operationId: csvImportDeprecated
+      summary: Import CSV (deprecated alias for POST /graph/csv)
+      deprecated: true
+      tags: [CSV]
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [nodes, edges]
+            default: nodes
+        - name: label
+          in: query
+          schema:
+            type: string
+        - name: delimiter
+          in: query
+          schema:
+            type: string
+            default: ","
+        - name: parent_id_column
+          in: query
+          schema:
+            type: string
+        - name: source_column
+          in: query
+          schema:
+            type: string
+            default: source_id
+        - name: target_column
+          in: query
+          schema:
+            type: string
+            default: target_id
+        - name: label_column
+          in: query
+          schema:
+            type: string
+            default: label
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsvImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+
+  /export/csv:
+    get:
+      operationId: csvExportDeprecated
+      summary: Export CSV (deprecated alias for GET /graph/csv)
+      deprecated: true
+      tags: [CSV]
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [nodes, edges]
+            default: nodes
+        - name: label
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CSV data
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── RDF ───────────────────────────────────────────────────────────
+
+  /graph/rdf:
+    get:
+      operationId: exportRdf
+      summary: Export graph as RDF (Turtle, N-Triples, or N-Quads)
+      description: Requires --features rdf.
+      tags: [RDF]
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [turtle, ntriples, nquads]
+            default: turtle
+          description: RDF serialization format
+        - name: graphs
+          in: query
+          schema:
+            type: string
+            enum: [all]
+          description: Set to "all" to include ontology triples
+      responses:
+        '200':
+          description: RDF data
+          content:
+            text/turtle:
+              schema:
+                type: string
+            application/n-triples:
+              schema:
+                type: string
+            application/n-quads:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: importRdf
+      summary: Import RDF data into the graph
+      description: Requires --features rdf. Ontology triples (Brick, 223P) are stored separately.
+      tags: [RDF]
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [turtle, ntriples, nquads]
+            default: turtle
+          description: RDF serialization format
+        - name: graph
+          in: query
+          schema:
+            type: string
+            enum: [ontology]
+          description: Target graph (set to "ontology" for TBox triples)
+      requestBody:
+        required: true
+        content:
+          text/turtle:
+            schema:
+              type: string
+          application/n-triples:
+            schema:
+              type: string
+          application/n-quads:
+            schema:
+              type: string
+      responses:
+        '201':
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RdfImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/ReadOnly'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── SPARQL ────────────────────────────────────────────────────────
+
+  /sparql:
+    get:
+      operationId: sparqlGet
+      summary: Execute a SPARQL query via query parameter
+      description: Requires --features rdf-sparql. Translates SPARQL triple patterns to Selene label bitmaps, CSR adjacency, and TypedIndex lookups.
+      tags: [SPARQL]
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          description: SPARQL query string
+          example: "SELECT ?s ?name WHERE { ?s a <urn:selene:sensor> ; <urn:selene:prop/name> ?name }"
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, xml, csv, tsv]
+            default: json
+          description: Result serialization format
+      responses:
+        '200':
+          description: SPARQL query results
+          content:
+            application/sparql-results+json:
+              schema:
+                type: object
+            application/sparql-results+xml:
+              schema:
+                type: string
+            text/csv:
+              schema:
+                type: string
+            text/tab-separated-values:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: sparqlPost
+      summary: Execute a SPARQL query via request body
+      description: Requires --features rdf-sparql. Send the SPARQL query string as the request body.
+      tags: [SPARQL]
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, xml, csv, tsv]
+            default: json
+          description: Result serialization format
+      requestBody:
+        required: true
+        content:
+          application/sparql-query:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: SPARQL query results
+          content:
+            application/sparql-results+json:
+              schema:
+                type: object
+            application/sparql-results+xml:
+              schema:
+                type: string
+            text/csv:
+              schema:
+                type: string
+            text/tab-separated-values:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── WebSocket ─────────────────────────────────────────────────────
+
+  /ws/subscribe:
+    get:
+      operationId: wsSubscribe
+      summary: WebSocket subscription for real-time graph change events
+      description: |
+        Upgrade to WebSocket. After connection, send a JSON filter message within 10 seconds:
+        `{"labels": ["sensor"], "edge_types": ["monitors"]}`. Omit fields or send `{}` for
+        unfiltered events. The server pushes change events as JSON messages.
+
+        Change event format:
+        ```json
+        {
+          "sequence": 42,
+          "changes": [
+            {"type": "node_created", "entity_id": 5},
+            {"type": "edge_created", "entity_id": 10, "label": "contains"}
+          ]
+        }
+        ```
+
+        Change types: node_created, node_updated, node_deleted, edge_created, edge_updated, edge_deleted.
+
+        Maximum 100 concurrent WebSocket connections.
+      tags: [WebSocket]
+      responses:
+        '101':
+          description: WebSocket upgrade successful
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: Maximum WebSocket connections reached
+
+  # ── Metrics ───────────────────────────────────────────────────────
+
+  /metrics:
+    get:
+      operationId: prometheusMetrics
+      summary: Prometheus metrics
+      description: |
+        Returns metrics in Prometheus exposition format. If a metrics_token is configured,
+        requires a matching Bearer token (separate from the main auth system).
+      tags: [Metrics]
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing or invalid metrics token
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Format: identity:secret"
+
+  parameters:
+    NodeId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: uint64
+      description: Node ID
+    EdgeId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: uint64
+      description: Edge ID
+    SchemaLabel:
+      name: label
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Schema label name
+      example: sensor
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Entity not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "node 42 not found"
+    SchemaViolation:
+      description: Schema validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReadOnly:
+      description: Mutation rejected on read-only replica
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "read-only replica"
+    Conflict:
+      description: Schema conflict (e.g., already registered)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    # ── Entities ────────────────────────────────────────────────────
+
+    Node:
+      type: object
+      required: [id, labels, properties, created_at, updated_at, version]
+      properties:
+        id:
+          type: integer
+          format: uint64
+          example: 42
+        labels:
+          type: array
+          items:
+            type: string
+          example: [sensor, active]
+        properties:
+          type: object
+          additionalProperties: {}
+          example:
+            name: "Temperature Sensor 1"
+            floor: 3
+            unit: "celsius"
+        created_at:
+          type: integer
+          format: int64
+          description: Creation timestamp (nanoseconds since Unix epoch)
+        updated_at:
+          type: integer
+          format: int64
+          description: Last update timestamp (nanoseconds since Unix epoch)
+        version:
+          type: integer
+          format: uint64
+          description: Optimistic concurrency version counter
+
+    Edge:
+      type: object
+      required: [id, source, target, label, properties, created_at]
+      properties:
+        id:
+          type: integer
+          format: uint64
+          example: 100
+        source:
+          type: integer
+          format: uint64
+          description: Source node ID
+          example: 1
+        target:
+          type: integer
+          format: uint64
+          description: Target node ID
+          example: 42
+        label:
+          type: string
+          example: contains
+        properties:
+          type: object
+          additionalProperties: {}
+        created_at:
+          type: integer
+          format: int64
+          description: Creation timestamp (nanoseconds since Unix epoch)
+
+    NodeList:
+      type: object
+      required: [nodes, total]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+        total:
+          type: integer
+          description: Total count (before pagination)
+
+    EdgeList:
+      type: object
+      required: [edges, total]
+      properties:
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edge'
+        total:
+          type: integer
+          description: Total count (before pagination)
+
+    # ── Requests ────────────────────────────────────────────────────
+
+    CreateNodeRequest:
+      type: object
+      required: [labels]
+      properties:
+        labels:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          example: [sensor]
+        properties:
+          type: object
+          additionalProperties: {}
+          description: Plain JSON key-value pairs. Nested objects are stored as JSON strings.
+          default: {}
+        parent_id:
+          type: integer
+          format: uint64
+          description: If set, auto-creates a "contains" edge from this parent node
+
+    ModifyNodeRequest:
+      type: object
+      properties:
+        set_properties:
+          type: object
+          additionalProperties: {}
+          default: {}
+        remove_properties:
+          type: array
+          items:
+            type: string
+          default: []
+        add_labels:
+          type: array
+          items:
+            type: string
+          default: []
+        remove_labels:
+          type: array
+          items:
+            type: string
+          default: []
+
+    CreateEdgeRequest:
+      type: object
+      required: [source, target, label]
+      properties:
+        source:
+          type: integer
+          format: uint64
+          description: Source node ID
+        target:
+          type: integer
+          format: uint64
+          description: Target node ID
+        label:
+          type: string
+          example: monitors
+        properties:
+          type: object
+          additionalProperties: {}
+          default: {}
+
+    ModifyEdgeRequest:
+      type: object
+      properties:
+        set_properties:
+          type: object
+          additionalProperties: {}
+          default: {}
+        remove_properties:
+          type: array
+          items:
+            type: string
+          default: []
+
+    # ── GQL ─────────────────────────────────────────────────────────
+
+    GqlRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: GQL query or mutation string (ISO 39075)
+          example: "MATCH (s:sensor) RETURN s.name AS name"
+        parameters:
+          type: object
+          additionalProperties: {}
+          description: Named query parameters (referenced as $param in GQL)
+        explain:
+          type: boolean
+          default: false
+          description: Return the execution plan without running the query
+        profile:
+          type: boolean
+          default: false
+          description: Run the query and return the plan with execution statistics
+        timeout_ms:
+          type: integer
+          format: uint32
+          description: Query timeout in milliseconds
+
+    GqlResponse:
+      type: object
+      required: [status, message, row_count]
+      properties:
+        status:
+          type: string
+          description: GQLSTATUS code (e.g., "00000" for success, "XX000" for error)
+          example: "00000"
+        message:
+          type: string
+          description: Human-readable status message
+          example: "success"
+        row_count:
+          type: integer
+          description: Number of result rows
+        data:
+          type: array
+          items:
+            type: object
+          description: Query result rows (array of objects keyed by RETURN aliases)
+        mutations:
+          type: object
+          description: Mutation statistics (present only for write operations)
+          properties:
+            nodes_created:
+              type: integer
+            nodes_deleted:
+              type: integer
+            edges_created:
+              type: integer
+            edges_deleted:
+              type: integer
+            properties_set:
+              type: integer
+            properties_removed:
+              type: integer
+        plan:
+          type: string
+          description: Execution plan (present when explain or profile is true)
+
+    # ── Time-Series ─────────────────────────────────────────────────
+
+    TsWriteRequest:
+      type: object
+      required: [samples]
+      properties:
+        samples:
+          type: array
+          items:
+            $ref: '#/components/schemas/TsSample'
+
+    TsSample:
+      type: object
+      required: [entity_id, property, timestamp_nanos, value]
+      properties:
+        entity_id:
+          type: integer
+          format: uint64
+          description: Node ID this sample belongs to
+          example: 42
+        property:
+          type: string
+          description: Property name for the time-series stream
+          example: temperature
+        timestamp_nanos:
+          type: integer
+          format: int64
+          description: Timestamp in nanoseconds since Unix epoch
+          example: 1711699200000000000
+        value:
+          type: number
+          format: double
+          example: 72.5
+
+    # ── Graph Slice ─────────────────────────────────────────────────
+
+    GraphSliceRequest:
+      type: object
+      properties:
+        slice_type:
+          type: string
+          enum: [full, labels, containment]
+          default: full
+          description: |
+            - full: all nodes and edges (with pagination)
+            - labels: nodes matching specified labels plus connecting edges
+            - containment: walk "contains" edges from root_id to max_depth
+        labels:
+          type: array
+          items:
+            type: string
+          description: Required when slice_type is "labels"
+        root_id:
+          type: integer
+          format: uint64
+          description: Root node ID (used when slice_type is "containment", defaults to 1)
+        max_depth:
+          type: integer
+          format: uint32
+          description: Maximum traversal depth (used when slice_type is "containment")
+        limit:
+          type: integer
+          description: Maximum number of nodes to return
+        offset:
+          type: integer
+          description: Number of nodes to skip
+
+    # ── Schemas ─────────────────────────────────────────────────────
+
+    NodeSchema:
+      type: object
+      required: [label, properties, valid_edge_labels, description]
+      properties:
+        label:
+          type: string
+          example: sensor
+        parent:
+          type: string
+          description: Parent schema label for inheritance
+        properties:
+          type: array
+          items:
+            $ref: '#/components/schemas/PropertyDef'
+        valid_edge_labels:
+          type: array
+          items:
+            type: string
+          description: Allowed outgoing edge labels for this node type
+        description:
+          type: string
+        annotations:
+          type: object
+          additionalProperties: {}
+          description: Application-defined annotations (stored but not interpreted by Selene)
+        version:
+          $ref: '#/components/schemas/SchemaVersion'
+        validation_mode:
+          type: string
+          enum: [strict, warn, disabled]
+          description: Override the global validation mode for this schema
+        node_key:
+          type: array
+          items:
+            type: string
+          description: Composite node key (these properties together must be unique)
+
+    EdgeSchema:
+      type: object
+      required: [label, properties, description]
+      properties:
+        label:
+          type: string
+          example: monitors
+        properties:
+          type: array
+          items:
+            $ref: '#/components/schemas/PropertyDef'
+        description:
+          type: string
+        source_labels:
+          type: array
+          items:
+            type: string
+          description: Source node must carry at least one of these labels (empty = unrestricted)
+        target_labels:
+          type: array
+          items:
+            type: string
+          description: Target node must carry at least one of these labels (empty = unrestricted)
+        annotations:
+          type: object
+          additionalProperties: {}
+        version:
+          $ref: '#/components/schemas/SchemaVersion'
+        validation_mode:
+          type: string
+          enum: [strict, warn, disabled]
+        max_out_degree:
+          type: integer
+          format: uint32
+          description: Maximum outgoing edges of this type per source node
+
+    PropertyDef:
+      type: object
+      required: [name, value_type, required, description]
+      properties:
+        name:
+          type: string
+          example: temperature
+        value_type:
+          type: string
+          enum: [Bool, Int, UInt, Float, String, ZonedDateTime, Date, LocalDateTime, Duration, Bytes, List, Vector, Any]
+          example: Float
+        required:
+          type: boolean
+        default:
+          description: Default value applied when the property is absent on create
+        description:
+          type: string
+        indexed:
+          type: boolean
+          default: false
+          description: Create a TypedIndex for fast lookups
+        unique:
+          type: boolean
+          default: false
+          description: No two nodes with the same label may share this value
+        min:
+          type: number
+          description: Numeric minimum (inclusive)
+        max:
+          type: number
+          description: Numeric maximum (inclusive)
+        min_length:
+          type: integer
+          description: Minimum string length
+        max_length:
+          type: integer
+          description: Maximum string length
+        allowed_values:
+          type: array
+          items: {}
+          description: Enum constraint (empty = no restriction)
+        pattern:
+          type: string
+          description: Regex pattern for string validation
+        immutable:
+          type: boolean
+          default: false
+          description: Property cannot be changed after initial creation
+        searchable:
+          type: boolean
+          default: false
+          description: Enable full-text search indexing (requires --features search)
+        dictionary:
+          type: boolean
+          default: false
+          description: Dictionary-encode string values via interning for memory savings
+        fill:
+          type: string
+          enum: [Locf, Linear]
+          description: Time-series gap-filling strategy default
+        expected_interval_nanos:
+          type: integer
+          format: int64
+          description: Expected reporting interval in nanoseconds for gap detection
+        encoding:
+          type: string
+          enum: [Gorilla, Rle, Dictionary]
+          default: Gorilla
+          description: Time-series value encoding strategy for the hot tier
+
+    SchemaVersion:
+      type: object
+      properties:
+        major:
+          type: integer
+          format: uint32
+          default: 0
+        minor:
+          type: integer
+          format: uint32
+          default: 0
+        patch:
+          type: integer
+          format: uint32
+          default: 0
+
+    # ── CSV/RDF Results ─────────────────────────────────────────────
+
+    CsvImportResult:
+      type: object
+      required: [nodes_created, edges_created, rows_skipped, errors]
+      properties:
+        nodes_created:
+          type: integer
+        edges_created:
+          type: integer
+        rows_skipped:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+          description: Per-row error messages for skipped rows
+
+    RdfImportResult:
+      type: object
+      required: [nodes_created, edges_created, labels_added, properties_set, ontology_triples_loaded]
+      properties:
+        nodes_created:
+          type: integer
+        edges_created:
+          type: integer
+        labels_added:
+          type: integer
+        properties_set:
+          type: integer
+        ontology_triples_loaded:
+          type: integer
+
+    # ── React Flow ──────────────────────────────────────────────────
+
+    ReactFlowGraph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReactFlowNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReactFlowEdge'
+
+    ReactFlowNode:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        position:
+          type: object
+          properties:
+            x:
+              type: number
+              format: double
+              default: 0
+            y:
+              type: number
+              format: double
+              default: 0
+        data:
+          type: object
+          additionalProperties: {}
+        type:
+          type: string
+
+    ReactFlowEdge:
+      type: object
+      required: [id, source, target]
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+        data:
+          type: object
+          additionalProperties: {}
+
+    # ── Health/Info ──────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      required: [status, uptime_secs]
+      properties:
+        status:
+          type: string
+          example: ok
+        node_count:
+          type: integer
+          format: uint64
+          description: Present only for authenticated callers
+        edge_count:
+          type: integer
+          format: uint64
+          description: Present only for authenticated callers
+        uptime_secs:
+          type: integer
+          format: uint64
+        dev_mode:
+          type: boolean
+          description: Present only for authenticated callers
+        role:
+          type: string
+          enum: [primary, replica]
+          description: Present only for authenticated callers
+        primary:
+          type: string
+          description: Address of the primary (replicas only, authenticated callers only)
+        lag_sequences:
+          type: integer
+          format: uint64
+          description: Sequences behind primary (replicas only, authenticated callers only)
+
+    ServerInfo:
+      type: object
+      required: [name, version, profile, dev_mode, features]
+      properties:
+        name:
+          type: string
+          example: selene
+        version:
+          type: string
+          example: "0.1.0"
+        profile:
+          type: string
+          enum: [edge, cloud, standalone]
+        dev_mode:
+          type: boolean
+        features:
+          type: object
+          properties:
+            federation:
+              type: boolean
+            vector:
+              type: boolean
+            search:
+              type: boolean
+            temporal:
+              type: boolean
+            rdf:
+              type: boolean
+            rdf_sparql:
+              type: boolean
+            cloud_storage:
+              type: boolean
+
+    # ── Error ───────────────────────────────────────────────────────
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error message
+        hint:
+          type: string
+          description: Suggestion for resolving the error
+
+    # ── WebSocket ───────────────────────────────────────────────────
+
+    SubscriptionFilter:
+      type: object
+      description: Filter sent by the client after WebSocket connection
+      properties:
+        labels:
+          type: array
+          items:
+            type: string
+          description: Only receive changes for nodes with these labels
+        edge_types:
+          type: array
+          items:
+            type: string
+          description: Only receive changes for edges with these types
+
+    ChangeEvent:
+      type: object
+      required: [sequence, changes]
+      description: Change event pushed to WebSocket clients
+      properties:
+        sequence:
+          type: integer
+          format: uint64
+        changes:
+          type: array
+          items:
+            type: object
+            required: [type, entity_id]
+            properties:
+              type:
+                type: string
+                enum: [node_created, node_updated, node_deleted, edge_created, edge_updated, edge_deleted]
+              entity_id:
+                type: integer
+                format: uint64
+              label:
+                type: string
+              labels:
+                type: array
+                items:
+                  type: string

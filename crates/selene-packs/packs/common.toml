@@ -1,0 +1,59 @@
+# Common schema pack — shared building/IoT entity types.
+
+name = "common"
+version = "1.0.0"
+description = "Common entity types for buildings, spaces, equipment, and points"
+
+# ── Spatial hierarchy ────────────────────────────────────────────────
+
+[types.site]
+description = "A physical location (campus, property)"
+fields = { name = "string!", address = "string", latitude = "float", longitude = "float" }
+
+[types.building]
+description = "A building within a site"
+fields = { name = "string!", area_sqft = "float", year_built = "int" }
+
+[types.floor]
+description = "A floor or level within a building"
+fields = { name = "string!", level = "int" }
+
+[types.zone]
+description = "A thermal or functional zone"
+fields = { name = "string!", zone_type = "string" }
+
+[types.space]
+description = "A physical room or area"
+fields = { name = "string!", area_sqft = "float", occupancy_max = "int" }
+
+# ── Equipment & Points ──────────────────────────────────────────────
+
+[types.equipment]
+description = "A mechanical, electrical, or control device"
+fields = { name = "string!", manufacturer = "string", model = "string", serial_number = "string" }
+
+[types.point]
+description = "A sensor, setpoint, command, or status value"
+fields = { name = "string!", unit = "string", current_value = "any", point_type = "string" }
+
+# ── Relationships ───────────────────────────────────────────────────
+
+[relationships.contains]
+description = "Spatial or logical containment (site > building > floor > zone > space)"
+
+[relationships.feeds]
+description = "Equipment feeds another equipment or zone"
+source = ["equipment"]
+fields = { medium = "string" }
+
+[relationships.isPointOf]
+description = "A point belongs to a piece of equipment"
+source = ["point"]
+target = ["equipment"]
+
+[relationships.hasLocation]
+description = "An entity is physically located in a space"
+target = ["space", "zone", "floor", "building", "site"]
+
+[relationships.monitors]
+description = "A point or system monitors an entity"

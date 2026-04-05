@@ -1,0 +1,34 @@
+services:
+  selene:
+    build: .
+    ports:
+      - "4510:4510/udp"
+      - "8080:8080"
+    volumes:
+      - selene-data:/data
+    environment:
+      - RUST_LOG=selene_server=info
+      # Runtime service configuration (uncomment to override profile defaults):
+      # - SELENE_PROFILE=edge          # edge | cloud | standalone
+      # - SELENE_VECTOR_ENABLED=true   # enable vector embeddings (requires model)
+      # - SELENE_SEARCH_ENABLED=true   # enable full-text search
+      # - SELENE_TEMPORAL_ENABLED=true # enable property versioning
+      # - SELENE_MCP_ENABLED=false     # MCP disabled in production by default
+      # - SELENE_MEMORY_BUDGET_MB=4096 # memory budget (edge default: 4096)
+    restart: unless-stopped
+    # Security hardening
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Health check via HTTP (no TLS required).
+    healthcheck:
+      test: ["/selene", "health", "--http"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  selene-data:

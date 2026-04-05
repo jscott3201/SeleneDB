@@ -1,0 +1,24 @@
+# Docker Compose — development mode with all services enabled.
+# Usage: docker compose -f docker-compose.dev.yml up -d
+services:
+  selene:
+    build: .
+    command: ["--dev", "--seed", "/data"]
+    ports:
+      - "4510:4510/udp"
+      - "8080:8080"
+    volumes:
+      - selene-data:/data
+    environment:
+      - RUST_LOG=selene_server=debug
+      - SELENE_PROFILE=standalone
+      - SELENE_SERVICES_MCP_ENABLED=true
+    healthcheck:
+      test: ["/selene", "health", "--http"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  selene-data:

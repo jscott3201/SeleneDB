@@ -1,0 +1,48 @@
+# Docker Compose — primary + replica deployment example.
+# Usage: docker compose -f docker-compose.replica.yml up -d
+#
+# The primary runs in dev mode for simplicity. In production, mount
+# TLS certs and remove --dev.
+services:
+  primary:
+    build: .
+    command: ["--dev", "--seed", "/data"]
+    ports:
+      - "4510:4510/udp"
+      - "8080:8080"
+    volumes:
+      - primary-data:/data
+    environment:
+      - RUST_LOG=selene_server=info
+      - SELENE_PROFILE=cloud
+    healthcheck:
+      test: ["/selene", "health", "--http"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  replica:
+    build: .
+    command: ["--dev", "--replica-of", "primary:4510", "/data"]
+    ports:
+      - "4511:4510/udp"
+      - "8081:8080"
+    volumes:
+      - replica-data:/data
+    environment:
+      - RUST_LOG=selene_server=info
+      - SELENE_PROFILE=edge
+    depends_on:
+      primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["/selene", "health", "--http"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  primary-data:
+  replica-data:

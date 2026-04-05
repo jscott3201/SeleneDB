@@ -1,0 +1,24 @@
+[package]
+name = "selene-algorithms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Graph algorithms for Selene: structural, path finding, centrality, community detection"
+
+[dependencies]
+selene-core.workspace = true
+selene-graph.workspace = true
+roaring.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+selene-testing = { workspace = true, features = ["bench"] }
+selene-core.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "algo_bench"
+harness = false

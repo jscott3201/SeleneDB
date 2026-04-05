@@ -1,0 +1,60 @@
+# Rust
+/target
+**/*.rs.bk
+*.rlib
+*.rmeta
+
+# Python
+*.pyo
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+*.egg
+dist/
+*.whl
+*.so
+*.dylib
+*.dll
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# AI assistants
+.claude/
+CLAUDE.md
+.copilot/
+.github/copilot-*
+.cursor/
+.aider*
+.codeium/
+.superpowers/
+.mcp/
+.mcp.json
+mcp.json
+
+# Underscore-prefixed folders (internal plans, specs, working docs)
+_*/
+
+# Runtime data (models, snapshots, WAL)
+data/
+
+# Worktrees
+.worktrees/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# JavaScript/WASM
+node_modules/
+pkg/
+*.tgz

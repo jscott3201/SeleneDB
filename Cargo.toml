@@ -1,0 +1,130 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/selene-core",
+    "crates/selene-graph",
+    "crates/selene-ts",
+    "crates/selene-wire",
+    "crates/selene-server",
+    "crates/selene-client",
+    "crates/selene-cli",
+    "crates/selene-testing",
+    "crates/selene-persist",
+    "crates/selene-gql",
+    "crates/selene-packs",
+    "crates/selene-algorithms",
+    "crates/selene-rdf",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+authors = ["Justin Scott <jscott3201@gmail.com>"]
+repository = "https://github.com/jscott3201/SeleneDB"
+homepage = "https://github.com/jscott3201/SeleneDB"
+readme = "README.md"
+keywords = ["graph", "database", "iot", "property-graph", "time-series"]
+categories = ["database-implementations", "data-structures"]
+publish = false
+description = "Lightweight in-memory property graph runtime for IoT and smart buildings"
+
+[workspace.dependencies]
+# Internal crates
+selene-core = { path = "crates/selene-core" }
+selene-graph = { path = "crates/selene-graph" }
+selene-ts = { path = "crates/selene-ts" }
+selene-wire = { path = "crates/selene-wire" }
+selene-server = { path = "crates/selene-server" }
+selene-client = { path = "crates/selene-client" }
+selene-testing = { path = "crates/selene-testing" }
+selene-persist = { path = "crates/selene-persist" }
+selene-gql = { path = "crates/selene-gql" }
+selene-algorithms = { path = "crates/selene-algorithms" }
+selene-packs = { path = "crates/selene-packs" }
+selene-rdf = { path = "crates/selene-rdf" }
+
+# String types
+smol_str = { version = "0.3", features = ["serde"] }
+smallvec = { version = "1", features = ["serde"] }
+
+# Serialization
+serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Concurrency
+parking_lot = "0.12"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+# Data structures
+roaring = "0.11"
+imbl = "7"
+rustc-hash = "2"
+regex = "1"
+
+# Wire protocol
+bitflags = { version = "2", features = ["serde"] }
+bytes = "1"
+serde_json = "1"
+zstd = "0.13"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# QUIC / TLS
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+
+# Config
+toml = "1"
+
+# Async utilities
+futures = "0.3"
+tokio-stream = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Auth
+cedar-policy = "4"
+
+# Hybrid Logical Clock
+uhlc = "0.9"
+
+# Columnar storage
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
+
+# MCP
+rmcp = { version = "1", features = ["server", "macros"] }
+schemars = "1.0"
+
+# Random
+rand = "0.10"
+
+# Testing
+rcgen = "0.14"
+tempfile = "3"
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1"
+
+# JWT
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

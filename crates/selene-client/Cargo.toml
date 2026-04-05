@@ -1,0 +1,38 @@
+[package]
+name = "selene-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Async QUIC client for Selene"
+
+[dependencies]
+selene-wire.workspace = true
+
+# QUIC / TLS
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+
+# Errors
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["insecure"]
+insecure = []
+
+[dev-dependencies]
+selene-testing = { workspace = true, features = ["tls"] }
+selene-server.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }

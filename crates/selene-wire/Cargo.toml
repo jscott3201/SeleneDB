@@ -1,0 +1,32 @@
+[package]
+name = "selene-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Wire protocol framing, codec, and serialization for Selene"
+
+[dependencies]
+selene-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+bitflags.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+criterion.workspace = true
+selene-testing = { workspace = true, features = ["bench"] }
+smol_str.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-util"] }
+futures.workspace = true
+tokio-stream.workspace = true
+
+[[bench]]
+name = "wire_bench"
+harness = false

@@ -1,0 +1,49 @@
+[package]
+name = "selene-gql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "ISO GQL (ISO/IEC 39075) query engine for Selene"
+
+[features]
+default = ["rayon"]
+rayon = ["dep:rayon"]
+vector = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
+[dependencies]
+selene-core.workspace = true
+selene-graph.workspace = true
+selene-ts.workspace = true
+selene-algorithms.workspace = true
+imbl.workspace = true
+pest = "2"
+pest_derive = "2"
+arrow.workspace = true
+roaring.workspace = true
+smallvec.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+rayon = { version = "1", optional = true }
+unicode-normalization = "0.1"
+regex.workspace = true
+
+# Vector embedding (feature-gated: --features vector)
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
+
+[dev-dependencies]
+selene-testing = { workspace = true, features = ["bench"] }
+tempfile.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "gql_bench"
+harness = false

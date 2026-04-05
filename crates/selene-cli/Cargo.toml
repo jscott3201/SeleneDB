@@ -1,0 +1,28 @@
+[package]
+name = "selene-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Command-line interface for Selene"
+
+[[bin]]
+name = "selene"
+path = "src/main.rs"
+
+[dependencies]
+selene-client.workspace = true
+selene-wire.workspace = true
+
+clap.workspace = true
+tokio = { workspace = true, features = ["full"] }
+rustyline = "18"
+serde_json.workspace = true
+anyhow.workspace = true
+getrandom = "0.4"
+base64 = "0.22"
+
+# Global allocator (musl only: fixes 2-9x perf loss from musl's single-lock allocator)
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }

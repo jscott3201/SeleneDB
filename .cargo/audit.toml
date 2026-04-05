@@ -1,0 +1,13 @@
+# Security audit configuration for cargo-audit.
+#
+# Ignored advisories must include a justification and be reviewed
+# periodically. Remove ignores once upstream ships a fix.
+
+[advisories]
+ignore = [
+    # Marvin Attack timing sidechannel in RSA decryption (PKCS#1 v1.5).
+    # Transitive via jsonwebtoken -> rsa. Selene uses JWT for token
+    # *validation* (signature verify), not RSA decryption, so this
+    # code path is not reachable. No patched rsa release exists yet.
+    "RUSTSEC-2023-0071",
+]

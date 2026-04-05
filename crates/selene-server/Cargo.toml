@@ -1,0 +1,137 @@
+[package]
+name = "selene-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "QUIC, HTTP, and MCP server with auth, federation, and ops layer"
+
+[lib]
+name = "selene_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "selene-server"
+path = "src/main.rs"
+
+[dependencies]
+selene-core.workspace = true
+selene-graph.workspace = true
+selene-gql.workspace = true
+selene-ts.workspace = true
+selene-persist.workspace = true
+selene-wire.workspace = true
+selene-packs.workspace = true
+
+# QUIC / TLS
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+postcard.workspace = true
+
+# Arrow (for GQL result formatting)
+arrow.workspace = true
+
+# Config
+toml.workspace = true
+clap.workspace = true
+
+# Hashing
+rustc-hash.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Errors
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+roaring.workspace = true
+smallvec.workspace = true
+arc-swap = "1"
+
+# Dev mode TLS (feature-gated: dev-tls)
+rcgen = { workspace = true, optional = true }
+cedar-policy.workspace = true
+
+# Hybrid Logical Clock
+uhlc.workspace = true
+
+# Hostname resolution (cloud-storage bootstrap)
+hostname = "0.4"
+
+# CSV import/export
+csv = "1"
+
+# Metrics
+prometheus = "0.14"
+
+# Credential hashing
+argon2 = "0.5"
+jsonwebtoken.workspace = true
+rand.workspace = true
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.11"
+base64 = "0.22"
+
+# Vault encryption
+chacha20poly1305 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+# HTTP (always compiled, runtime toggle via config)
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "set-header", "timeout", "trace"] }
+
+# Constant-time comparison
+subtle = "2"
+
+# MCP (always compiled, runtime toggle via config)
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+schemars.workspace = true
+
+# Used by replica mode (always) and federation (feature-gated)
+selene-client.workspace = true
+
+# Full-text search (feature-gated)
+tantivy = { version = "0.26", optional = true }
+
+# RDF import/export (feature-gated)
+selene-rdf = { workspace = true, optional = true }
+
+[features]
+default = []
+dev-tls = ["dep:rcgen"]
+federation = []
+vector = ["selene-gql/vector"]
+search = ["dep:tantivy"]
+cloud-storage = ["selene-ts/cloud-storage"]
+rdf = ["selene-rdf"]
+rdf-sparql = ["rdf", "selene-rdf/sparql"]
+
+[dev-dependencies]
+selene-testing = { workspace = true, features = ["tls"] }
+selene-wire.workspace = true
+smol_str.workspace = true
+tempfile.workspace = true
+anyhow.workspace = true
+reqwest = { version = "0.13", features = ["json", "form"] }
+serde_json.workspace = true
+
+# Global allocator (musl only: fixes 2-9x perf loss from musl's single-lock allocator)
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }

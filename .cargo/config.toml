@@ -1,0 +1,48 @@
+# Limit parallelism for builds (16 GB RAM).
+[build]
+jobs = 8
+
+# Clippy lints and codegen flags applied to all local builds.
+# target-cpu=native enables host-specific instructions (M5 NEON, etc.).
+# Docker builds exclude this file via .dockerignore for portable binaries.
+# Release distribution builds should override via RUSTFLAGS="-Ctarget-cpu=..."
+[target.'cfg(all())']
+rustflags = [
+    "-Ctarget-cpu=native",
+    "-Wclippy::all",
+    "-Wclippy::pedantic",
+    "-Aclippy::module_name_repetitions",
+    "-Aclippy::must_use_candidate",
+    "-Aclippy::missing_errors_doc",
+    "-Aclippy::missing_panics_doc",
+    "-Aclippy::cast_possible_truncation",
+    "-Aclippy::cast_sign_loss",
+    "-Aclippy::cast_precision_loss",
+    "-Aclippy::cast_possible_wrap",
+    "-Aclippy::redundant_pub_crate",
+    "-Aclippy::doc_markdown",
+    "-Aclippy::many_single_char_names",
+    "-Aclippy::items_after_statements",
+    "-Aclippy::missing_fields_in_debug",
+    "-Aclippy::redundant_closure_for_method_calls",
+    "-Aclippy::single_char_pattern",
+    "-Aclippy::ignored_unit_patterns",
+    "-Aclippy::needless_pass_by_value",
+    "-Aclippy::similar_names",
+    "-Aclippy::too_many_lines",
+    "-Aclippy::match_same_arms",
+    "-Aclippy::wildcard_enum_match_arm",
+    "-Aclippy::float_cmp",
+    "-Aclippy::approx_constant",
+    "-Aclippy::unused_async",
+    "-Aclippy::used_underscore_binding",
+    "-Aclippy::while_let_loop",
+    "-Aclippy::assigning_clones",
+    "-Aclippy::default_trait_access",
+    "-Aclippy::unusual_byte_groupings",
+    "-Aclippy::doc_link_with_quotes",
+    "-Aclippy::unnecessary_get_then_check",
+    "-Aclippy::implicit_hasher",
+    "-Aclippy::return_self_not_must_use",
+    "-Aclippy::wildcard_imports",
+]

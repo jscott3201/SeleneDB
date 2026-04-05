@@ -1,0 +1,29 @@
+[package]
+name = "selene-persist"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Write-ahead log and binary snapshots for Selene persistence"
+
+[dependencies]
+selene-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+selene-testing = { workspace = true, features = ["bench"] }
+selene-graph.workspace = true
+smol_str.workspace = true
+serde_json.workspace = true
+criterion.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "persist_bench"
+harness = false
