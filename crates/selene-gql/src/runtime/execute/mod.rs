@@ -900,7 +900,7 @@ const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024; // 64 MB
 const DEFAULT_MAX_BINDINGS: usize = 100_000;
 
 /// Read max bindings from `SELENE_MAX_BINDINGS` env var (cached via OnceLock).
-fn max_bindings() -> usize {
+pub(super) fn max_bindings() -> usize {
     static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("SELENE_MAX_BINDINGS")

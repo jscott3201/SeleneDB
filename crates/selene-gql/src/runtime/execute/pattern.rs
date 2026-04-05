@@ -322,10 +322,17 @@ fn execute_factorized_core(
             }
         }
 
-        // Check memory limit on the factorized chunk's deepest level
+        // Check row limit on the factorized chunk without materializing.
+        // fc.active_len() returns the deepest level's active count, which
+        // equals the flattened row count (each leaf traces one ancestor path).
         if let Some(ref fc) = chunk {
-            let synthetic_check = fc.flatten();
-            super::check_chunk_limit(&synthetic_check)?;
+            let active = fc.active_len();
+            let limit = super::max_bindings();
+            if active > limit {
+                return Err(GqlError::ResourcesExhausted {
+                    message: format!("query produced {active} rows (max {limit})"),
+                });
+            }
         }
     }
 

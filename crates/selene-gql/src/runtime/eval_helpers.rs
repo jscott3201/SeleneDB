@@ -232,6 +232,7 @@ pub(super) fn eval_property_exists(
 pub(super) fn eval_exists(
     pattern: &crate::ast::pattern::MatchClause,
     negated: bool,
+    binding: &Binding,
     ctx: &EvalContext<'_>,
 ) -> Result<GqlValue, GqlError> {
     let inner_ops = plan_subquery_cached(pattern, ctx.graph)?;
@@ -240,7 +241,7 @@ pub(super) fn eval_exists(
         ctx.graph,
         ctx.scope,
         None,
-        None,
+        Some(binding),
         None,
         Some(1),
     )?;

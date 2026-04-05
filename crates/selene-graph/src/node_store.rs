@@ -69,6 +69,9 @@ pub struct NodeStore {
     versions: ChunkedVec<u64>,
     cached_json: ChunkedVec<Option<Arc<str>>>,
     alive: Vec<u64>,
+    /// Incrementally maintained bitmap of live node IDs.
+    /// Updated on insert/remove to avoid O(N/64) rebuilds in alive_bitmap().
+    alive_bm: RoaringBitmap,
     count: usize,
     /// Number of logical slots (column length). The alive bitvec may be
     /// longer (rounded up to u64 words).
@@ -109,6 +112,7 @@ impl NodeStore {
             versions,
             cached_json,
             alive: vec![0], // 1 word = 64 slots, slot 0 is dead
+            alive_bm: RoaringBitmap::new(),
             count: 0,
             slot_count: 1,
         }
@@ -124,10 +128,10 @@ impl NodeStore {
         self.slot_count
     }
 
-    /// Build a RoaringBitmap of all live node IDs.
-    /// O(N/64) where N = max slot index. Uses word-at-a-time insertion.
+    /// Return a RoaringBitmap of all live node IDs.
+    /// Maintained incrementally on insert/remove; clone cost is O(containers).
     pub fn alive_bitmap(&self) -> RoaringBitmap {
-        crate::bitset::alive_to_roaring(&self.alive)
+        self.alive_bm.clone()
     }
 
     /// Check if a node exists.
@@ -189,6 +193,7 @@ impl NodeStore {
         self.versions.set(idx, node.version);
         self.cached_json.set(idx, node.cached_json);
         bit_set(&mut self.alive, idx);
+        self.alive_bm.insert(idx as u32);
     }
 
     /// Remove a node, returning the owned Node if it existed.
@@ -203,6 +208,7 @@ impl NodeStore {
             return None;
         }
         bit_clear(&mut self.alive, idx);
+        self.alive_bm.remove(idx as u32);
         self.count -= 1;
 
         Some(Node {

@@ -9,11 +9,32 @@ pub mod optimize;
 pub mod plan;
 pub(crate) mod wco_rule;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use selene_core::IStr;
 use selene_graph::{EdgeStatistics, SeleneGraph};
+
+// Thread-local cache for EdgeStatistics keyed by graph generation.
+// Avoids O(E) rebuild on every plan_query/plan_mutation call.
+thread_local! {
+    static EDGE_STATS_CACHE: RefCell<Option<(u64, Arc<EdgeStatistics>)>> = const { RefCell::new(None) };
+}
+
+fn cached_edge_statistics(graph: &SeleneGraph) -> Arc<EdgeStatistics> {
+    EDGE_STATS_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if let Some((cached_gen, stats)) = c.as_ref()
+            && *cached_gen == graph.generation()
+        {
+            return Arc::clone(stats);
+        }
+        let stats = Arc::new(EdgeStatistics::build(graph));
+        *c = Some((graph.generation(), Arc::clone(&stats)));
+        stats
+    })
+}
 
 use crate::ast::expr::Expr;
 use crate::ast::pattern::*;
@@ -93,7 +114,7 @@ pub fn plan_query(
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
     let mut bound_vars: HashSet<IStr> = HashSet::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
 
     for stmt in &pipeline.statements {
         match stmt {
@@ -178,7 +199,7 @@ pub fn plan_mutation(
 ) -> Result<ExecutionPlan, GqlError> {
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
 
     if let Some(query) = &mp.query {
         for stmt in &query.statements {
@@ -231,7 +252,7 @@ pub fn plan_match_public(
     ops: &mut Vec<PatternOp>,
     graph: &SeleneGraph,
 ) -> Result<(), GqlError> {
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
     plan_match(m, ops, graph, &edge_stats)
 }
 

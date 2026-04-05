@@ -245,7 +245,7 @@ fn eval_expr_inner(
 
         Expr::PropertyExists(expr, key) => eval_property_exists(expr, *key, binding, ctx),
 
-        Expr::Exists { pattern, negated } => eval_exists(pattern, *negated, ctx),
+        Expr::Exists { pattern, negated } => eval_exists(pattern, *negated, binding, ctx),
 
         Expr::IsLabeled {
             expr,
