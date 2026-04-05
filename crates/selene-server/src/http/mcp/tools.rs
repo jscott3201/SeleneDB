@@ -1341,6 +1341,85 @@ impl SeleneTools {
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "enrich_communities",
+        description = "Add vector embeddings to __CommunitySummary nodes by composing text from structural profiles and calling embed(). Enables global and hybrid search modes in graphrag_search. Run build_communities first."
+    )]
+    async fn enrich_communities(&self) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+
+        // 1. MATCH all __CommunitySummary nodes
+        let query = "MATCH (c:__CommunitySummary) \
+                     RETURN id(c) AS nodeId, c.label_distribution AS labels, \
+                     c.key_entities AS entities, c.node_count AS count";
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        if result.row_count == 0 {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No __CommunitySummary nodes found. Run build_communities first.",
+            )]));
+        }
+
+        // Parse result JSON to get node data
+        let data_str = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data_str).unwrap_or_default();
+
+        let mut enriched = 0u64;
+        for row in &rows {
+            let node_id = row.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+            if node_id == 0 {
+                continue;
+            }
+
+            let labels = row.get("labels").and_then(|v| v.as_str()).unwrap_or("");
+            let entities = row.get("entities").and_then(|v| v.as_str()).unwrap_or("");
+            let count = row.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+
+            // Compose text for embedding
+            let text = format!(
+                "Community with {count} nodes. Labels: {labels}. Key entities: {entities}."
+            );
+
+            // SET embedding via embed() function
+            let mut params_map = HashMap::new();
+            params_map.insert("id".into(), Value::UInt(node_id));
+            params_map.insert("text".into(), Value::from(text.as_str()));
+
+            let set_query = "MATCH (c:__CommunitySummary) FILTER id(c) = $id \
+                            SET c.embedding = embed($text)";
+
+            let st = Arc::clone(&self.state);
+            let auth2 = auth.clone();
+            self.submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    set_query,
+                    Some(&params_map),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+            })
+            .await?;
+            enriched += 1;
+        }
+
+        let text = format!("Enriched {enriched} community summaries with embeddings.");
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 /// Produce a syntax hint based on common GQL parse error patterns.
