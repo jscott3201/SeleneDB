@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_call:
 
 concurrency:
@@ -59,12 +59,12 @@ jobs:
       - name: License and advisory check
         uses: EmbarkStudios/cargo-deny-action@v2
 
-  # Snapshot: build and push main-<sha> multi-arch image on every green
-  # main push. Each platform builds natively (no QEMU), then a merge job
+  # Snapshot: build and push dev-<sha> multi-arch image on every green
+  # dev push. Each platform builds natively (no QEMU), then a merge job
   # creates the multi-arch manifest. Concurrency control cancels stale builds.
   snapshot-build:
     name: Snapshot (${{ matrix.arch }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     needs: [lint, test, doc-audit]
     strategy:
       fail-fast: false
@@ -127,7 +127,7 @@ jobs:
 
   snapshot-merge:
     name: Snapshot manifest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     needs: snapshot-build
     runs-on: ubuntu-latest
     permissions:
@@ -150,7 +150,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/selenedb
           tags: |
-            type=sha,prefix=main-
+            type=sha,prefix=dev-
 
       - name: Download digests
         uses: actions/download-artifact@v8
