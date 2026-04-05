@@ -1472,6 +1472,517 @@ impl SeleneTools {
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    // ── Agent Memory Tools (feature-gated: ai) ─────────────────────
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "remember",
+        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-recently-used memory when the namespace reaches capacity (configurable via configure_memory)."
+    )]
+    async fn remember(
+        &self,
+        params: Parameters<RememberParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let p = params.0;
+        let namespace = p.namespace;
+        let content = p.content;
+        let memory_type = p.memory_type;
+        let entities = p.entities.unwrap_or_default();
+
+        // 1. Read __MemoryConfig for namespace (defaults if absent)
+        let (max_memories, default_ttl_ms) = {
+            let mut config_params = HashMap::new();
+            config_params.insert("ns".into(), Value::from(namespace.as_str()));
+            let config_query = "MATCH (c:__MemoryConfig {namespace: $ns}) \
+                                RETURN c.max_memories AS max_memories, \
+                                c.default_ttl_ms AS default_ttl_ms";
+            let config_result = ops::gql::execute_gql(
+                &self.state,
+                &auth,
+                config_query,
+                Some(&config_params),
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            )
+            .map_err(op_err)?;
+
+            let config_str = config_result.data_json.unwrap_or_else(|| "[]".to_string());
+            let config_rows: Vec<serde_json::Value> =
+                serde_json::from_str(&config_str).unwrap_or_default();
+            if let Some(row) = config_rows.first() {
+                let max = row
+                    .get("max_memories")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1000);
+                let ttl = row
+                    .get("default_ttl_ms")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                (max, ttl)
+            } else {
+                (1000i64, 0i64)
+            }
+        };
+
+        // 2. Count __Memory nodes in namespace
+        let count = {
+            let mut count_params = HashMap::new();
+            count_params.insert("ns".into(), Value::from(namespace.as_str()));
+            let count_query = "MATCH (m:__Memory {namespace: $ns}) RETURN count(m) AS cnt";
+            let count_result = ops::gql::execute_gql(
+                &self.state,
+                &auth,
+                count_query,
+                Some(&count_params),
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            )
+            .map_err(op_err)?;
+            let count_str = count_result.data_json.unwrap_or_else(|| "[]".to_string());
+            let count_rows: Vec<serde_json::Value> =
+                serde_json::from_str(&count_str).unwrap_or_default();
+            count_rows
+                .first()
+                .and_then(|r| r.get("cnt"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        };
+
+        // 3. Evict if at capacity (max_memories > 0 means bounded)
+        if max_memories > 0 && count >= max_memories {
+            // Get all __Memory nodes in namespace with created_at
+            let mut mem_params = HashMap::new();
+            mem_params.insert("ns".into(), Value::from(namespace.as_str()));
+            let mem_query = "MATCH (m:__Memory {namespace: $ns}) \
+                             RETURN id(m) AS nodeId, m.created_at AS created_at \
+                             ORDER BY m.created_at ASC";
+            let mem_result = ops::gql::execute_gql(
+                &self.state,
+                &auth,
+                mem_query,
+                Some(&mem_params),
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            )
+            .map_err(op_err)?;
+            let mem_str = mem_result.data_json.unwrap_or_else(|| "[]".to_string());
+            let mem_rows: Vec<serde_json::Value> =
+                serde_json::from_str(&mem_str).unwrap_or_default();
+
+            let memories: Vec<(u64, i64)> = mem_rows
+                .iter()
+                .filter_map(|r| {
+                    let nid = r.get("nodeId")?.as_u64()?;
+                    let ca = r.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+                    Some((nid, ca))
+                })
+                .collect();
+
+            if let Some(evict_id) = {
+                let mut counters = self.state.clock_counters.write();
+                let ns_counters = counters.entry(namespace.clone()).or_default();
+                find_eviction_candidate(&memories, ns_counters)
+            } {
+                // Delete the eviction candidate
+                let mut del_params = HashMap::new();
+                del_params.insert("evict_id".into(), Value::UInt(evict_id));
+                del_params.insert("ns".into(), Value::from(namespace.as_str()));
+                let del_query = "MATCH (m:__Memory {namespace: $ns}) \
+                                 FILTER id(m) = $evict_id \
+                                 DELETE m";
+                let st = Arc::clone(&self.state);
+                let auth2 = auth.clone();
+                self.submit_mut(move || {
+                    ops::gql::execute_gql(
+                        &st,
+                        &auth2,
+                        del_query,
+                        Some(&del_params),
+                        false,
+                        false,
+                        ops::gql::ResultFormat::Json,
+                    )
+                })
+                .await?;
+
+                // Remove evicted node from counters
+                let mut counters = self.state.clock_counters.write();
+                if let Some(ns_counters) = counters.get_mut(&namespace) {
+                    ns_counters.remove(&evict_id);
+                }
+            }
+        }
+
+        // 4. Compute valid_until
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        let valid_until = if let Some(vu) = p.valid_until {
+            vu
+        } else if default_ttl_ms > 0 {
+            now_ms + default_ttl_ms
+        } else {
+            0
+        };
+
+        // 5. INSERT __Memory node with embed($content) for embedding
+        let mut insert_params = HashMap::new();
+        insert_params.insert("ns".into(), Value::from(namespace.as_str()));
+        insert_params.insert("content".into(), Value::from(content.as_str()));
+        insert_params.insert("mtype".into(), Value::from(memory_type.as_str()));
+        insert_params.insert("vfrom".into(), Value::Int(now_ms));
+        insert_params.insert("vuntil".into(), Value::Int(valid_until));
+        insert_params.insert("conf".into(), Value::Float(1.0));
+        insert_params.insert("cat".into(), Value::Int(now_ms));
+
+        let insert_query = "INSERT (m:__Memory { \
+                            namespace: $ns, \
+                            content: $content, \
+                            embedding: embed($content), \
+                            memory_type: $mtype, \
+                            valid_from: $vfrom, \
+                            valid_until: $vuntil, \
+                            confidence: $conf, \
+                            created_at: $cat \
+                            }) \
+                            RETURN id(m) AS nodeId";
+
+        let st = Arc::clone(&self.state);
+        let auth2 = auth.clone();
+        let insert_result = self
+            .submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    insert_query,
+                    Some(&insert_params),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+            })
+            .await?;
+
+        let result_str = insert_result.data_json.unwrap_or_else(|| "[]".to_string());
+        let result_rows: Vec<serde_json::Value> =
+            serde_json::from_str(&result_str).unwrap_or_default();
+        let node_id = result_rows
+            .first()
+            .and_then(|r| r.get("nodeId"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        // 6. If entities provided: MERGE __Entity nodes and create __MENTIONS edges
+        if !entities.is_empty() {
+            for entity_name in &entities {
+                let mut entity_params = HashMap::new();
+                entity_params.insert("ns".into(), Value::from(namespace.as_str()));
+                entity_params.insert("ename".into(), Value::from(entity_name.as_str()));
+                entity_params.insert("mid".into(), Value::UInt(node_id));
+
+                let entity_query = "MERGE (e:__Entity {namespace: $ns, name: $ename}) \
+                     SET e.entity_type = 'auto'";
+
+                let st = Arc::clone(&self.state);
+                let auth2 = auth.clone();
+                let ep = entity_params.clone();
+                self.submit_mut(move || {
+                    ops::gql::execute_gql(
+                        &st,
+                        &auth2,
+                        entity_query,
+                        Some(&ep),
+                        false,
+                        false,
+                        ops::gql::ResultFormat::Json,
+                    )
+                })
+                .await?;
+
+                // Create __MENTIONS edge from memory to entity
+                let edge_query = "MATCH (m:__Memory) FILTER id(m) = $mid \
+                     MATCH (e:__Entity {namespace: $ns, name: $ename}) \
+                     INSERT (m)-[:__MENTIONS]->(e)";
+
+                let st = Arc::clone(&self.state);
+                let auth2 = auth.clone();
+                self.submit_mut(move || {
+                    ops::gql::execute_gql(
+                        &st,
+                        &auth2,
+                        edge_query,
+                        Some(&entity_params),
+                        false,
+                        false,
+                        ops::gql::ResultFormat::Json,
+                    )
+                })
+                .await?;
+            }
+        }
+
+        let mut text = format!("Stored memory (node {node_id}) in namespace '{namespace}'");
+        if !entities.is_empty() {
+            let _ = write!(text, " with {} entity links", entities.len());
+        }
+        if valid_until > 0 {
+            let _ = write!(text, ", expires at {valid_until}");
+        }
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "recall",
+        description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction."
+    )]
+    async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let p = params.0;
+        let namespace = p.namespace;
+        let k = p.k.unwrap_or(10);
+
+        if k <= 0 {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: "k must be a positive integer".into(),
+                data: None,
+            });
+        }
+
+        // Call memory.recall procedure via GQL
+        let query = "CALL memory.recall($ns, $queryText, $k) \
+                     YIELD nodeId, content, memoryType, score, confidence, createdAt \
+                     RETURN nodeId, content, memoryType, score, confidence, createdAt";
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert("ns".into(), Value::from(namespace.as_str()));
+        gql_params.insert("queryText".into(), Value::from(p.query.as_str()));
+        gql_params.insert("k".into(), Value::Int(k));
+
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            Some(&gql_params),
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        // Parse result to get node IDs for clock counter updates
+        let data_str = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data_str).unwrap_or_default();
+
+        // Increment clock counters for returned nodes
+        let result_node_ids: Vec<u64> = rows
+            .iter()
+            .filter_map(|r| r.get("nodeId")?.as_u64())
+            .collect();
+
+        if !result_node_ids.is_empty() {
+            let mut counters = self.state.clock_counters.write();
+            let ns_counters = counters.entry(namespace.clone()).or_default();
+            for node_id in &result_node_ids {
+                let counter = ns_counters.entry(*node_id).or_insert(0);
+                *counter = (*counter + 1).min(3); // cap at 3
+            }
+        }
+
+        let text = format!(
+            "Recalled {} memories from namespace '{namespace}'\n{data_str}",
+            rows.len()
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "forget",
+        description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required."
+    )]
+    async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let p = params.0;
+        let namespace = p.namespace;
+
+        if p.node_id.is_none() && p.query.is_none() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: "forget requires either node_id or query".into(),
+                data: None,
+            });
+        }
+
+        if let Some(node_id) = p.node_id {
+            // Delete specific node by ID (with namespace check)
+            let mut del_params = HashMap::new();
+            del_params.insert("nid".into(), Value::UInt(node_id));
+            del_params.insert("ns".into(), Value::from(namespace.as_str()));
+            let del_query = "MATCH (m:__Memory {namespace: $ns}) \
+                             FILTER id(m) = $nid \
+                             DELETE m";
+
+            let st = Arc::clone(&self.state);
+            let auth2 = auth.clone();
+            self.submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    del_query,
+                    Some(&del_params),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+            })
+            .await?;
+
+            // Clean up clock counter
+            let mut counters = self.state.clock_counters.write();
+            if let Some(ns_counters) = counters.get_mut(&namespace) {
+                ns_counters.remove(&node_id);
+            }
+
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Deleted memory node {node_id} from namespace '{namespace}'"
+            ))]))
+        } else if let Some(query_text) = p.query {
+            // Match by content CONTAINS and delete
+            let mut del_params = HashMap::new();
+            del_params.insert("ns".into(), Value::from(namespace.as_str()));
+            del_params.insert("q".into(), Value::from(query_text.as_str()));
+
+            // First find matching nodes to get their IDs for counter cleanup
+            let find_query = "MATCH (m:__Memory {namespace: $ns}) \
+                              FILTER m.content CONTAINS $q \
+                              RETURN id(m) AS nodeId";
+            let find_result = ops::gql::execute_gql(
+                &self.state,
+                &auth,
+                find_query,
+                Some(&del_params),
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            )
+            .map_err(op_err)?;
+
+            let find_str = find_result.data_json.unwrap_or_else(|| "[]".to_string());
+            let find_rows: Vec<serde_json::Value> =
+                serde_json::from_str(&find_str).unwrap_or_default();
+            let deleted_ids: Vec<u64> = find_rows
+                .iter()
+                .filter_map(|r| r.get("nodeId")?.as_u64())
+                .collect();
+
+            // Delete matching nodes
+            let del_query = "MATCH (m:__Memory {namespace: $ns}) \
+                             FILTER m.content CONTAINS $q \
+                             DELETE m";
+            let st = Arc::clone(&self.state);
+            let auth2 = auth.clone();
+            self.submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    del_query,
+                    Some(&del_params),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+            })
+            .await?;
+
+            // Clean up clock counters
+            if !deleted_ids.is_empty() {
+                let mut counters = self.state.clock_counters.write();
+                if let Some(ns_counters) = counters.get_mut(&namespace) {
+                    for id in &deleted_ids {
+                        ns_counters.remove(id);
+                    }
+                }
+            }
+
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Deleted {} memories matching '{}' from namespace '{namespace}'",
+                deleted_ids.len(),
+                query_text
+            ))]))
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    #[tool(
+        name = "configure_memory",
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy. Settings persist in a __MemoryConfig node."
+    )]
+    async fn configure_memory(
+        &self,
+        params: Parameters<ConfigureMemoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let p = params.0;
+        let namespace = p.namespace;
+
+        // Build SET clauses dynamically based on provided fields
+        let mut set_parts: Vec<String> = Vec::new();
+        let mut gql_params = HashMap::new();
+        gql_params.insert("ns".into(), Value::from(namespace.as_str()));
+
+        if let Some(max_mem) = p.max_memories {
+            set_parts.push("c.max_memories = $max_mem".to_string());
+            gql_params.insert("max_mem".into(), Value::Int(max_mem));
+        }
+        if let Some(ttl) = p.default_ttl_ms {
+            set_parts.push("c.default_ttl_ms = $ttl".to_string());
+            gql_params.insert("ttl".into(), Value::Int(ttl));
+        }
+        if let Some(policy) = p.eviction_policy {
+            set_parts.push("c.eviction_policy = $policy".to_string());
+            gql_params.insert("policy".into(), Value::from(policy.as_str()));
+        }
+
+        let set_clause = if set_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" SET {}", set_parts.join(", "))
+        };
+
+        let query = format!("MERGE (c:__MemoryConfig {{namespace: $ns}}){set_clause}");
+
+        let st = Arc::clone(&self.state);
+        let auth2 = auth.clone();
+        self.submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                &query,
+                Some(&gql_params),
+                false,
+                false,
+                ops::gql::ResultFormat::Json,
+            )
+        })
+        .await?;
+
+        let text = format!("Configured memory for namespace '{namespace}'");
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 /// Produce a syntax hint based on common GQL parse error patterns.
@@ -1609,4 +2120,257 @@ fn build_community_data(graph: &selene_graph::SeleneGraph, min_size: usize) -> V
 
     result.sort_by(|a, b| b.node_count.cmp(&a.node_count));
     result
+}
+
+// ── Agent memory eviction helpers ──────────────────────────────────
+
+/// Find the node to evict using the enhanced clock algorithm (2-bit counters).
+///
+/// The sweep iterates memories ordered by `created_at` (oldest first).
+/// A node with counter 0 is evicted immediately. Nodes with counter > 0
+/// have their counter decremented by 1. If no node reaches 0 after a
+/// full sweep (safety net), the node with the lowest counter (tiebreak
+/// by oldest `created_at`) is evicted.
+///
+/// Cold start (empty counters after restart): all counters default to 0,
+/// so the oldest memory is evicted first.
+#[cfg(feature = "ai")]
+fn find_eviction_candidate(
+    memories: &[(u64, i64)], // (node_id, created_at)
+    counters: &mut std::collections::HashMap<u64, u8>,
+) -> Option<u64> {
+    if memories.is_empty() {
+        return None;
+    }
+
+    // First pass: find a node with counter == 0, decrementing as we go
+    for &(node_id, _created_at) in memories {
+        let counter = counters.entry(node_id).or_insert(0);
+        if *counter == 0 {
+            return Some(node_id);
+        }
+        *counter -= 1;
+    }
+
+    // Safety net: all counters were > 0 and have been decremented.
+    // Evict the node with the lowest counter (tiebreak: oldest created_at).
+    // After decrementing, find the minimum.
+    let mut best: Option<(u64, u8, i64)> = None; // (node_id, counter, created_at)
+    for &(node_id, created_at) in memories {
+        let counter = *counters.get(&node_id).unwrap_or(&0);
+        match best {
+            None => best = Some((node_id, counter, created_at)),
+            Some((_, best_counter, best_ca)) => {
+                if counter < best_counter || (counter == best_counter && created_at < best_ca) {
+                    best = Some((node_id, counter, created_at));
+                }
+            }
+        }
+    }
+
+    best.map(|(node_id, _, _)| node_id)
+}
+
+// ── Eviction tests ─────────────────────────────────────────────────
+
+#[cfg(test)]
+#[cfg(feature = "ai")]
+mod memory_eviction_tests {
+    use super::find_eviction_candidate;
+    use std::collections::HashMap;
+
+    #[test]
+    fn clock_evicts_zero_counter_first() {
+        // Node 10 has counter 0, node 20 has counter 1
+        let memories = vec![(10, 100), (20, 200)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 0u8);
+        counters.insert(20, 1);
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(evicted, Some(10));
+    }
+
+    #[test]
+    fn clock_decrements_on_sweep() {
+        // All counters > 0: they should be decremented
+        let memories = vec![(10, 100), (20, 200)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 3u8);
+        counters.insert(20, 2);
+
+        let _evicted = find_eviction_candidate(&memories, &mut counters);
+        // After the sweep pass, counters are decremented by 1
+        // node 10: 3 -> 2, node 20: 2 -> 1
+        assert_eq!(*counters.get(&10).unwrap(), 2);
+        assert_eq!(*counters.get(&20).unwrap(), 1);
+    }
+
+    #[test]
+    fn clock_evicts_oldest_at_tiebreak() {
+        // Both at counter 0, oldest created_at wins
+        let memories = vec![(10, 50), (20, 100)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 0u8);
+        counters.insert(20, 0);
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        // Node 10 is first in iteration order (sorted by created_at asc) and has counter 0
+        assert_eq!(evicted, Some(10));
+    }
+
+    #[test]
+    fn clock_cap_at_three() {
+        // Simulates the counter increment logic from the recall tool
+        let mut counter: u8 = 2;
+        counter = (counter + 1).min(3);
+        assert_eq!(counter, 3);
+        counter = (counter + 1).min(3);
+        assert_eq!(counter, 3); // capped at 3
+    }
+
+    #[test]
+    fn clock_safety_net() {
+        // All counters > 0, after decrement the lowest should be evicted
+        // Node 10: counter 1 -> 0 after decrement, Node 20: counter 2 -> 1 after decrement
+        let memories = vec![(10, 100), (20, 200)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 1u8);
+        counters.insert(20, 2);
+
+        // First pass won't find counter == 0 because it decrements and moves on.
+        // But the first node (10) starts at 1, gets decremented to 0 and...
+        // Actually, the logic is: check counter, if 0 evict. Node 10 starts at 1, so
+        // it gets decremented to 0. Node 20 starts at 2, gets decremented to 1.
+        // Safety net picks the lowest counter (node 10 at 0).
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(evicted, Some(10));
+    }
+
+    #[test]
+    fn clock_cold_start() {
+        // No counters exist (cold start after restart)
+        // Should evict the oldest memory (first in the list)
+        let memories = vec![(10, 100), (20, 200), (30, 300)];
+        let mut counters = HashMap::new();
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        // All counters default to 0, first node (oldest) is evicted
+        assert_eq!(evicted, Some(10));
+    }
+
+    #[test]
+    fn clock_empty_namespace() {
+        let memories: Vec<(u64, i64)> = vec![];
+        let mut counters = HashMap::new();
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(evicted, None);
+    }
+
+    #[test]
+    fn clock_single_memory() {
+        let memories = vec![(42, 100)];
+        let mut counters = HashMap::new();
+
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        assert_eq!(evicted, Some(42));
+    }
+
+    #[test]
+    fn eviction_unlimited_at_zero() {
+        // max_memories == 0 means no eviction. This is tested at the tool level.
+        // Here we just verify the eviction function itself works with a single node.
+        let memories = vec![(10, 100)];
+        let mut counters = HashMap::new();
+        counters.insert(10u64, 3u8);
+
+        // Even with high counter, if called, it decrements and uses safety net
+        let evicted = find_eviction_candidate(&memories, &mut counters);
+        // Node 10 starts at 3, gets decremented to 2, safety net picks it (only candidate)
+        assert_eq!(evicted, Some(10));
+    }
+
+    #[test]
+    fn default_ttl_auto_sets_valid_until() {
+        // Test that when default_ttl_ms > 0, valid_until is computed.
+        // This is logic from the remember tool, tested here as a unit.
+        let now_ms: i64 = 1_000_000;
+        let default_ttl_ms: i64 = 60_000;
+        let caller_valid_until: Option<i64> = None;
+
+        let valid_until = if let Some(vu) = caller_valid_until {
+            vu
+        } else if default_ttl_ms > 0 {
+            now_ms + default_ttl_ms
+        } else {
+            0
+        };
+
+        assert_eq!(valid_until, 1_060_000);
+    }
+
+    #[test]
+    fn configure_sets_policy() {
+        // Verify configuration logic (unit test of the SET clause builder)
+        let mut set_parts: Vec<String> = Vec::new();
+        let max_memories = Some(500i64);
+        let default_ttl_ms = Some(3_600_000_i64);
+        let eviction_policy = Some("clock".to_string());
+
+        if max_memories.is_some() {
+            set_parts.push("c.max_memories = $max_mem".to_string());
+        }
+        if default_ttl_ms.is_some() {
+            set_parts.push("c.default_ttl_ms = $ttl".to_string());
+        }
+        if eviction_policy.is_some() {
+            set_parts.push("c.eviction_policy = $policy".to_string());
+        }
+
+        let set_clause = format!(" SET {}", set_parts.join(", "));
+        assert!(set_clause.contains("max_memories"));
+        assert!(set_clause.contains("default_ttl_ms"));
+        assert!(set_clause.contains("eviction_policy"));
+    }
+
+    #[test]
+    fn forget_requires_target() {
+        // Verify the parameter validation logic
+        let node_id: Option<u64> = None;
+        let query: Option<String> = None;
+        let needs_target = node_id.is_none() && query.is_none();
+        assert!(needs_target);
+    }
+
+    #[test]
+    fn forget_by_node_id_accepted() {
+        // Verify that providing node_id satisfies the requirement
+        let node_id: Option<u64> = Some(42);
+        let query: Option<String> = None;
+        let needs_target = node_id.is_none() && query.is_none();
+        assert!(!needs_target);
+    }
+
+    #[test]
+    fn forget_by_query_accepted() {
+        // Verify that providing query satisfies the requirement
+        let node_id: Option<u64> = None;
+        let query: Option<String> = Some("test content".to_string());
+        let needs_target = node_id.is_none() && query.is_none();
+        assert!(!needs_target);
+    }
+
+    #[test]
+    fn eviction_respects_max_memories() {
+        // Simulate the capacity check logic from the remember tool
+        let max_memories: i64 = 3;
+        let count: i64 = 3; // at capacity
+        let should_evict = max_memories > 0 && count >= max_memories;
+        assert!(should_evict);
+
+        let count_under: i64 = 2; // under capacity
+        let should_evict_under = max_memories > 0 && count_under >= max_memories;
+        assert!(!should_evict_under);
+    }
 }

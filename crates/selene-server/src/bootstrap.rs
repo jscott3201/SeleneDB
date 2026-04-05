@@ -73,6 +73,11 @@ pub struct ServerState {
     /// query when the graph has not changed. The tuple stores
     /// `(generation, Arc<CsrAdjacency>)`.
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
+    /// Enhanced clock counters for agent memory eviction (2-bit, 0-3).
+    /// Per-namespace map of node_id to access counter. Ephemeral (not persisted).
+    #[cfg(feature = "ai")]
+    pub(crate) clock_counters:
+        parking_lot::RwLock<std::collections::HashMap<String, std::collections::HashMap<u64, u8>>>,
 }
 
 // ── Accessors (pub for embedder/test API, pub(crate) for internal) ─
@@ -846,6 +851,8 @@ pub async fn bootstrap(
         #[cfg(feature = "rdf")]
         rdf_namespace,
         csr_cache,
+        #[cfg(feature = "ai")]
+        clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
     })
 }
 
@@ -952,6 +959,8 @@ impl ServerState {
                 0,
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
+            #[cfg(feature = "ai")]
+            clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
     }
 }

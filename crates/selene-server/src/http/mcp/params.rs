@@ -361,3 +361,69 @@ pub(crate) struct GraphRagSearchParams {
     #[serde(default)]
     pub(crate) mode: Option<String>,
 }
+
+// ── AI / Agent Memory ───────────────���───────────────────────────────
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RememberParams {
+    /// Memory namespace (isolates memories by agent or context).
+    pub(crate) namespace: String,
+    /// The content to remember.
+    pub(crate) content: String,
+    /// Memory type classification (default: "fact"). Examples: "fact", "preference", "event".
+    #[serde(default = "default_memory_type")]
+    pub(crate) memory_type: String,
+    /// Expiry timestamp in milliseconds since epoch. 0 or omit for no expiry.
+    #[serde(default)]
+    pub(crate) valid_until: Option<i64>,
+    /// Entity names mentioned in this memory. Creates __Entity nodes and __MENTIONS edges.
+    #[serde(default)]
+    pub(crate) entities: Option<Vec<String>>,
+}
+
+#[cfg(feature = "ai")]
+fn default_memory_type() -> String {
+    "fact".into()
+}
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RecallParams {
+    /// Memory namespace to search.
+    pub(crate) namespace: String,
+    /// Natural language query text for semantic search.
+    pub(crate) query: String,
+    /// Maximum number of results (default: 10).
+    #[serde(default)]
+    pub(crate) k: Option<i64>,
+}
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ForgetParams {
+    /// Memory namespace to delete from.
+    pub(crate) namespace: String,
+    /// Specific memory node ID to delete.
+    #[serde(default)]
+    pub(crate) node_id: Option<u64>,
+    /// Content substring to match for deletion.
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+}
+
+#[cfg(feature = "ai")]
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ConfigureMemoryParams {
+    /// Memory namespace to configure.
+    pub(crate) namespace: String,
+    /// Maximum number of memories before eviction (0 = unlimited, default: 1000).
+    #[serde(default)]
+    pub(crate) max_memories: Option<i64>,
+    /// Default time-to-live in milliseconds for new memories (0 = no expiry).
+    #[serde(default)]
+    pub(crate) default_ttl_ms: Option<i64>,
+    /// Eviction policy: "clock" (default). Reserved for future policies.
+    #[serde(default)]
+    pub(crate) eviction_policy: Option<String>,
+}
