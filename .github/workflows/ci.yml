@@ -14,8 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Override .cargo/config.toml which sets -Ctarget-cpu=native (for local
-  # Apple Silicon builds). CI runners are x86_64 and would SIGILL on
-  # host-specific instructions. Keep clippy lints but drop target-cpu.
+  # Apple Silicon builds). CI uses mixed-architecture runners, so avoid
+  # host-specific codegen for portability/reproducibility. Keep clippy
+  # lints but drop target-cpu.
   CARGO_ENCODED_RUSTFLAGS: "-Wclippy::all\x1f-Wclippy::pedantic\x1f-Aclippy::module_name_repetitions\x1f-Aclippy::must_use_candidate\x1f-Aclippy::missing_errors_doc\x1f-Aclippy::missing_panics_doc\x1f-Aclippy::cast_possible_truncation\x1f-Aclippy::cast_sign_loss\x1f-Aclippy::cast_precision_loss\x1f-Aclippy::cast_possible_wrap\x1f-Aclippy::redundant_pub_crate\x1f-Aclippy::doc_markdown\x1f-Aclippy::many_single_char_names\x1f-Aclippy::items_after_statements\x1f-Aclippy::missing_fields_in_debug\x1f-Aclippy::redundant_closure_for_method_calls\x1f-Aclippy::single_char_pattern\x1f-Aclippy::ignored_unit_patterns\x1f-Aclippy::needless_pass_by_value\x1f-Aclippy::similar_names\x1f-Aclippy::too_many_lines\x1f-Aclippy::match_same_arms\x1f-Aclippy::wildcard_enum_match_arm\x1f-Aclippy::float_cmp\x1f-Aclippy::approx_constant\x1f-Aclippy::unused_async\x1f-Aclippy::used_underscore_binding\x1f-Aclippy::while_let_loop\x1f-Aclippy::assigning_clones\x1f-Aclippy::default_trait_access\x1f-Aclippy::unusual_byte_groupings\x1f-Aclippy::doc_link_with_quotes\x1f-Aclippy::unnecessary_get_then_check\x1f-Aclippy::implicit_hasher\x1f-Aclippy::return_self_not_must_use\x1f-Aclippy::wildcard_imports"
 
 permissions:
