@@ -12,6 +12,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use selene_core::NodeId;
 use selene_graph::hnsw::{HnswGraph, build, params::HnswParams, search};
+use selene_testing::bench_profiles::{BenchProfile, bench_profile};
 
 fn random_unit_vectors(n: usize, dim: usize) -> Vec<(NodeId, Arc<[f32]>)> {
     (0..n)
@@ -33,6 +34,11 @@ fn bench_hnsw_build(c: &mut Criterion) {
     let params = HnswParams::default();
 
     for &n in &[1_000usize, 10_000] {
+        // HNSW build is O(n * M * ef_construction); 10K takes ~25s per iteration.
+        // Skip 10K in quick/full profiles to stay within time budget.
+        if BenchProfile::should_skip_expensive(n as u64, 10_000) {
+            continue;
+        }
         let vectors = random_unit_vectors(n, 384);
         group.bench_with_input(BenchmarkId::from_parameter(n), &vectors, |b, vecs| {
             b.iter(|| {
@@ -120,10 +126,13 @@ fn bench_hnsw_vs_brute_force(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    hnsw_benches,
-    bench_hnsw_build,
-    bench_hnsw_search,
-    bench_hnsw_vs_brute_force
-);
+fn profile_criterion() -> Criterion {
+    bench_profile().into_criterion()
+}
+
+criterion_group! {
+    name = hnsw_benches;
+    config = profile_criterion();
+    targets = bench_hnsw_build, bench_hnsw_search, bench_hnsw_vs_brute_force
+}
 criterion_main!(hnsw_benches);

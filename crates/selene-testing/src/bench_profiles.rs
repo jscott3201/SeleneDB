@@ -1,9 +1,9 @@
 //! Benchmark profile system with env-gated criterion configuration.
 //!
 //! Set `SELENE_BENCH_PROFILE` to control benchmark depth:
-//! - `quick`  - 2 scales, 10 samples, 1s measurement (~45s total)
-//! - `full`   - 3 scales, 20 samples, 2s measurement (~3min total, default)
-//! - `stress` - 5 scales, 30 samples, 3s measurement (cloud only)
+//! - `quick`  - 2 scales, 10 samples, 1s measurement (~30s per crate)
+//! - `full`   - 3 scales, 15 samples, 1.5s measurement (~5min per crate, default)
+//! - `stress` - 5 scales, 30 samples, 3s measurement (dedicated runs only)
 
 #[cfg(feature = "bench")]
 use criterion::Criterion;
@@ -62,9 +62,9 @@ pub fn bench_profile() -> BenchProfile {
         },
         _ => BenchProfile {
             scales: FULL_SCALES,
-            sample_size: 20,
-            warm_up: Duration::from_millis(500),
-            measurement: Duration::from_secs(2),
+            sample_size: 15,
+            warm_up: Duration::from_millis(200),
+            measurement: Duration::from_millis(1500),
         },
     }
 }
