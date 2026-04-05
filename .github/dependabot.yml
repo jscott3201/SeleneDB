@@ -4,6 +4,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    target-branch: dev
     groups:
       rust-dependencies:
         patterns: ["*"]
@@ -13,4 +14,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    target-branch: dev
     open-pull-requests-limit: 5
