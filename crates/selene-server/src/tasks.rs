@@ -1147,49 +1147,35 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                                 value: Value::Vector(v),
                                 ..
                             } => {
-                                hnsw.stage_insert(*node_id, Arc::clone(v));
+                                hnsw.insert(*node_id, Arc::clone(v));
                             }
                             Change::NodeDeleted { node_id, .. } => {
-                                hnsw.mark_tombstoned(*node_id);
+                                hnsw.remove(*node_id);
                             }
                             Change::PropertyRemoved {
                                 node_id,
                                 old_value: Some(Value::Vector(_)),
                                 ..
                             } => {
-                                hnsw.mark_tombstoned(*node_id);
+                                hnsw.remove(*node_id);
                             }
                             _ => {}
                         }
                     }
                 }
 
-                // Trigger a full rebuild when staging has reached capacity.
-                if hnsw.needs_rebuild() {
-                    let tombstones = hnsw.tombstones();
-                    let mut vectors: Vec<(selene_core::NodeId, std::sync::Arc<[f32]>)> =
-                        Vec::new();
-                    state.graph.read(|g| {
-                        for node_id in g.all_node_ids() {
-                            // Exclude tombstoned (deleted) nodes from the rebuilt graph.
-                            if tombstones.contains(node_id.0 as u32) {
-                                continue;
-                            }
-                            if let Some(node) = g.get_node(node_id) {
-                                for (_, value) in node.properties.iter() {
-                                    if let Value::Vector(v) = value {
-                                        vectors.push((node_id, Arc::clone(v)));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    let vector_count = vectors.len();
-                    hnsw.rebuild(vectors);
+                // Snapshot the mutable graph when enough mutations have
+                // accumulated or tombstone ratio is too high.
+                const SNAPSHOT_THRESHOLD: u64 = 100;
+                const TOMBSTONE_THRESHOLD: f64 = 0.2;
+                if hnsw.pending_count() >= SNAPSHOT_THRESHOLD
+                    || hnsw.tombstone_ratio() > TOMBSTONE_THRESHOLD
+                {
+                    hnsw.snapshot();
                     tracing::info!(
-                        vectors = vector_count,
-                        "HNSW index rebuilt"
+                        pending = hnsw.pending_count(),
+                        len = hnsw.len(),
+                        "HNSW index snapshot completed"
                     );
                 }
             }
