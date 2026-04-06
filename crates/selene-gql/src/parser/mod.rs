@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn parse_float_literal() {
-        parse_ok("MATCH (n) RETURN 3.14");
+        parse_ok("MATCH (n) RETURN 3.15");
     }
 
     #[test]

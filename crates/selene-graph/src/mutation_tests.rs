@@ -660,7 +660,7 @@ fn rollback_restores_edge_properties() {
     // Set an edge property, then drop (rollback).
     {
         let mut m = g.mutate();
-        m.set_edge_property(eid, IStr::new("weight"), Value::Float(3.14))
+        m.set_edge_property(eid, IStr::new("weight"), Value::Float(3.15))
             .unwrap();
         // Drop
     }

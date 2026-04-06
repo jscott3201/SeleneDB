@@ -587,8 +587,8 @@ mod tests {
 
     #[test]
     fn distinctness_key_float_deterministic() {
-        let a = GqlValue::Float(3.14);
-        let b = GqlValue::Float(3.14);
+        let a = GqlValue::Float(3.15);
+        let b = GqlValue::Float(3.15);
         assert_eq!(a.distinctness_key(), b.distinctness_key());
     }
 
@@ -636,8 +636,8 @@ mod tests {
 
     #[test]
     fn coerce_string_to_float() {
-        let v = GqlValue::String(SmolStr::new("3.14"));
-        assert_eq!(try_coerce_to_numeric(&v), Some(GqlValue::Float(3.14)));
+        let v = GqlValue::String(SmolStr::new("3.15"));
+        assert_eq!(try_coerce_to_numeric(&v), Some(GqlValue::Float(3.15)));
     }
 
     #[test]

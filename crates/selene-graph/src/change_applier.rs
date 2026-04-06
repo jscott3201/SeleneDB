@@ -285,7 +285,7 @@ mod tests {
                     source: NodeId(1),
                     target: NodeId(2),
                     key: IStr::new("weight"),
-                    value: Value::Float(3.14),
+                    value: Value::Float(3.15),
                     old_value: None,
                 },
             ],
@@ -294,7 +294,7 @@ mod tests {
         let edge = graph.get_edge(EdgeId(1)).unwrap();
         assert_eq!(
             edge.properties.get(IStr::new("weight")),
-            Some(&Value::Float(3.14))
+            Some(&Value::Float(3.15))
         );
     }
 
@@ -317,7 +317,7 @@ mod tests {
                     source: NodeId(1),
                     target: NodeId(2),
                     key: IStr::new("weight"),
-                    value: Value::Float(3.14),
+                    value: Value::Float(3.15),
                     old_value: None,
                 },
             ],
@@ -330,7 +330,7 @@ mod tests {
                 source: NodeId(1),
                 target: NodeId(2),
                 key: IStr::new("weight"),
-                old_value: Some(Value::Float(3.14)),
+                old_value: Some(Value::Float(3.15)),
             }],
             Origin::Local,
         );

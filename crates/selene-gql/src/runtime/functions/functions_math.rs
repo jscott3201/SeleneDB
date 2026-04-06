@@ -513,10 +513,10 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         let r = f
-            .invoke(&[GqlValue::Float(3.14159), GqlValue::Int(2)], &c)
+            .invoke(&[GqlValue::Float(3.15159), GqlValue::Int(2)], &c)
             .unwrap();
         if let GqlValue::Float(v) = r {
-            assert!((v - 3.14).abs() < 1e-10);
+            assert!((v - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float");
         }

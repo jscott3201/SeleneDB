@@ -356,7 +356,7 @@ async fn gql_ddl_non_admin_denied() {
 async fn csv_import_type_inference() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::for_testing(dir.path()).await;
-    let csv = "name,value,active,ratio\nS1,42,true,3.14\nS2,-7,false,0.5\n";
+    let csv = "name,value,active,ratio\nS1,42,true,3.15\nS2,-7,false,0.5\n";
     let config = ops::csv_io::CsvNodeImportConfig {
         label: "device".into(),
         ..Default::default()
@@ -374,9 +374,9 @@ async fn csv_import_type_inference() {
             n1.properties.get(IStr::new("active")),
             Some(Value::Bool(true))
         ));
-        // 3.14 parses as float
+        // 3.15 parses as float
         if let Some(Value::Float(f)) = n1.properties.get(IStr::new("ratio")) {
-            assert!((f - 3.14).abs() < 0.001);
+            assert!((f - 3.15).abs() < 0.001);
         } else {
             panic!("expected Float for ratio");
         }

@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(GqlValue::Bool(true).gql_type(), GqlType::Bool);
         assert_eq!(GqlValue::Int(42).gql_type(), GqlType::Int);
         assert_eq!(GqlValue::UInt(42).gql_type(), GqlType::UInt);
-        assert_eq!(GqlValue::Float(3.14).gql_type(), GqlType::Float);
+        assert_eq!(GqlValue::Float(3.15).gql_type(), GqlType::Float);
         assert_eq!(
             GqlValue::String(SmolStr::new("hi")).gql_type(),
             GqlType::String

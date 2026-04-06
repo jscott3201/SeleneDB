@@ -1324,7 +1324,7 @@ mod tests {
         let mut bu = ColumnBuilder::new_uint64(1);
         bu.append_gql_value(&GqlValue::UInt(99));
         let mut bf = ColumnBuilder::new_float64(1);
-        bf.append_gql_value(&GqlValue::Float(3.14));
+        bf.append_gql_value(&GqlValue::Float(3.15));
         let mut bb = ColumnBuilder::new_bool(1);
         bb.append_gql_value(&GqlValue::Bool(true));
         let mut bs = ColumnBuilder::new_utf8();
@@ -1446,7 +1446,7 @@ mod tests {
         let col = Column::Values(Arc::from(vec![
             GqlValue::Int(10),
             GqlValue::String("hello".into()),
-            GqlValue::Float(3.14),
+            GqlValue::Float(3.15),
             GqlValue::Bool(true),
         ]));
 
@@ -1507,7 +1507,7 @@ mod tests {
         let mut builder = ColumnBuilder::new_values(4);
         builder.append_bound_value(&BoundValue::Node(NodeId(1)));
         builder.append_bound_value(&BoundValue::Edge(EdgeId(2)));
-        builder.append_bound_value(&BoundValue::Scalar(GqlValue::Float(3.14)));
+        builder.append_bound_value(&BoundValue::Scalar(GqlValue::Float(3.15)));
         let path = GqlPath::from_nodes_and_edges(&[NodeId(10), NodeId(20)], &[EdgeId(100)]);
         builder.append_bound_value(&BoundValue::Path(path));
         let col = builder.finish();
@@ -1516,7 +1516,7 @@ mod tests {
             Column::Values(v) => {
                 assert!(matches!(&v[0], GqlValue::Node(NodeId(1))));
                 assert!(matches!(&v[1], GqlValue::Edge(EdgeId(2))));
-                assert!(matches!(&v[2], GqlValue::Float(f) if *f == 3.14));
+                assert!(matches!(&v[2], GqlValue::Float(f) if *f == 3.15));
                 assert!(matches!(&v[3], GqlValue::Path(_)));
             }
             _ => panic!("expected Values"),
