@@ -42,12 +42,10 @@ const PROJ_NAME: &str = "__community_search_default";
 // ---------------------------------------------------------------------------
 
 /// Community-enhanced semantic search: vector similarity + Louvain context.
-#[cfg(feature = "vector")]
 pub struct CommunitySearch {
     pub catalog: SharedCatalog,
 }
 
-#[cfg(feature = "vector")]
 impl Procedure for CommunitySearch {
     fn name(&self) -> &'static str {
         "graph.communitySearch"
@@ -206,7 +204,6 @@ impl Procedure for CommunitySearch {
 /// Returns (node_to_community, community_to_nodes) maps covering all nodes
 /// in the graph (not just the vector search results), so that community
 /// member lists are complete.
-#[cfg(feature = "vector")]
 fn build_community_maps(
     graph: &SeleneGraph,
     top_results: &[super::vector::ScoredNode],
@@ -262,7 +259,6 @@ fn build_community_maps(
 }
 
 /// Run Louvain via the shared projection catalog and build community maps.
-#[cfg(feature = "vector")]
 fn run_louvain_community_maps(
     graph: &SeleneGraph,
     catalog: &SharedCatalog,

@@ -10,34 +10,17 @@ RUN apk add --no-cache musl-dev pkgconfig
 
 WORKDIR /build
 
-# Compile-time feature flags (default: all).
-#
-# Most services are always compiled in and toggled at runtime via config
-# or environment variables (SELENE_PROFILE, SELENE_VECTOR_ENABLED, etc.).
-# Features that gate actual dependencies:
-#   vector         - candle (BERT embedding inference)
-#   search         - tantivy (full-text BM25 indexes)
-#   cloud-storage  - object_store (S3/GCS/Azure cloud offload)
-#   rdf            - oxrdf/oxttl (RDF import/export)
-#   rdf-sparql     - spareval (SPARQL query, implies rdf)
-#
-# The `federation` flag is retained for compatibility but compiles
-# unconditionally.
-#
-# To build a minimal image without search/vector:
-#   docker build --build-arg FEATURES=federation .
-ARG FEATURES=federation,vector,search,cloud-storage,rdf,rdf-sparql
-
 COPY . .
 
 # BuildKit cache mounts: cargo registry, git index, and target directory
 # persist across builds. No fragile dummy-file dependency caching.
 # The cp at the end extracts binaries — cache mounts are not in the layer.
-# Server and CLI are built separately because --features only applies to -p target.
+# All product features are always compiled. Services are toggled at runtime
+# via SELENE_PROFILE or environment variables (see Runtime Configuration below).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p selene-server --features "${FEATURES}" \
+    cargo build --release -p selene-server \
     && cargo build --release -p selene-cli \
     && mkdir -p /tmp/out \
     && cp target/release/selene-server target/release/selene /tmp/out/

@@ -98,7 +98,6 @@ pub fn spawn_background_tasks(
     }));
 
     // Auto-embed task (vector service with configured rules)
-    #[cfg(feature = "vector")]
     if state
         .services
         .get::<crate::vector_store::VectorStoreService>()
@@ -114,7 +113,6 @@ pub fn spawn_background_tasks(
     }
 
     // Search index updater
-    #[cfg(feature = "search")]
     if state
         .services
         .get::<crate::search::SearchIndexService>()
@@ -323,7 +321,6 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
     }
 
     // Serialize RDF ontology store as a tagged extra section
-    #[cfg(feature = "rdf")]
     if let Some(ontology_arc) = state.rdf_ontology.as_ref() {
         let ontology = ontology_arc.read();
         if !ontology.is_empty() {
@@ -602,7 +599,6 @@ async fn metrics_update_loop(state: Arc<ServerState>, cancel: CancellationToken)
 }
 
 /// Background search index updater — watches changelog and incrementally updates tantivy indexes.
-#[cfg(feature = "search")]
 async fn search_index_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     use selene_core::changeset::Change;
 
@@ -679,7 +675,6 @@ async fn search_index_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 
 /// Auto-embed background task — watches changelog for text property changes
 /// and generates vector embeddings asynchronously.
-#[cfg(feature = "vector")]
 async fn auto_embed_loop(
     state: Arc<ServerState>,
     rules: Vec<crate::config::AutoEmbedRule>,

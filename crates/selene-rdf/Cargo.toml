@@ -18,19 +18,12 @@ base64 = "0.22"
 
 [dependencies.spareval]
 version = "0.2.6"
-optional = true
 
 [dependencies.spargebra]
 version = "0.4.6"
-optional = true
 
 [dependencies.sparesults]
 version = "0.3.3"
-optional = true
-
-[features]
-default = []
-sparql = ["spareval", "spargebra", "sparesults"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["bench"] }

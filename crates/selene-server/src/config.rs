@@ -616,7 +616,6 @@ pub struct SeleneConfig {
     /// Bidirectional sync settings for hub-spoke topologies.
     pub sync: SyncConfig,
     /// Federation settings.
-    #[cfg(feature = "federation")]
     pub federation: crate::federation::config::FederationConfig,
 }
 
@@ -782,7 +781,6 @@ impl SeleneConfig {
             node_tls: file_config.node_tls,
             replica: file_config.replica,
             sync: file_config.sync.unwrap_or_default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         })
     }
@@ -824,7 +822,6 @@ impl SeleneConfig {
             node_tls: NodeTlsConfig::default(),
             replica: ReplicaConfig::default(),
             sync: SyncConfig::default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         }
     }
@@ -856,7 +853,6 @@ impl SeleneConfig {
             node_tls: NodeTlsConfig::default(),
             replica: ReplicaConfig::default(),
             sync: SyncConfig::default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         }
     }

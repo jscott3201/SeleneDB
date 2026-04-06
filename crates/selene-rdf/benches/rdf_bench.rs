@@ -100,7 +100,6 @@ fn bench_import_turtle(c: &mut Criterion) {
 
 // ── SPARQL (feature-gated) ──────────────────────────────────────────
 
-#[cfg(feature = "sparql")]
 fn bench_sparql(c: &mut Criterion) {
     use selene_graph::CsrAdjacency;
     use selene_rdf::sparql::{SparqlResultFormat, execute_sparql};
@@ -249,15 +248,10 @@ criterion_group! {
     targets = bench_import_turtle
 }
 
-#[cfg(feature = "sparql")]
 criterion_group! {
     name = sparql;
     config = profile_criterion();
     targets = bench_sparql
 }
 
-#[cfg(not(feature = "sparql"))]
-criterion_main!(export, import);
-
-#[cfg(feature = "sparql")]
 criterion_main!(export, import, sparql);

@@ -8,14 +8,12 @@
 //! - **Compaction**: daily merge of small flush files into single sorted files
 
 pub(crate) mod calendar;
-#[cfg(feature = "cloud-storage")]
 mod cloud_store_exporter;
 pub mod compact;
 pub mod config;
 pub mod encoding;
 pub mod error;
 pub mod export;
-#[cfg(feature = "cloud-storage")]
 pub use cloud_store_exporter::ObjectStoreExporter;
 pub mod flush;
 pub mod hot;

@@ -1161,14 +1161,12 @@ pub(super) async fn prometheus_metrics(
 
 // ── RDF Import/Export ──────────────────────────────────────────────
 
-#[cfg(feature = "rdf")]
 #[derive(Deserialize)]
 pub(super) struct RdfExportParams {
     format: Option<String>,
     graphs: Option<String>,
 }
 
-#[cfg(feature = "rdf")]
 pub(super) async fn export_rdf(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -1197,14 +1195,12 @@ pub(super) async fn export_rdf(
     ))
 }
 
-#[cfg(feature = "rdf")]
 #[derive(Deserialize)]
 pub(super) struct RdfImportParams {
     format: Option<String>,
     graph: Option<String>,
 }
 
-#[cfg(feature = "rdf")]
 pub(super) async fn import_rdf(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -1268,7 +1264,6 @@ pub(super) async fn import_rdf(
 
 // -- SPARQL Protocol endpoint ------------------------------------------------
 
-#[cfg(feature = "rdf-sparql")]
 #[derive(Deserialize)]
 pub(super) struct SparqlQueryParams {
     query: Option<String>,
@@ -1276,7 +1271,6 @@ pub(super) struct SparqlQueryParams {
 }
 
 /// `GET /sparql?query=SELECT...&format=json`
-#[cfg(feature = "rdf-sparql")]
 pub(super) async fn sparql_get(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -1291,7 +1285,6 @@ pub(super) async fn sparql_get(
 }
 
 /// `POST /sparql` (Content-Type: application/sparql-query, body = SPARQL query string)
-#[cfg(feature = "rdf-sparql")]
 pub(super) async fn sparql_post(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -1308,7 +1301,6 @@ pub(super) async fn sparql_post(
     execute_sparql_handler(&state, query_str, &format_str)
 }
 
-#[cfg(feature = "rdf-sparql")]
 fn execute_sparql_handler(
     state: &ServerState,
     query_str: &str,

@@ -17,10 +17,8 @@ pub(crate) mod metrics;
 pub(crate) mod mutation_batcher;
 pub mod ops;
 pub mod quic;
-#[cfg(feature = "rdf")]
 pub(crate) mod rdf_service;
 pub mod replica;
-#[cfg(feature = "search")]
 pub mod search;
 pub mod service_registry;
 pub(crate) mod stats_subscriber;

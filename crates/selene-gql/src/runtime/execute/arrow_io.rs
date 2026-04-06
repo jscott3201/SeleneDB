@@ -213,7 +213,6 @@ pub(super) fn materialize_to_arrow(
         .collect();
 
     // Parallel path: build batches concurrently when above threshold
-    #[cfg(feature = "rayon")]
     if bindings.len() >= crate::parallel::parallel_threshold() {
         use rayon::prelude::*;
         let batches: Result<Vec<_>, GqlError> = bindings

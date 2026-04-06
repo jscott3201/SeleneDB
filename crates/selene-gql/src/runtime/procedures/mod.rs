@@ -16,10 +16,8 @@
 pub mod algorithms;
 pub mod community_search;
 pub mod graph;
-#[cfg(feature = "ai")]
 pub mod graphrag;
 pub mod history;
-#[cfg(feature = "ai")]
 pub mod memory;
 pub mod rdf;
 pub mod schema_audit;
@@ -143,16 +141,13 @@ impl ProcedureRegistry {
         reg.register(Arc::new(vector::SimilarNodes));
         reg.register(Arc::new(vector::ScopedVectorSearch));
         reg.register(Arc::new(vector::RebuildVectorIndex));
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(vector::SemanticSearch));
         // Community-enhanced RAG (vector + Louvain)
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(community_search::CommunitySearch {
             catalog: catalog.clone(),
         }));
         // Full-text search
         reg.register(Arc::new(search::TextSearch));
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(search::HybridSearch));
         // Change history + temporal versioning
         reg.register(Arc::new(history::GraphHistory));
@@ -169,10 +164,8 @@ impl ProcedureRegistry {
         // Schema dump (LLM-friendly)
         reg.register(Arc::new(schema_dump::SchemaDump));
         // GraphRAG hybrid retriever (ai feature)
-        #[cfg(feature = "ai")]
         reg.register(Arc::new(graphrag::GraphRagSearch));
         // Agent memory recall (ai feature)
-        #[cfg(feature = "ai")]
         reg.register(Arc::new(memory::MemoryRecall));
         reg
     }

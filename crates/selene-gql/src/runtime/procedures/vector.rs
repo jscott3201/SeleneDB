@@ -342,10 +342,8 @@ pub(crate) fn top_k_cosine_scan(
 ///
 /// Combines embed() + vector search + containment path traversal.
 /// Requires `--features vector` for the embed() call.
-#[cfg(feature = "vector")]
 pub struct SemanticSearch;
 
-#[cfg(feature = "vector")]
 impl Procedure for SemanticSearch {
     fn name(&self) -> &'static str {
         "graph.semanticSearch"

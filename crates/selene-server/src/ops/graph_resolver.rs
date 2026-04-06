@@ -10,8 +10,7 @@ pub enum ResolvedGraph {
     Local(SharedGraph),
     /// The secure vault graph.
     Vault,
-    /// A remote peer — forward the query via federation (feature-gated).
-    #[cfg(feature = "federation")]
+    /// A remote peer — forward the query via federation.
     Remote { peer_name: String },
 }
 
@@ -25,7 +24,6 @@ pub enum ResolvedGraph {
 pub struct GraphResolver<'a> {
     catalog: &'a parking_lot::Mutex<selene_graph::GraphCatalog>,
     vault_available: bool,
-    #[cfg(feature = "federation")]
     registry: Option<&'a crate::federation::registry::PeerRegistry>,
 }
 
@@ -33,14 +31,11 @@ impl<'a> GraphResolver<'a> {
     pub fn new(
         catalog: &'a parking_lot::Mutex<selene_graph::GraphCatalog>,
         vault_available: bool,
-        #[cfg(feature = "federation")] registry: Option<
-            &'a crate::federation::registry::PeerRegistry,
-        >,
+        registry: Option<&'a crate::federation::registry::PeerRegistry>,
     ) -> Self {
         Self {
             catalog,
             vault_available,
-            #[cfg(feature = "federation")]
             registry,
         }
     }
@@ -62,7 +57,6 @@ impl<'a> GraphResolver<'a> {
         }
 
         // 3. Remote peers (federation)
-        #[cfg(feature = "federation")]
         if let Some(registry) = self.registry
             && registry.get(name).is_some()
         {
@@ -82,12 +76,7 @@ mod tests {
     #[test]
     fn resolve_vault() {
         let catalog = parking_lot::Mutex::new(selene_graph::GraphCatalog::new());
-        let resolver = GraphResolver::new(
-            &catalog,
-            true,
-            #[cfg(feature = "federation")]
-            None,
-        );
+        let resolver = GraphResolver::new(&catalog, true, None);
         assert!(matches!(
             resolver.resolve("secure"),
             Ok(ResolvedGraph::Vault)
@@ -101,12 +90,7 @@ mod tests {
     #[test]
     fn resolve_vault_unavailable() {
         let catalog = parking_lot::Mutex::new(selene_graph::GraphCatalog::new());
-        let resolver = GraphResolver::new(
-            &catalog,
-            false,
-            #[cfg(feature = "federation")]
-            None,
-        );
+        let resolver = GraphResolver::new(&catalog, false, None);
         assert!(resolver.resolve("secure").is_err());
     }
 
@@ -114,12 +98,7 @@ mod tests {
     fn resolve_local_graph() {
         let catalog = parking_lot::Mutex::new(selene_graph::GraphCatalog::new());
         let _ = catalog.lock().create_graph("audit_log");
-        let resolver = GraphResolver::new(
-            &catalog,
-            false,
-            #[cfg(feature = "federation")]
-            None,
-        );
+        let resolver = GraphResolver::new(&catalog, false, None);
         assert!(matches!(
             resolver.resolve("audit_log"),
             Ok(ResolvedGraph::Local(_))
@@ -129,12 +108,7 @@ mod tests {
     #[test]
     fn resolve_unknown() {
         let catalog = parking_lot::Mutex::new(selene_graph::GraphCatalog::new());
-        let resolver = GraphResolver::new(
-            &catalog,
-            false,
-            #[cfg(feature = "federation")]
-            None,
-        );
+        let resolver = GraphResolver::new(&catalog, false, None);
         assert!(resolver.resolve("nonexistent").is_err());
     }
 }

@@ -1264,7 +1264,6 @@ impl SeleneTools {
 
     // ── GraphRAG AI Tools (feature-gated: ai) ───────────────────────
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "build_communities",
         description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). Use enrich_communities afterwards to add embeddings for global search mode."
@@ -1342,7 +1341,6 @@ impl SeleneTools {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "enrich_communities",
         description = "Add vector embeddings to __CommunitySummary nodes by composing text from structural profiles and calling embed(). Enables global and hybrid search modes in graphrag_search. Run build_communities first."
@@ -1421,7 +1419,6 @@ impl SeleneTools {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "graphrag_search",
         description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth."
@@ -1478,7 +1475,6 @@ impl SeleneTools {
     /// Concurrent calls on the same namespace may briefly exceed max_memories
     /// by the number of in-flight calls, because the count read and the
     /// evict-then-insert write are not atomic.
-    #[cfg(feature = "ai")]
     #[tool(
         name = "remember",
         description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory)."
@@ -1769,7 +1765,6 @@ impl SeleneTools {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "recall",
         description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction."
@@ -1835,7 +1830,6 @@ impl SeleneTools {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "forget",
         description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required."
@@ -1955,7 +1949,6 @@ impl SeleneTools {
         }
     }
 
-    #[cfg(feature = "ai")]
     #[tool(
         name = "configure_memory",
         description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited) and auto-expiry (default_ttl_ms). Settings persist in a __MemoryConfig node."
@@ -2038,7 +2031,6 @@ fn parse_error_suggestion(message: &str) -> String {
 // ── GraphRAG community detection helpers ────────────────────────────
 
 /// Structural profile for a detected community.
-#[cfg(feature = "ai")]
 struct CommunityData {
     community_id: u64,
     label_distribution: String,
@@ -2050,7 +2042,6 @@ struct CommunityData {
 ///
 /// Creates a projection excluding system labels (__ prefix), runs Louvain,
 /// groups results by community, and computes structural profiles.
-#[cfg(feature = "ai")]
 fn build_community_data(graph: &selene_graph::SeleneGraph, min_size: usize) -> Vec<CommunityData> {
     use std::collections::HashMap as StdHashMap;
 
@@ -2150,7 +2141,6 @@ fn build_community_data(graph: &selene_graph::SeleneGraph, min_size: usize) -> V
 ///
 /// Cold start (empty counters after restart): all counters default to 0,
 /// so the oldest memory is evicted first.
-#[cfg(feature = "ai")]
 fn find_eviction_candidate(
     memories: &[(u64, i64)], // (node_id, created_at)
     counters: &mut std::collections::HashMap<u64, u8>,
@@ -2195,7 +2185,6 @@ fn find_eviction_candidate(
 // ── Eviction tests ─────────────────────────────────────────────────
 
 #[cfg(test)]
-#[cfg(feature = "ai")]
 mod memory_eviction_tests {
     use super::find_eviction_candidate;
     use std::collections::HashMap;

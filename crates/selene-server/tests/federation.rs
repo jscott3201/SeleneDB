@@ -1,7 +1,7 @@
 //! Federation E2E tests — two Selene nodes communicating over QUIC.
 //!
-//! These tests require the `federation` and `dev-tls` features.
-#![cfg(all(feature = "federation", feature = "dev-tls"))]
+//! These tests require the `dev-tls` feature for self-signed certificates.
+#![cfg(feature = "dev-tls")]
 
 use std::sync::Arc;
 

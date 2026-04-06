@@ -108,22 +108,15 @@ schemars.workspace = true
 # Used by replica mode (always) and federation (feature-gated)
 selene-client.workspace = true
 
-# Full-text search (feature-gated)
-tantivy = { version = "0.26", optional = true }
+# Full-text search
+tantivy = "0.26"
 
-# RDF import/export (feature-gated)
-selene-rdf = { workspace = true, optional = true }
+# RDF import/export
+selene-rdf.workspace = true
 
 [features]
 default = []
 dev-tls = ["dep:rcgen"]
-federation = []
-vector = ["selene-gql/vector"]
-ai = ["vector", "selene-gql/ai"]
-search = ["dep:tantivy"]
-cloud-storage = ["selene-ts/cloud-storage"]
-rdf = ["selene-rdf"]
-rdf-sparql = ["rdf", "selene-rdf/sparql"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["tls"] }

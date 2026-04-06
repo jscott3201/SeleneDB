@@ -284,7 +284,6 @@ pub(crate) fn execute_label_scan_with_limit(
     // Parallel path: bypass chunk for large scans without limit (rayon needs
     // owned Bindings for work-stealing). Once pattern orchestration (T7)
     // threads DataChunks end-to-end, this parallel path can be removed.
-    #[cfg(feature = "rayon")]
     if max_results.is_none() {
         let mut bitmap = match labels {
             Some(expr) => resolve_label_expr(expr, graph),
@@ -411,7 +410,6 @@ pub(crate) fn count_label_scan(
 
 /// Parallel label scan using Rayon work-stealing.
 /// Only used for large bitmaps without limit pushdown.
-#[cfg(feature = "rayon")]
 #[allow(dead_code)]
 fn execute_label_scan_parallel(
     var: IStr,

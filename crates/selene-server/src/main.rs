@@ -109,7 +109,6 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
     }
 
     // Set embedding model path before bootstrap
-    #[cfg(feature = "vector")]
     {
         let model_path = config
             .vector
@@ -168,10 +167,7 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         });
 
         let mgr = Arc::clone(&fed_svc.manager);
-        #[cfg(feature = "federation")]
         let refresh_secs = state.config().federation.refresh_interval_secs;
-        #[cfg(not(feature = "federation"))]
-        let refresh_secs = 60u64;
         let cancel = bg.cancel.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));

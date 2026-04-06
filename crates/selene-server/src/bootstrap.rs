@@ -63,11 +63,9 @@ pub struct ServerState {
     /// Set to true once all startup services have initialized and the
     /// server is ready to serve queries. Used by the `/ready` endpoint.
     pub(crate) ready: std::sync::atomic::AtomicBool,
-    /// RDF ontology store for TBox quads (feature-gated).
-    #[cfg(feature = "rdf")]
+    /// RDF ontology store for TBox quads (None if not configured).
     pub(crate) rdf_ontology: Option<Arc<parking_lot::RwLock<selene_rdf::ontology::OntologyStore>>>,
     /// Cached RDF namespace (built once from config at startup).
-    #[cfg(feature = "rdf")]
     pub(crate) rdf_namespace: selene_rdf::namespace::RdfNamespace,
     /// Generation-gated CSR cache. Avoids rebuilding the CSR for every read
     /// query when the graph has not changed. The tuple stores
@@ -75,7 +73,6 @@ pub struct ServerState {
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
     /// Enhanced clock counters for agent memory eviction (2-bit, 0-3).
     /// Per-namespace map of node_id to access counter. Ephemeral (not persisted).
-    #[cfg(feature = "ai")]
     pub(crate) clock_counters:
         parking_lot::RwLock<std::collections::HashMap<String, std::collections::HashMap<u64, u8>>>,
 }
@@ -202,8 +199,7 @@ impl ServerState {
         self.replica.primary_addr.as_deref()
     }
 
-    /// The RDF ontology store (None if rdf feature not enabled or not initialized).
-    #[cfg(feature = "rdf")]
+    /// The RDF ontology store (None if not configured).
     pub fn rdf_ontology(
         &self,
     ) -> Option<&Arc<parking_lot::RwLock<selene_rdf::ontology::OntologyStore>>> {
@@ -211,7 +207,6 @@ impl ServerState {
     }
 
     /// The cached RDF namespace (built once from config at startup).
-    #[cfg(feature = "rdf")]
     pub fn rdf_namespace(&self) -> &selene_rdf::namespace::RdfNamespace {
         &self.rdf_namespace
     }
@@ -444,7 +439,6 @@ pub async fn bootstrap(
 
     // 1. Recover graph from persistence (snapshot + WAL replay)
     let (shared_graph, recovery_extra_sections) = recover_graph(&config)?;
-    #[cfg(feature = "federation")]
     let graph_inner = Arc::clone(shared_graph.inner());
 
     // 2. Create hot tier
@@ -470,7 +464,6 @@ pub async fn bootstrap(
     };
 
     // 7. Initialize federation
-    #[cfg(feature = "federation")]
     let federation_service = if config.federation.enabled {
         // Gather schema labels for registration
         let schema_labels: Vec<String> = {
@@ -597,7 +590,6 @@ pub async fn bootstrap(
     };
 
     // Initialize full-text search index from searchable schema properties
-    #[cfg(feature = "search")]
     let search_index_opt = {
         let snap = shared_graph.load_snapshot();
         let index_dir = config.data_dir.join("search_index");
@@ -646,13 +638,11 @@ pub async fn bootstrap(
     }
 
     // Register search index as a service
-    #[cfg(feature = "search")]
     if let Some(si) = search_index_opt {
         services.register(crate::search::SearchIndexService::new(si));
     }
 
     // Register federation as a service
-    #[cfg(feature = "federation")]
     if let Some(fed) = federation_service {
         services.register(fed);
     }
@@ -738,7 +728,6 @@ pub async fn bootstrap(
     #[allow(unused_mut)] // mut only needed with cloud-storage feature
     let mut export_pipeline = selene_ts::export::ExportPipeline::new();
 
-    #[cfg(feature = "cloud-storage")]
     if let Some(ref cloud_url) = config.ts.cloud.url {
         let node_id = config.ts.cloud.node_id.clone().unwrap_or_else(|| {
             hostname::get().map_or_else(
@@ -763,7 +752,6 @@ pub async fn bootstrap(
 
     // Initialize RDF ontology store from snapshot extra section (if available).
     // Extra sections are tagged: first byte 0x02 = RDF ontology.
-    #[cfg(feature = "rdf")]
     let rdf_ontology = {
         let store = recovery_extra_sections
             .iter()
@@ -804,7 +792,6 @@ pub async fn bootstrap(
         Some(arc)
     };
 
-    #[cfg(feature = "rdf")]
     let rdf_namespace = selene_rdf::namespace::RdfNamespace::new(&config.rdf.namespace);
 
     let persistence = PersistenceState {
@@ -846,12 +833,9 @@ pub async fn bootstrap(
         sync,
         replica,
         ready: std::sync::atomic::AtomicBool::new(false),
-        #[cfg(feature = "rdf")]
         rdf_ontology,
-        #[cfg(feature = "rdf")]
         rdf_namespace,
         csr_cache,
-        #[cfg(feature = "ai")]
         clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
     })
 }
@@ -889,7 +873,6 @@ impl ServerState {
         let mutation_batcher =
             crate::mutation_batcher::MutationBatcher::spawn(shared_graph.clone());
 
-        #[cfg(feature = "rdf")]
         let rdf_namespace = selene_rdf::namespace::RdfNamespace::new(&config.rdf.namespace);
 
         let persistence = PersistenceState {
@@ -951,15 +934,12 @@ impl ServerState {
             persistence,
             sync,
             replica,
-            #[cfg(feature = "rdf")]
             rdf_ontology: None,
-            #[cfg(feature = "rdf")]
             rdf_namespace,
             csr_cache: Arc::new(ArcSwap::from_pointee((
                 0,
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
-            #[cfg(feature = "ai")]
             clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
     }

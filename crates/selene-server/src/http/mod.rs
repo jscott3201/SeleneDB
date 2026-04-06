@@ -136,8 +136,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // deprecated alias
         .route("/export/csv", get(routes::csv_export)); // deprecated alias
 
-    // RDF import/export (feature-gated)
-    #[cfg(feature = "rdf")]
+    // RDF import/export
     let app = app.route(
         "/graph/rdf",
         get(routes::export_rdf)
@@ -145,8 +144,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
     ); // 4 MB for RDF
 
-    // SPARQL Protocol endpoint (feature-gated on rdf-sparql)
-    #[cfg(feature = "rdf-sparql")]
+    // SPARQL Protocol endpoint
     let app = app.route(
         "/sparql",
         get(routes::sparql_get)

@@ -113,8 +113,6 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            FEATURES=federation,vector,search,cloud-storage,rdf,rdf-sparql
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
           outputs: type=image,"name=ghcr.io/${{ github.repository_owner }}/selenedb",push-by-digest=true,name-canonical=true,push=true

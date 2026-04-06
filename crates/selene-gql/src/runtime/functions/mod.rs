@@ -248,7 +248,6 @@ impl FunctionRegistry {
         reg.register(Arc::new(TextMatchFunction));
 
         // Embedding function (feature-gated)
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(crate::runtime::embed::EmbedFunction));
 
         reg

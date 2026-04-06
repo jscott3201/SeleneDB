@@ -142,10 +142,8 @@ impl Procedure for TextSearch {
 ///
 /// Combines BM25 text search + cosine vector search via reciprocal rank fusion.
 /// Requires both `search` and `vector` features.
-#[cfg(feature = "vector")]
 pub struct HybridSearch;
 
-#[cfg(feature = "vector")]
 impl Procedure for HybridSearch {
     fn name(&self) -> &'static str {
         "graph.hybridSearch"

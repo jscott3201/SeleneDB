@@ -325,7 +325,6 @@ pub(crate) fn execute_expand(
 
     // Use parallel expand when: rayon enabled, large input, no CSR
     // (expand_single uses adjacency list fallback, not CSR)
-    #[cfg(feature = "rayon")]
     if csr.is_none() && input.len() >= crate::parallel::parallel_threshold() {
         use rayon::prelude::*;
 

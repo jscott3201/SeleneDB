@@ -94,7 +94,6 @@ pub fn execute_gql_with_timeout(
         let resolver = super::graph_resolver::GraphResolver::new(
             &catalog.catalog,
             state.services.get::<crate::vault::VaultService>().is_some(),
-            #[cfg(feature = "federation")]
             state
                 .services
                 .get::<crate::federation::FederationService>()
@@ -120,7 +119,6 @@ pub fn execute_gql_with_timeout(
                     deadline_ms,
                 ))
             }
-            #[cfg(feature = "federation")]
             Ok(super::graph_resolver::ResolvedGraph::Remote { peer_name }) => execute_remote_query(
                 state,
                 auth,
@@ -971,7 +969,6 @@ fn execute_local_graph_query(
 }
 
 /// Execute a GQL query on a remote peer via federation forwarding.
-#[cfg(feature = "federation")]
 fn execute_remote_query(
     state: &ServerState,
     auth: &AuthContext,

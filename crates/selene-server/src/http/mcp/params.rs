@@ -338,7 +338,6 @@ pub(crate) struct ParseCheckParams {
 
 // ── AI / GraphRAG ────────────────────────────────────────────────────
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct BuildCommunitiesParams {
     /// Minimum community size to persist. Communities smaller than this are skipped. Default: 2.
@@ -346,7 +345,6 @@ pub(crate) struct BuildCommunitiesParams {
     pub(crate) min_community_size: Option<usize>,
 }
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GraphRagSearchParams {
     /// Natural language query text.
@@ -364,7 +362,6 @@ pub(crate) struct GraphRagSearchParams {
 
 // ── AI / Agent Memory ───────────────���───────────────────────────────
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct RememberParams {
     /// Memory namespace (isolates memories by agent or context).
@@ -382,12 +379,10 @@ pub(crate) struct RememberParams {
     pub(crate) entities: Option<Vec<String>>,
 }
 
-#[cfg(feature = "ai")]
 fn default_memory_type() -> String {
     "fact".into()
 }
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct RecallParams {
     /// Memory namespace to search.
@@ -399,7 +394,6 @@ pub(crate) struct RecallParams {
     pub(crate) k: Option<i64>,
 }
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ForgetParams {
     /// Memory namespace to delete from.
@@ -412,7 +406,6 @@ pub(crate) struct ForgetParams {
     pub(crate) query: Option<String>,
 }
 
-#[cfg(feature = "ai")]
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ConfigureMemoryParams {
     /// Memory namespace to configure.
