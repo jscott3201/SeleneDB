@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn from_value_float() {
-        assert_eq!(GqlValue::from(&Value::Float(3.14)), GqlValue::Float(3.14));
+        assert_eq!(GqlValue::from(&Value::Float(3.15)), GqlValue::Float(3.15));
     }
 
     #[test]

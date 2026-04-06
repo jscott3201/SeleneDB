@@ -165,7 +165,7 @@ mod tests {
         collector.rebuild_from_graph(nodes, edges);
 
         let snap = collector.snapshot();
-        assert!(snap.get(&IStr::new("stale")).is_none()); // cleared
+        assert!(!snap.contains_key(&IStr::new("stale"))); // cleared
         assert_eq!(snap.get(&IStr::new("Sensor")).unwrap().node_count, 100);
         assert_eq!(snap.get(&IStr::new("Room")).unwrap().node_count, 50);
         assert_eq!(snap.get(&IStr::new("Room")).unwrap().edge_count, 0);

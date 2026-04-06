@@ -942,7 +942,7 @@ mod tests {
     fn value_comparison_helpers() {
         // value_to_f64
         assert_eq!(value_to_f64(&Value::Int(42)), Some(42.0));
-        assert_eq!(value_to_f64(&Value::Float(3.14)), Some(3.14));
+        assert_eq!(value_to_f64(&Value::Float(3.15)), Some(3.15));
         assert_eq!(value_to_f64(&Value::UInt(100)), Some(100.0));
         assert_eq!(value_to_f64(&Value::Null), None);
         assert_eq!(value_to_f64(&Value::String("hello".into())), None);
