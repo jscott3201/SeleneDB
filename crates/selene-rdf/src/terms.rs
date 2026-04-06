@@ -820,11 +820,11 @@ mod tests {
 
     #[test]
     fn float_to_literal() {
-        let lit = value_to_literal(&Value::Float(3.14)).unwrap();
+        let lit = value_to_literal(&Value::Float(3.15)).unwrap();
         assert_eq!(lit.datatype(), xsd::DOUBLE);
         // Should parse back to the same value.
         let parsed: f64 = lit.value().parse().unwrap();
-        assert!((parsed - 3.14).abs() < 1e-10);
+        assert!((parsed - 3.15).abs() < 1e-10);
     }
 
     #[test]
@@ -956,11 +956,11 @@ mod tests {
 
     #[test]
     fn round_trip_float() {
-        let orig = Value::Float(3.14);
+        let orig = Value::Float(3.15);
         let lit = value_to_literal(&orig).unwrap();
         let back = literal_to_value(&lit);
         if let Value::Float(f) = back {
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float, got {back:?}");
         }
@@ -1044,10 +1044,10 @@ mod tests {
 
     #[test]
     fn xsd_decimal_maps_to_float() {
-        let lit = Literal::new_typed_literal("3.14", xsd::DECIMAL);
+        let lit = Literal::new_typed_literal("3.15", xsd::DECIMAL);
         let val = literal_to_value(&lit);
         if let Value::Float(f) = val {
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float, got {val:?}");
         }

@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(Value::Bool(true).type_name(), "bool");
         assert_eq!(Value::Int(42).type_name(), "int");
         assert_eq!(Value::UInt(42).type_name(), "uint");
-        assert_eq!(Value::Float(3.14).type_name(), "float");
+        assert_eq!(Value::Float(3.15).type_name(), "float");
         assert_eq!(Value::str("hi").type_name(), "string");
         assert_eq!(Value::Timestamp(0).type_name(), "timestamp");
         assert_eq!(Value::Bytes(Arc::from(vec![1u8])).type_name(), "bytes");
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn vector_serde_round_trip() {
-        let v = Value::vector(vec![0.5, -1.0, 3.14]);
+        let v = Value::vector(vec![0.5, -1.0, 3.15]);
         let json = serde_json::to_string(&v).unwrap();
         let v2: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v, v2);

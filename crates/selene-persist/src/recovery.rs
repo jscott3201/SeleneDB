@@ -1093,7 +1093,7 @@ mod tests {
 
         let props = vec![
             ("int_val", Value::Int(-42)),
-            ("float_val", Value::Float(3.14159)),
+            ("float_val", Value::Float(3.15)),
             ("string_val", Value::String(SmolStr::new("hello world"))),
             ("bool_val", Value::Bool(false)),
             ("null_val", Value::Null),

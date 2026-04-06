@@ -1112,7 +1112,7 @@ mod tests {
             Change::PropertySet {
                 node_id: NodeId(1),
                 key: IStr::new("float_val"),
-                value: Value::Float(3.14),
+                value: Value::Float(3.15),
                 old_value: None,
             },
             Change::PropertySet {
