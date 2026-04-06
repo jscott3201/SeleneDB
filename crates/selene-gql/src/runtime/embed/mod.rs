@@ -242,6 +242,82 @@ mod tests {
         assert!(err.contains("not found") || err.contains("fetch-model"));
     }
 
+    // ── Gemma provider tests (require embeddinggemma-300m download) ────
+
+    fn require_gemma_model() -> PathBuf {
+        // Navigate from crate root to workspace root
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent() // crates/
+            .and_then(|p| p.parent()) // workspace root
+            .expect("workspace root")
+            .to_path_buf();
+        let path = workspace_root.join("data/models/embeddinggemma-300m");
+        if !path.join("model.safetensors").exists() {
+            eprintln!(
+                "SKIP: EmbeddingGemma not found at {} -- run scripts/fetch-embeddinggemma.sh",
+                path.display()
+            );
+            std::process::exit(0);
+        }
+        path
+    }
+
+    #[test]
+    fn gemma_embed_produces_768_dims() {
+        let path = require_gemma_model();
+        let provider = gemma::GemmaProvider::load(&path, 768).unwrap();
+        let vec = provider.embed("hello world", None).unwrap();
+        assert_eq!(vec.len(), 768);
+    }
+
+    #[test]
+    fn gemma_embed_is_unit_normalized() {
+        let path = require_gemma_model();
+        let provider = gemma::GemmaProvider::load(&path, 768).unwrap();
+        let vec = provider.embed("temperature sensor", None).unwrap();
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "expected L2 norm ~1.0, got {norm}"
+        );
+    }
+
+    #[test]
+    fn gemma_embed_mrl_truncation_256() {
+        let path = require_gemma_model();
+        let provider = gemma::GemmaProvider::load(&path, 256).unwrap();
+        let vec = provider.embed("hello world", None).unwrap();
+        assert_eq!(vec.len(), 256);
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "MRL truncated vector should be re-normalized, got norm={norm}"
+        );
+    }
+
+    #[test]
+    fn gemma_embed_is_deterministic() {
+        let path = require_gemma_model();
+        let provider = gemma::GemmaProvider::load(&path, 768).unwrap();
+        let v1 = provider.embed("temperature sensor", None).unwrap();
+        let v2 = provider.embed("temperature sensor", None).unwrap();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn gemma_embed_task_prompts_differ() {
+        let path = require_gemma_model();
+        let provider = gemma::GemmaProvider::load(&path, 768).unwrap();
+        let v_retrieval = provider
+            .embed_with_task("temperature sensor", EmbeddingTask::Retrieval, None)
+            .unwrap();
+        let v_clustering = provider
+            .embed_with_task("temperature sensor", EmbeddingTask::Clustering, None)
+            .unwrap();
+        // Different task prompts should produce different embeddings
+        assert_ne!(v_retrieval, v_clustering);
+    }
+
     fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();

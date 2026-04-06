@@ -116,8 +116,10 @@ impl GemmaProvider {
             })?;
 
         // Load Dense projection layers from separate safetensors
-        let dense1 = Self::load_dense_layer(&dense1_path, &device)?;
-        let dense2 = Self::load_dense_layer(&dense2_path, &device)?;
+        // 2_Dense: 768 -> 3072 (weight shape: [3072, 768])
+        let dense1 = Self::load_dense_layer(&dense1_path, 3072, 768, &device)?;
+        // 3_Dense: 3072 -> 768 (weight shape: [768, 3072])
+        let dense2 = Self::load_dense_layer(&dense2_path, 768, 3072, &device)?;
 
         tracing::info!(
             model_dir = %model_dir.display(),
@@ -139,8 +141,14 @@ impl GemmaProvider {
     /// Load a single Dense projection layer from a safetensors file.
     ///
     /// Each file contains a `linear.weight` tensor (no bias).
+    /// 2_Dense: shape (3072, 768), 3_Dense: shape (768, 3072).
     #[allow(unsafe_code)]
-    fn load_dense_layer(path: &Path, device: &Device) -> Result<Linear, GqlError> {
+    fn load_dense_layer(
+        path: &Path,
+        out_dim: usize,
+        in_dim: usize,
+        device: &Device,
+    ) -> Result<Linear, GqlError> {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[path.to_path_buf()], DType::F32, device).map_err(
                 |e| GqlError::InvalidArgument {
@@ -149,23 +157,13 @@ impl GemmaProvider {
             )?
         };
 
-        let weight = vb.pp("linear").get_with_hints_dtype(
-            (0, 0), // shape is inferred from safetensors
-            "weight",
-            candle_nn::Init::Const(0.0), // not used, loaded from file
-            DType::F32,
-        );
-
-        if let Ok(w) = weight {
-            return Ok(Linear::new(w, None));
-        }
-
-        // Try without the "linear" prefix (weight naming may vary)
         let weight = vb
-            .get_with_hints_dtype((0, 0), "weight", candle_nn::Init::Const(0.0), DType::F32)
+            .pp("linear")
+            .get((out_dim, in_dim), "weight")
             .map_err(|e| GqlError::InvalidArgument {
-                message: format!("failed to load weight tensor from {}: {e}", path.display()),
+                message: format!("failed to load linear.weight from {}: {e}", path.display()),
             })?;
+
         Ok(Linear::new(weight, None))
     }
 
@@ -220,13 +218,20 @@ impl GemmaProvider {
         // Mean pooling -> [768]
         let pooled = mean_pool(&hidden_states)?;
 
-        // Dense projections (identity activation = just linear)
+        // Dense projections need 2D input: [768] -> [1, 768]
         let projected = pooled
+            .unsqueeze(0)
+            .map_err(|e| GqlError::internal(format!("unsqueeze for dense: {e}")))?;
+        let projected = projected
             .apply(&self.dense1)
             .map_err(|e| GqlError::internal(format!("dense1: {e}")))?;
         let projected = projected
             .apply(&self.dense2)
             .map_err(|e| GqlError::internal(format!("dense2: {e}")))?;
+        // Back to 1D: [1, 768] -> [768]
+        let projected = projected
+            .squeeze(0)
+            .map_err(|e| GqlError::internal(format!("squeeze after dense: {e}")))?;
 
         // L2 normalize the full 768-dim vector
         let normalized = l2_normalize(&projected)?;

@@ -416,7 +416,13 @@ pub(super) struct EmbeddingGemmaEncoder {
 
 impl EmbeddingGemmaEncoder {
     pub fn load(cfg: &EmbeddingGemmaConfig, vb: VarBuilder) -> Result<Self> {
-        let vb_m = vb.pp("model");
+        // EmbeddingGemma sentence-transformers packaging omits the "model."
+        // prefix. Try with prefix first (standard Gemma), fall back to no prefix.
+        let vb_m = if vb.contains_tensor("model.embed_tokens.weight") {
+            vb.pp("model")
+        } else {
+            vb.clone()
+        };
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
