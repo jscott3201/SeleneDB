@@ -1492,12 +1492,13 @@ impl SeleneTools {
         let entities = p.entities.unwrap_or_default();
 
         // 1. Read __MemoryConfig for namespace (defaults if absent)
-        let (max_memories, default_ttl_ms) = {
+        let (max_memories, default_ttl_ms, eviction_policy) = {
             let mut config_params = HashMap::new();
             config_params.insert("ns".into(), Value::from(namespace.as_str()));
             let config_query = "MATCH (c:__MemoryConfig {namespace: $ns}) \
                                 RETURN c.max_memories AS max_memories, \
-                                c.default_ttl_ms AS default_ttl_ms";
+                                c.default_ttl_ms AS default_ttl_ms, \
+                                c.eviction_policy AS eviction_policy";
             let config_result = ops::gql::execute_gql(
                 &self.state,
                 &auth,
@@ -1521,9 +1522,14 @@ impl SeleneTools {
                     .get("default_ttl_ms")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                (max, ttl)
+                let policy = row
+                    .get("eviction_policy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("clock")
+                    .to_string();
+                (max, ttl, policy)
             } else {
-                (1000i64, 0i64)
+                (1000i64, 0i64, "clock".to_string())
             }
         };
 
@@ -1559,7 +1565,7 @@ impl SeleneTools {
             mem_params.insert("ns".into(), Value::from(namespace.as_str()));
             let mem_query = "MATCH (m:__Memory {namespace: $ns}) \
                              RETURN id(m) AS nodeId, m.created_at AS created_at, \
-                             m.valid_until AS valid_until \
+                             m.valid_until AS valid_until, m.confidence AS confidence \
                              ORDER BY m.created_at ASC";
             let mem_result = ops::gql::execute_gql(
                 &self.state,
@@ -1580,32 +1586,45 @@ impl SeleneTools {
                 .unwrap_or_default()
                 .as_millis() as i64;
 
-            let memories: Vec<(u64, i64, i64)> = mem_rows
+            let memories: Vec<(u64, i64, i64, f64)> = mem_rows
                 .iter()
                 .filter_map(|r| {
                     let nid = r.get("nodeId")?.as_u64()?;
                     let ca = r.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
                     let vu = r.get("valid_until").and_then(|v| v.as_i64()).unwrap_or(0);
-                    Some((nid, ca, vu))
+                    let conf = r.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    Some((nid, ca, vu, conf))
                 })
                 .collect();
 
             if let Some(evict_id) = {
-                // Prefer evicting expired memories before running the clock sweep
+                // Prefer evicting expired memories before running the policy sweep
                 let expired_candidate = memories
                     .iter()
-                    .filter(|&&(_, _, vu)| vu > 0 && vu < now_ms_evict)
-                    .min_by_key(|&&(_, ca, _)| ca)
-                    .map(|&(nid, _, _)| nid);
+                    .filter(|&&(_, _, vu, _)| vu > 0 && vu < now_ms_evict)
+                    .min_by_key(|&&(_, ca, _, _)| ca)
+                    .map(|&(nid, _, _, _)| nid);
 
                 if let Some(eid) = expired_candidate {
                     Some(eid)
                 } else {
                     let clock_mems: Vec<(u64, i64)> =
-                        memories.iter().map(|&(nid, ca, _)| (nid, ca)).collect();
-                    let mut counters = self.state.clock_counters.write();
-                    let ns_counters = counters.entry(namespace.clone()).or_default();
-                    find_eviction_candidate(&clock_mems, ns_counters)
+                        memories.iter().map(|&(nid, ca, _, _)| (nid, ca)).collect();
+                    match eviction_policy.as_str() {
+                        "oldest" => find_oldest_candidate(&clock_mems),
+                        "lowest_confidence" => {
+                            let conf_mems: Vec<(u64, i64, f64)> = memories
+                                .iter()
+                                .map(|&(nid, ca, _, conf)| (nid, ca, conf))
+                                .collect();
+                            find_lowest_confidence_candidate(&conf_mems)
+                        }
+                        _ => {
+                            let mut counters = self.state.clock_counters.write();
+                            let ns_counters = counters.entry(namespace.clone()).or_default();
+                            find_eviction_candidate(&clock_mems, ns_counters)
+                        }
+                    }
                 }
             } {
                 // Delete the eviction candidate
@@ -1951,7 +1970,7 @@ impl SeleneTools {
 
     #[tool(
         name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited) and auto-expiry (default_ttl_ms). Settings persist in a __MemoryConfig node."
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy ('clock' default, 'oldest', or 'lowest_confidence'). Settings persist in a __MemoryConfig node."
     )]
     async fn configure_memory(
         &self,
@@ -1969,10 +1988,17 @@ impl SeleneTools {
             "ttl".into(),
             p.default_ttl_ms.map_or(Value::Null, Value::Int),
         );
+        gql_params.insert(
+            "policy".into(),
+            p.eviction_policy
+                .as_deref()
+                .map_or(Value::Null, Value::from),
+        );
 
         let query = "MERGE (c:__MemoryConfig {namespace: $ns}) \
                      SET c.max_memories = COALESCE($max, c.max_memories), \
-                     c.default_ttl_ms = COALESCE($ttl, c.default_ttl_ms)";
+                     c.default_ttl_ms = COALESCE($ttl, c.default_ttl_ms), \
+                     c.eviction_policy = COALESCE($policy, c.eviction_policy)";
 
         let st = Arc::clone(&self.state);
         let auth2 = auth.clone();
@@ -2182,11 +2208,32 @@ fn find_eviction_candidate(
     best.map(|(node_id, _, _)| node_id)
 }
 
+/// Evict the oldest memory (smallest `created_at`). No counter state needed.
+fn find_oldest_candidate(memories: &[(u64, i64)]) -> Option<u64> {
+    memories
+        .iter()
+        .min_by_key(|&&(_, ca)| ca)
+        .map(|&(nid, _)| nid)
+}
+
+/// Evict the memory with the lowest confidence score. Tiebreak by oldest
+/// `created_at` so that equally uncertain memories favor recency.
+fn find_lowest_confidence_candidate(memories: &[(u64, i64, f64)]) -> Option<u64> {
+    memories
+        .iter()
+        .min_by(|a, b| {
+            a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        })
+        .map(|&(nid, _, _)| nid)
+}
+
 // ── Eviction tests ─────────────────────────────────────────────────
 
 #[cfg(test)]
 mod memory_eviction_tests {
-    use super::find_eviction_candidate;
+    use super::{find_eviction_candidate, find_lowest_confidence_candidate, find_oldest_candidate};
     use std::collections::HashMap;
 
     #[test]
@@ -2409,5 +2456,53 @@ mod memory_eviction_tests {
         let count_under: i64 = 2; // under capacity
         let should_evict_under = max_memories > 0 && count_under >= max_memories;
         assert!(!should_evict_under);
+    }
+
+    // ── Oldest policy tests ─────────────────────────────────────────
+
+    #[test]
+    fn oldest_evicts_smallest_created_at() {
+        let memories = vec![(10, 300), (20, 100), (30, 200)];
+        assert_eq!(find_oldest_candidate(&memories), Some(20));
+    }
+
+    #[test]
+    fn oldest_empty() {
+        let memories: Vec<(u64, i64)> = vec![];
+        assert_eq!(find_oldest_candidate(&memories), None);
+    }
+
+    #[test]
+    fn oldest_single() {
+        let memories = vec![(42, 500)];
+        assert_eq!(find_oldest_candidate(&memories), Some(42));
+    }
+
+    // ── Lowest confidence policy tests ──────────────────────────────
+
+    #[test]
+    fn lowest_confidence_evicts_least_confident() {
+        let memories = vec![(10, 100, 0.9), (20, 200, 0.3), (30, 300, 0.7)];
+        assert_eq!(find_lowest_confidence_candidate(&memories), Some(20));
+    }
+
+    #[test]
+    fn lowest_confidence_tiebreak_oldest() {
+        // Same confidence: evict the older one
+        let memories = vec![(10, 300, 0.5), (20, 100, 0.5), (30, 200, 0.8)];
+        assert_eq!(find_lowest_confidence_candidate(&memories), Some(20));
+    }
+
+    #[test]
+    fn lowest_confidence_empty() {
+        let memories: Vec<(u64, i64, f64)> = vec![];
+        assert_eq!(find_lowest_confidence_candidate(&memories), None);
+    }
+
+    #[test]
+    fn lowest_confidence_all_default() {
+        // All at 1.0 (default): tiebreak by oldest
+        let memories = vec![(10, 300, 1.0), (20, 100, 1.0), (30, 200, 1.0)];
+        assert_eq!(find_lowest_confidence_candidate(&memories), Some(20));
     }
 }

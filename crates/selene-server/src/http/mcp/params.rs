@@ -416,4 +416,7 @@ pub(crate) struct ConfigureMemoryParams {
     /// Default time-to-live in milliseconds for new memories (0 = no expiry).
     #[serde(default)]
     pub(crate) default_ttl_ms: Option<i64>,
+    /// Eviction policy: "clock" (default), "oldest", or "lowest_confidence".
+    #[serde(default)]
+    pub(crate) eviction_policy: Option<String>,
 }
