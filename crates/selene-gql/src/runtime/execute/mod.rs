@@ -78,6 +78,7 @@ fn execute_mut(
                             hot_tier,
                             Some(registry),
                             scope,
+                            Some(&ctx),
                         )?;
                     }
                     _ => {
@@ -277,6 +278,7 @@ fn execute_in_transaction(
                                 hot_tier,
                                 Some(registry),
                                 scope,
+                                Some(&ctx),
                             )?;
                         }
                         _ => {
@@ -411,8 +413,15 @@ fn execute_statement_with_csr(
                 for op in &plan.pipeline {
                     match op {
                         PipelineOp::Call { procedure: call } => {
-                            bindings =
-                                execute_call(bindings, call, graph, hot_tier, procedures, scope)?;
+                            bindings = execute_call(
+                                bindings,
+                                call,
+                                graph,
+                                hot_tier,
+                                procedures,
+                                scope,
+                                Some(&ctx),
+                            )?;
                         }
                         PipelineOp::Subquery { plan: sub_plan } => {
                             bindings = execute_subquery(
@@ -826,7 +835,15 @@ fn execute_plan_inner(
             // CALL needs procedure registry and graph context
             PipelineOp::Call { procedure: call } => {
                 let bindings = c.to_bindings();
-                let result = execute_call(bindings, call, graph, hot_tier, procedures, scope)?;
+                let result = execute_call(
+                    bindings,
+                    call,
+                    graph,
+                    hot_tier,
+                    procedures,
+                    scope,
+                    Some(&ctx),
+                )?;
                 chunk = Some(join::bindings_to_chunk_generic(&result));
             }
             // Subquery needs correlated execution with graph context

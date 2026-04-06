@@ -713,7 +713,15 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let alias = p.alias.unwrap_or_else(|| IStr::new(&format!("col_{i}")));
+            let alias = p.alias.unwrap_or_else(|| {
+                // Infer alias from bare variable references (standard GQL
+                // behavior: `RETURN x` produces a column named `x`).
+                // All other expressions fall back to positional `col_{i}`.
+                match &p.expr {
+                    crate::ast::expr::Expr::Var(name) => *name,
+                    _ => IStr::new(&format!("col_{i}")),
+                }
+            });
             PlannedProjection {
                 expr: p.expr.clone(),
                 alias,

@@ -1,11 +1,13 @@
 //! CALL procedure and subquery execution.
 
 use roaring::RoaringBitmap;
+use selene_core::IStr;
 use selene_graph::SeleneGraph;
 
 use crate::ast::expr::ProcedureCall;
 use crate::pipeline::stages;
 use crate::planner::plan::*;
+use crate::runtime::eval::EvalContext;
 use crate::runtime::functions::FunctionRegistry;
 use crate::runtime::procedures::ProcedureRegistry;
 use crate::types::binding::{Binding, BoundValue};
@@ -15,6 +17,11 @@ use crate::types::value::GqlValue;
 use super::pattern::execute_pattern_ops;
 
 /// Execute a CALL procedure for each input binding.
+///
+/// Accepts an optional `EvalContext` so that query parameters (`$param`)
+/// and other context (temporal, options) are available during argument
+/// evaluation. When `None`, a default context is built from the graph
+/// and builtin function registry.
 pub(super) fn execute_call(
     bindings: Vec<Binding>,
     call: &ProcedureCall,
@@ -22,6 +29,7 @@ pub(super) fn execute_call(
     hot_tier: Option<&selene_ts::HotTier>,
     procedures: Option<&ProcedureRegistry>,
     scope: Option<&roaring::RoaringBitmap>,
+    ctx: Option<&EvalContext<'_>>,
 ) -> Result<Vec<Binding>, GqlError> {
     let registry =
         procedures.ok_or_else(|| GqlError::internal("no procedure registry available"))?;
@@ -31,13 +39,23 @@ pub(super) fn execute_call(
             name: call.name.as_str().to_string(),
         })?;
 
+    // Build a fallback context when the caller does not supply one.
+    let owned_ctx;
+    let eval_ctx = if let Some(c) = ctx {
+        c
+    } else {
+        owned_ctx = EvalContext::new(graph, FunctionRegistry::builtins());
+        &owned_ctx
+    };
+
     let mut output = Vec::new();
     for binding in &bindings {
-        // Evaluate arguments against current binding
+        // Evaluate arguments against current binding with full context
+        // (includes query parameters, temporal resolver, options, etc.)
         let args: Vec<GqlValue> = call
             .args
             .iter()
-            .map(|expr| crate::runtime::eval::eval_expr(expr, binding, graph))
+            .map(|expr| crate::runtime::eval::eval_expr_ctx(expr, binding, eval_ctx))
             .collect::<Result<_, _>>()?;
 
         // Execute procedure with scope filtering
@@ -47,13 +65,15 @@ pub(super) fn execute_call(
         for row in rows {
             let mut extended = binding.clone();
             for (name, value) in &row {
-                // Apply YIELD aliases
+                // Apply YIELD aliases: match procedure column names
+                // case-insensitively against parsed YIELD names (which are
+                // uppercased by the parser's intern_var).
+                let upper_name = IStr::new(&name.as_str().to_uppercase());
                 let alias = call
                     .yields
                     .iter()
-                    .find(|y| y.name == *name)
-                    .and_then(|y| y.alias)
-                    .unwrap_or(*name);
+                    .find(|y| y.name == upper_name)
+                    .map_or(upper_name, |y| y.alias.unwrap_or(y.name));
                 extended.bind(alias, BoundValue::Scalar(value.clone()));
             }
             output.push(extended);
@@ -112,8 +132,15 @@ pub(super) fn execute_subquery(
         for op in &sub_plan.pipeline {
             match op {
                 PipelineOp::Call { procedure: call } => {
-                    sub_bindings =
-                        execute_call(sub_bindings, call, graph, hot_tier, procedures, scope)?;
+                    sub_bindings = execute_call(
+                        sub_bindings,
+                        call,
+                        graph,
+                        hot_tier,
+                        procedures,
+                        scope,
+                        Some(&ctx),
+                    )?;
                 }
                 PipelineOp::Subquery { plan: nested } => {
                     sub_bindings =
