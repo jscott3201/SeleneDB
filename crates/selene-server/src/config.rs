@@ -220,11 +220,17 @@ pub struct VaultConfig {
 /// Vector embedding configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct VectorConfig {
+    /// Embedding model to use: `"minilm"` (default) or `"embeddinggemma"`.
+    #[serde(default = "default_model_name")]
+    pub model: String,
     /// Path to model directory (safetensors + tokenizer + config).
-    /// Default: {data_dir}/models/all-MiniLM-L6-v2/
+    /// Default: `{data_dir}/models/{model_name}/`
     pub model_path: Option<PathBuf>,
+    /// Output dimensions for MRL-capable models (EmbeddingGemma).
+    /// Options: 768, 512, 256, 128. Ignored for MiniLM (always 384).
+    #[serde(default)]
+    pub dimensions: Option<usize>,
     /// Remote embedding endpoint (alternative to local model).
     /// When set, embed() calls this HTTP endpoint instead of local candle.
     /// Example: "http://hub:8090/v1/embeddings"
@@ -246,6 +252,22 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
+}
+
+impl Default for VectorConfig {
+    fn default() -> Self {
+        Self {
+            model: default_model_name(),
+            model_path: None,
+            dimensions: None,
+            endpoint: None,
+            auto_embed: Vec::new(),
+            hnsw_m: None,
+            hnsw_m0: None,
+            hnsw_ef_construction: None,
+            hnsw_ef_search: None,
+        }
+    }
 }
 
 impl VectorConfig {
@@ -279,6 +301,10 @@ pub struct AutoEmbedRule {
 
 fn default_embedding_property() -> String {
     "embedding".into()
+}
+
+fn default_model_name() -> String {
+    "minilm".into()
 }
 
 // ── Runtime profiles & services ──────────────────────────────────────────
