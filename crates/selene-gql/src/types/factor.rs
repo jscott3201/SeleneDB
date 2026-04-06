@@ -8,10 +8,10 @@
 //! anchor data across all 10,000 flat rows.
 //!
 //! Key types:
-//! - [`FactorLevel`]: one expansion hop's columns + parent linkage
-//! - [`LevelSchema`]: variable-to-slot mapping within a single level
-//! - [`FactorizedChunk`]: stack of levels representing a full multi-hop match
-//! - [`FactorizedRowView`]: per-row accessor that walks parent chains
+//! - `FactorLevel`: one expansion hop's columns + parent linkage
+//! - `LevelSchema`: variable-to-slot mapping within a single level
+//! - `FactorizedChunk`: stack of levels representing a full multi-hop match
+//! - `FactorizedRowView`: per-row accessor that walks parent chains
 
 use std::sync::Arc;
 
