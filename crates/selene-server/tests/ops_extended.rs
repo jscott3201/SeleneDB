@@ -1351,7 +1351,7 @@ async fn modify_node_set_and_remove_properties() {
         modified.properties.get("name"),
         Some(&Value::String(SmolStr::new("S1-updated")))
     );
-    assert!(modified.properties.get("unit").is_none());
+    assert!(!modified.properties.contains_key("unit"));
 }
 
 #[tokio::test]
