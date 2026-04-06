@@ -17,11 +17,13 @@ use crate::types::error::GqlError;
 use crate::types::value::GqlValue;
 
 /// Shared context for scan operations, bundling the graph reference,
-/// authorization scope, and property pushdown filters.
+/// authorization scope, property pushdown filters, and evaluation context
+/// (needed to resolve `$param` bindings in inline property expressions).
 pub(crate) struct ScanContext<'a> {
     pub graph: &'a SeleneGraph,
     pub scope: Option<&'a RoaringBitmap>,
     pub property_filters: &'a [PropertyFilter],
+    pub eval_ctx: &'a crate::runtime::eval::EvalContext<'a>,
 }
 
 /// Resolve a LabelExpr to a RoaringBitmap of matching node IDs.
@@ -171,6 +173,7 @@ pub(crate) fn execute_label_scan_chunk(
         graph,
         scope,
         property_filters,
+        eval_ctx,
     } = *ctx;
     // 1. Get candidate bitmap
     let mut bitmap = match labels {
@@ -231,7 +234,7 @@ pub(crate) fn execute_label_scan_chunk(
                     val
                 } else {
                     let binding = Binding::single(var, BoundValue::Node(node_id));
-                    owned_val = eval::eval_expr(expected_expr, &binding, graph)?;
+                    owned_val = eval::eval_expr_ctx(expected_expr, &binding, eval_ctx)?;
                     &owned_val
                 };
                 let actual = match graph.get_node(node_id) {
@@ -280,6 +283,7 @@ pub(crate) fn execute_label_scan_with_limit(
         graph,
         scope,
         property_filters,
+        eval_ctx,
     } = *ctx;
     // Parallel path: bypass chunk for large scans without limit (rayon needs
     // owned Bindings for work-stealing). Once pattern orchestration (T7)
@@ -323,6 +327,7 @@ pub(crate) fn execute_label_scan_with_limit(
                 property_filters,
                 &effective_inline,
                 graph,
+                eval_ctx,
             ));
         }
     }
@@ -337,13 +342,13 @@ pub(crate) fn execute_label_scan_with_limit(
 pub(crate) fn count_label_scan(
     labels: Option<&LabelExpr>,
     inline_props: &[(IStr, Expr)],
-    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
     ctx: &ScanContext<'_>,
 ) -> Result<u64, GqlError> {
     let ScanContext {
         graph,
         scope,
         property_filters,
+        eval_ctx,
     } = *ctx;
     // 1. Get candidate bitmap
     let mut bitmap = match labels {
@@ -417,6 +422,7 @@ fn execute_label_scan_parallel(
     property_filters: &[PropertyFilter],
     inline_props: &[(IStr, Expr)],
     graph: &SeleneGraph,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
 ) -> Vec<Binding> {
     use rayon::prelude::*;
 
@@ -443,7 +449,7 @@ fn execute_label_scan_parallel(
                         val
                     } else {
                         let binding = Binding::single(var, BoundValue::Node(node_id));
-                        owned_val = eval::eval_expr(expected_expr, &binding, graph).ok()?;
+                        owned_val = eval::eval_expr_ctx(expected_expr, &binding, eval_ctx).ok()?;
                         &owned_val
                     };
                     let actual = match graph.get_node(node_id) {
@@ -480,6 +486,7 @@ pub(crate) fn execute_index_ordered_scan_chunk(
         graph,
         scope,
         property_filters,
+        eval_ctx: _,
     } = *ctx;
     let index = graph.property_index_entries(label, key)?;
     let mut builder = ColumnBuilder::new_node_ids(limit);
@@ -542,6 +549,7 @@ pub(crate) fn execute_composite_index_scan_chunk(
         graph,
         scope,
         property_filters,
+        eval_ctx: _,
     } = *ctx;
     let mut prop_map = std::collections::HashMap::new();
     for (key, expr) in inline_props {
@@ -634,6 +642,12 @@ mod tests {
     use super::*;
     use selene_core::{LabelSet, PropertyMap, Value};
     use smol_str::SmolStr;
+
+    /// Build a default EvalContext for scan tests (no parameters needed).
+    fn default_eval_ctx(graph: &SeleneGraph) -> crate::runtime::eval::EvalContext<'_> {
+        let registry = crate::runtime::functions::FunctionRegistry::builtins();
+        crate::runtime::eval::EvalContext::new(graph, registry)
+    }
 
     fn setup_graph() -> SeleneGraph {
         let mut g = SeleneGraph::new();
@@ -740,12 +754,14 @@ mod tests {
     #[test]
     fn scan_all_sensors() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("s");
         let labels = LabelExpr::Name(IStr::new("sensor"));
         let ctx = ScanContext {
             graph: &g,
             scope: None,
             property_filters: &[],
+            eval_ctx: &eval_ctx,
         };
         let bindings = execute_label_scan_with_limit(var, Some(&labels), &[], None, &ctx).unwrap();
         assert_eq!(bindings.len(), 3);
@@ -754,6 +770,7 @@ mod tests {
     #[test]
     fn scan_with_scope() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("s");
         let labels = LabelExpr::Name(IStr::new("sensor"));
         // Scope: only nodes 1 and 2
@@ -764,6 +781,7 @@ mod tests {
             graph: &g,
             scope: Some(&scope),
             property_filters: &[],
+            eval_ctx: &eval_ctx,
         };
         let bindings = execute_label_scan_with_limit(var, Some(&labels), &[], None, &ctx).unwrap();
         assert_eq!(bindings.len(), 2);
@@ -772,11 +790,13 @@ mod tests {
     #[test]
     fn scan_no_label_gets_all() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("n");
         let ctx = ScanContext {
             graph: &g,
             scope: None,
             property_filters: &[],
+            eval_ctx: &eval_ctx,
         };
         let bindings = execute_label_scan_with_limit(var, None, &[], None, &ctx).unwrap();
         assert_eq!(bindings.len(), 4); // all nodes
@@ -785,6 +805,7 @@ mod tests {
     #[test]
     fn scan_with_property_filter() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("s");
         let labels = LabelExpr::Name(IStr::new("sensor"));
         let filters = vec![PropertyFilter {
@@ -796,6 +817,7 @@ mod tests {
             graph: &g,
             scope: None,
             property_filters: &filters,
+            eval_ctx: &eval_ctx,
         };
         let bindings = execute_label_scan_with_limit(var, Some(&labels), &[], None, &ctx).unwrap();
         assert_eq!(bindings.len(), 1); // only S2 (temp=80.0)
@@ -805,6 +827,7 @@ mod tests {
     #[test]
     fn scan_with_inline_properties() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("s");
         let labels = LabelExpr::Name(IStr::new("sensor"));
         let props = vec![(
@@ -815,6 +838,7 @@ mod tests {
             graph: &g,
             scope: None,
             property_filters: &[],
+            eval_ctx: &eval_ctx,
         };
         let bindings =
             execute_label_scan_with_limit(var, Some(&labels), &props, None, &ctx).unwrap();
@@ -825,12 +849,14 @@ mod tests {
     #[test]
     fn scan_binding_has_correct_variable() {
         let g = setup_graph();
+        let eval_ctx = default_eval_ctx(&g);
         let var = IStr::new("my_node");
         let labels = LabelExpr::Name(IStr::new("building"));
         let ctx = ScanContext {
             graph: &g,
             scope: None,
             property_filters: &[],
+            eval_ctx: &eval_ctx,
         };
         let bindings = execute_label_scan_with_limit(var, Some(&labels), &[], None, &ctx).unwrap();
         assert_eq!(bindings.len(), 1);

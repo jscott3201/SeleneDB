@@ -391,13 +391,14 @@ fn execute_statement_with_csr(
                 }
 
                 let scan_limit = detect_scan_limit(&plan.pattern_ops, &plan.pipeline);
-                let mut bindings = execute_pattern_ops_with_csr(
+                let mut bindings = execute_pattern_ops_with_csr_and_ctx(
                     &plan.pattern_ops,
                     graph,
                     scope,
                     scan_limit,
                     None,
                     csr,
+                    &ctx,
                 )?;
 
                 // If we have results from the previous block, merge them
@@ -524,11 +525,11 @@ fn execute_count_only(
     let count = scan::count_label_scan(
         labels.as_ref(),
         inline_props,
-        ctx,
         &scan::ScanContext {
             graph,
             scope,
             property_filters,
+            eval_ctx: ctx,
         },
     )?;
     Ok(Some(count))
@@ -644,20 +645,28 @@ fn execute_plan_inner(
             Some(Ok(fc)) => (None, Some(fc)),
             Some(Err(e)) => return Err(e),
             None => {
-                let c = execute_pattern_ops_as_chunk(
+                let c = execute_pattern_ops_as_chunk_with_ctx(
                     &plan.pattern_ops,
                     graph,
                     scope,
                     scan_limit,
                     None,
                     csr,
+                    &ctx,
                 )?;
                 (Some(c), None)
             }
         }
     } else {
-        let c =
-            execute_pattern_ops_as_chunk(&plan.pattern_ops, graph, scope, scan_limit, None, csr)?;
+        let c = execute_pattern_ops_as_chunk_with_ctx(
+            &plan.pattern_ops,
+            graph,
+            scope,
+            scan_limit,
+            None,
+            csr,
+            &ctx,
+        )?;
         (Some(c), None)
     };
 
@@ -1040,9 +1049,13 @@ use arrow_io::{
 use call::{execute_call, execute_subquery};
 use mutation::{count_mutation, execute_mutations_write};
 use mutation_txn::execute_single_mutation_in_txn;
-use pattern::{execute_pattern_ops, execute_pattern_ops_as_chunk, execute_pattern_ops_with_csr};
+use pattern::{
+    execute_pattern_ops, execute_pattern_ops_as_chunk_with_ctx,
+    execute_pattern_ops_with_csr_and_ctx,
+};
 pub(crate) use pattern::{
-    execute_pattern_ops_correlated, execute_pattern_ops_public, execute_pattern_ops_with_max,
+    execute_pattern_ops_correlated_with_ctx, execute_pattern_ops_with_eval_ctx,
+    execute_pattern_ops_with_max_and_ctx,
 };
 
 /// Fused streaming on DataChunk: applies consecutive LET/FILTER/OFFSET/LIMIT

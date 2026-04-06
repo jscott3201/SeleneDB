@@ -685,15 +685,12 @@ fn cross_feature_memory_and_sensor_counts() {
 fn parameters_propagate_through_subquery_call() {
     let (graph, _query_vec) = build_ai_fixture();
 
-    // Use $param in a CALL procedure inside a CALL { subquery } to verify
-    // parameter propagation through the subquery context.
-    // Note: $param in MATCH inline properties ({key: $param}) is not yet
-    // supported in subqueries (requires threading EvalContext through the
-    // pattern scan layer). Use FILTER instead for parameterized conditions.
+    // Use $param in MATCH inline properties ({key: $param}) inside a
+    // CALL { subquery } to verify parameter propagation through the
+    // pattern scan layer (EvalContext threading).
     let query = "MATCH (s:Sensor) \
                  CALL { \
-                     MATCH (m:__Memory) \
-                     FILTER m.namespace = $ns \
+                     MATCH (m:__Memory {namespace: $ns}) \
                      RETURN count(m) AS mem_count \
                  } \
                  RETURN count(s) AS sensor_count, mem_count";

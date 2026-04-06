@@ -17,15 +17,18 @@ use crate::types::factor::{FactorLevel, FactorizedChunk};
 use crate::types::value::GqlValue;
 
 /// Shared execution context for pattern operations, bundling the
-/// graph reference, authorization scope, CSR adjacency, and SIP
-/// bitmaps to keep function signatures concise.
+/// graph reference, authorization scope, CSR adjacency, SIP
+/// bitmaps, and evaluation context (for `$param` resolution in
+/// inline property expressions) to keep function signatures concise.
 pub(crate) struct PatternExecCtx<'a> {
     pub graph: &'a SeleneGraph,
     pub scope: Option<&'a RoaringBitmap>,
     pub csr: Option<&'a selene_graph::CsrAdjacency>,
     pub sip_ctx: &'a PatternContext,
+    pub eval_ctx: &'a crate::runtime::eval::EvalContext<'a>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn execute_pattern_ops_public(
     ops: &[PatternOp],
     graph: &SeleneGraph,
@@ -36,6 +39,7 @@ pub(crate) fn execute_pattern_ops_public(
 
 /// Execute pattern operations seeded with an initial binding (correlated subquery).
 /// Variables already bound in `seed` are available to the inner pattern.
+#[allow(dead_code)]
 pub(crate) fn execute_pattern_ops_correlated(
     ops: &[PatternOp],
     graph: &SeleneGraph,
@@ -45,12 +49,33 @@ pub(crate) fn execute_pattern_ops_correlated(
     execute_pattern_ops_with_limit_and_seed(ops, graph, scope, None, Some(seed))
 }
 
+/// Execute correlated pattern operations with an explicit EvalContext.
+pub(crate) fn execute_pattern_ops_correlated_with_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    seed: &Binding,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
+) -> Result<Vec<Binding>, GqlError> {
+    execute_pattern_ops_with_limit_seed_and_ctx(ops, graph, scope, None, Some(seed), Some(eval_ctx))
+}
+
 pub(super) fn execute_pattern_ops(
     ops: &[PatternOp],
     graph: &SeleneGraph,
     scope: Option<&RoaringBitmap>,
 ) -> Result<Vec<Binding>, GqlError> {
     execute_pattern_ops_with_limit_and_seed(ops, graph, scope, None, None)
+}
+
+/// Execute pattern operations with an explicit EvalContext for `$param` resolution.
+pub(crate) fn execute_pattern_ops_with_eval_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
+) -> Result<Vec<Binding>, GqlError> {
+    execute_pattern_ops_with_limit_seed_and_ctx(ops, graph, scope, None, None, Some(eval_ctx))
 }
 
 /// Execute pattern operations with an optional scan limit for LIMIT pushdown
@@ -65,6 +90,19 @@ pub(super) fn execute_pattern_ops_with_limit_and_seed(
     execute_pattern_ops_with_csr(ops, graph, scope, scan_limit, seed, None)
 }
 
+/// Execute pattern operations with an optional scan limit, seed, and EvalContext.
+fn execute_pattern_ops_with_limit_seed_and_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    scan_limit: Option<usize>,
+    seed: Option<&Binding>,
+    eval_ctx: Option<&crate::runtime::eval::EvalContext<'_>>,
+) -> Result<Vec<Binding>, GqlError> {
+    execute_pattern_ops_core(ops, graph, scope, scan_limit, seed, None, None, eval_ctx)
+        .map(|chunk| chunk.to_bindings())
+}
+
 /// Execute pattern operations with a pre-built CSR adjacency.
 pub(super) fn execute_pattern_ops_with_csr(
     ops: &[PatternOp],
@@ -75,6 +113,29 @@ pub(super) fn execute_pattern_ops_with_csr(
     csr: Option<&selene_graph::CsrAdjacency>,
 ) -> Result<Vec<Binding>, GqlError> {
     execute_pattern_ops_with_max(ops, graph, scope, scan_limit, seed, csr, None)
+}
+
+/// Execute pattern operations with a pre-built CSR and explicit EvalContext.
+pub(super) fn execute_pattern_ops_with_csr_and_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    scan_limit: Option<usize>,
+    seed: Option<&Binding>,
+    csr: Option<&selene_graph::CsrAdjacency>,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
+) -> Result<Vec<Binding>, GqlError> {
+    execute_pattern_ops_core(
+        ops,
+        graph,
+        scope,
+        scan_limit,
+        seed,
+        csr,
+        None,
+        Some(eval_ctx),
+    )
+    .map(|chunk| chunk.to_bindings())
 }
 
 /// Execute pattern operations with early termination after `max_bindings` results.
@@ -91,8 +152,33 @@ pub(crate) fn execute_pattern_ops_with_max(
     csr: Option<&selene_graph::CsrAdjacency>,
     max_bindings: Option<usize>,
 ) -> Result<Vec<Binding>, GqlError> {
-    execute_pattern_ops_core(ops, graph, scope, scan_limit, seed, csr, max_bindings)
+    execute_pattern_ops_core(ops, graph, scope, scan_limit, seed, csr, max_bindings, None)
         .map(|chunk| chunk.to_bindings())
+}
+
+/// Execute pattern operations with early termination and an explicit EvalContext.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_pattern_ops_with_max_and_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    scan_limit: Option<usize>,
+    seed: Option<&Binding>,
+    csr: Option<&selene_graph::CsrAdjacency>,
+    max_bindings: Option<usize>,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
+) -> Result<Vec<Binding>, GqlError> {
+    execute_pattern_ops_core(
+        ops,
+        graph,
+        scope,
+        scan_limit,
+        seed,
+        csr,
+        max_bindings,
+        Some(eval_ctx),
+    )
+    .map(|chunk| chunk.to_bindings())
 }
 
 /// Execute pattern operations, returning the DataChunk directly.
@@ -100,6 +186,7 @@ pub(crate) fn execute_pattern_ops_with_max(
 /// This is the primary entry point for the vectorized pipeline: callers
 /// keep the columnar representation instead of converting to row-based
 /// bindings at the pattern/pipeline boundary.
+#[allow(dead_code)]
 pub(super) fn execute_pattern_ops_as_chunk(
     ops: &[PatternOp],
     graph: &SeleneGraph,
@@ -108,7 +195,29 @@ pub(super) fn execute_pattern_ops_as_chunk(
     seed: Option<&Binding>,
     csr: Option<&selene_graph::CsrAdjacency>,
 ) -> Result<DataChunk, GqlError> {
-    execute_pattern_ops_core(ops, graph, scope, scan_limit, seed, csr, None)
+    execute_pattern_ops_core(ops, graph, scope, scan_limit, seed, csr, None, None)
+}
+
+/// Execute pattern operations as a DataChunk with an explicit EvalContext.
+pub(super) fn execute_pattern_ops_as_chunk_with_ctx(
+    ops: &[PatternOp],
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    scan_limit: Option<usize>,
+    seed: Option<&Binding>,
+    csr: Option<&selene_graph::CsrAdjacency>,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
+) -> Result<DataChunk, GqlError> {
+    execute_pattern_ops_core(
+        ops,
+        graph,
+        scope,
+        scan_limit,
+        seed,
+        csr,
+        None,
+        Some(eval_ctx),
+    )
 }
 
 /// Check if a pattern op sequence is eligible for factorized execution.
@@ -144,7 +253,9 @@ pub(super) fn execute_pattern_ops_as_factorized_chunk(
         return None;
     }
 
-    Some(execute_factorized_core(ops, graph, scope, csr))
+    let registry = crate::runtime::functions::FunctionRegistry::builtins();
+    let eval_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
+    Some(execute_factorized_core(ops, graph, scope, csr, &eval_ctx))
 }
 
 /// Core factorized execution: threads a FactorizedChunk through
@@ -154,6 +265,7 @@ fn execute_factorized_core(
     graph: &SeleneGraph,
     scope: Option<&RoaringBitmap>,
     csr: Option<&selene_graph::CsrAdjacency>,
+    eval_ctx: &crate::runtime::eval::EvalContext<'_>,
 ) -> Result<FactorizedChunk, GqlError> {
     let mut sip_ctx = PatternContext::new();
     let mut chunk: Option<FactorizedChunk> = None;
@@ -172,6 +284,7 @@ fn execute_factorized_core(
                         scope,
                         csr,
                         sip_ctx: &sip_ctx,
+                        eval_ctx,
                     },
                 )?;
 
@@ -354,6 +467,7 @@ fn execute_factorized_core(
 
 /// Core pattern execution: threads a DataChunk through pattern operators
 /// with optional early termination.
+#[allow(clippy::too_many_arguments)]
 fn execute_pattern_ops_core(
     ops: &[PatternOp],
     graph: &SeleneGraph,
@@ -362,7 +476,13 @@ fn execute_pattern_ops_core(
     seed: Option<&Binding>,
     csr: Option<&selene_graph::CsrAdjacency>,
     max_rows: Option<usize>,
+    caller_eval_ctx: Option<&crate::runtime::eval::EvalContext<'_>>,
 ) -> Result<DataChunk, GqlError> {
+    // Build a default EvalContext when the caller does not supply one.
+    let registry = crate::runtime::functions::FunctionRegistry::builtins();
+    let default_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
+    let eval_ctx = caller_eval_ctx.unwrap_or(&default_ctx);
+
     // Seed chunk: unit (one row, no columns) or from seed binding
     let mut chunk = match seed {
         Some(s) => seed_to_chunk(s),
@@ -395,6 +515,7 @@ fn execute_pattern_ops_core(
             scope,
             csr,
             sip_ctx: &sip_ctx,
+            eval_ctx,
         };
         chunk = execute_single_pattern_op_chunk(op, chunk, ops, scan_limit, &ctx)?;
 
@@ -562,6 +683,7 @@ fn execute_single_pattern_op_chunk(
                         graph,
                         scope,
                         property_filters,
+                        eval_ctx: ctx.eval_ctx,
                     },
                 )
             {
@@ -582,6 +704,7 @@ fn execute_single_pattern_op_chunk(
                         graph,
                         scope,
                         property_filters,
+                        eval_ctx: ctx.eval_ctx,
                     },
                 )
             {
@@ -650,6 +773,7 @@ fn execute_single_pattern_op_chunk(
                     graph,
                     scope: effective_scope,
                     property_filters,
+                    eval_ctx: ctx.eval_ctx,
                 },
             )
         }
@@ -728,7 +852,14 @@ fn execute_single_pattern_op_chunk(
             join_vars,
         } => {
             let right_ops = &all_ops[*right_start..*right_end];
-            let right_bindings = execute_pattern_ops(right_ops, graph, scope)?;
+            let right_bindings = execute_pattern_ops_with_limit_seed_and_ctx(
+                right_ops,
+                graph,
+                scope,
+                None,
+                None,
+                Some(ctx.eval_ctx),
+            )?;
             // Bridge: convert right to chunk, then join
             let right_chunk = join::bindings_to_chunk_generic(&right_bindings);
             join::execute_join_chunk(&current, &right_chunk, join_vars)
@@ -741,7 +872,14 @@ fn execute_single_pattern_op_chunk(
         } => {
             // Bridge through bindings for Optional (complex left-outer-join).
             let current_bindings = current.to_bindings();
-            let inner_result = execute_pattern_ops(inner_ops, graph, scope)?;
+            let inner_result = execute_pattern_ops_with_limit_seed_and_ctx(
+                inner_ops,
+                graph,
+                scope,
+                None,
+                None,
+                Some(ctx.eval_ctx),
+            )?;
             let result =
                 execute_optional_bindings(&current_bindings, &inner_result, new_vars, join_vars);
             Ok(join::bindings_to_chunk_generic(&result))

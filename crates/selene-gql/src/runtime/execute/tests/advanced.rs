@@ -503,6 +503,10 @@ fn e2e_wco_triangle_k4_direct_executor() {
             scope: None,
             csr: Some(&csr),
             sip_ctx: &crate::pattern::context::PatternContext::new(),
+            eval_ctx: &crate::runtime::eval::EvalContext::new(
+                &g,
+                crate::runtime::functions::FunctionRegistry::builtins(),
+            ),
         },
     )
     .unwrap();
@@ -571,6 +575,10 @@ fn e2e_wco_triangle_k3_direct_executor() {
             scope: None,
             csr: Some(&csr),
             sip_ctx: &crate::pattern::context::PatternContext::new(),
+            eval_ctx: &crate::runtime::eval::EvalContext::new(
+                &g,
+                crate::runtime::functions::FunctionRegistry::builtins(),
+            ),
         },
     )
     .unwrap();
@@ -641,6 +649,10 @@ fn e2e_wco_triangle_k3_undirected() {
             scope: None,
             csr: Some(&csr),
             sip_ctx: &crate::pattern::context::PatternContext::new(),
+            eval_ctx: &crate::runtime::eval::EvalContext::new(
+                &g,
+                crate::runtime::functions::FunctionRegistry::builtins(),
+            ),
         },
     )
     .unwrap();
@@ -741,6 +753,10 @@ fn e2e_wco_triangle_single_direction_subset() {
             scope: None,
             csr: Some(&csr),
             sip_ctx: &crate::pattern::context::PatternContext::new(),
+            eval_ctx: &crate::runtime::eval::EvalContext::new(
+                &g,
+                crate::runtime::functions::FunctionRegistry::builtins(),
+            ),
         },
     )
     .unwrap();

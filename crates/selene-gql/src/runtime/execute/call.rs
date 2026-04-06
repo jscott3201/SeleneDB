@@ -14,7 +14,7 @@ use crate::types::binding::{Binding, BoundValue};
 use crate::types::error::GqlError;
 use crate::types::value::GqlValue;
 
-use super::pattern::execute_pattern_ops;
+use super::pattern::execute_pattern_ops_with_eval_ctx;
 
 /// Execute a CALL procedure for each input binding.
 ///
@@ -107,7 +107,8 @@ pub(super) fn execute_subquery(
 
     let mut output = Vec::new();
     for outer_binding in &bindings {
-        let mut sub_bindings = execute_pattern_ops(&sub_plan.pattern_ops, graph, scope)?;
+        let mut sub_bindings =
+            execute_pattern_ops_with_eval_ctx(&sub_plan.pattern_ops, graph, scope, &ctx)?;
 
         // Filter sub_bindings: keep only those consistent with outer binding's variables
         sub_bindings.retain(|sub_b| {
