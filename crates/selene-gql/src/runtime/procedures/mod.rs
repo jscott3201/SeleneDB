@@ -20,6 +20,7 @@ pub mod graphrag;
 pub mod history;
 pub mod memory;
 pub mod rdf;
+pub mod reindex;
 pub mod schema_audit;
 pub mod schema_dump;
 pub mod search;
@@ -167,6 +168,9 @@ impl ProcedureRegistry {
         reg.register(Arc::new(graphrag::GraphRagSearch));
         // Agent memory recall (ai feature)
         reg.register(Arc::new(memory::MemoryRecall));
+        // Embedding re-index
+        reg.register(Arc::new(reindex::Reindex));
+        reg.register(Arc::new(reindex::ReindexStatus));
         reg
     }
 

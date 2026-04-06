@@ -1092,13 +1092,26 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                 }
             });
             if !vectors.is_empty() {
-                let dimensions = vectors[0].1.len() as u16;
-                let index = selene_graph::hnsw::HnswIndex::new(params.clone(), dimensions);
+                let stored_dims = vectors[0].1.len() as u16;
+                let provider_dims = selene_gql::runtime::embed::embedding_dimensions()
+                    .map(|d| d as u16)
+                    .unwrap_or(stored_dims);
+
+                if stored_dims != provider_dims {
+                    tracing::warn!(
+                        stored = stored_dims,
+                        provider = provider_dims,
+                        "HNSW dimension mismatch: stored vectors have different dimensions \
+                         than current embedding model. Run CALL graph.reindex() to re-embed."
+                    );
+                }
+
+                let index = selene_graph::hnsw::HnswIndex::new(params.clone(), stored_dims);
                 index.rebuild(vectors);
                 let index_arc = std::sync::Arc::new(index);
                 state.graph.inner().write().set_hnsw_index(index_arc);
                 state.graph.publish_snapshot();
-                tracing::info!("HNSW index built on startup");
+                tracing::info!(dimensions = stored_dims, "HNSW index built on startup");
             }
         }
 
@@ -1143,6 +1156,17 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                                 old_value,
                                 ..
                             } => {
+                                // Skip if vector dimensions don't match index
+                                let index_dims = hnsw.load_graph().dimensions() as usize;
+                                if v.len() != index_dims {
+                                    tracing::warn!(
+                                        node_id = node_id.0,
+                                        vec_dims = v.len(),
+                                        index_dims,
+                                        "skipping HNSW insert: vector dimension mismatch"
+                                    );
+                                    continue;
+                                }
                                 // Tombstone the old entry when updating an
                                 // existing vector to prevent ghost nodes.
                                 if matches!(old_value, Some(Value::Vector(_))) {

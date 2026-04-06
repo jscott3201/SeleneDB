@@ -64,6 +64,11 @@ impl HnswGraph {
         }
     }
 
+    /// Vector dimensionality for this graph.
+    pub fn dimensions(&self) -> u16 {
+        self.dimensions
+    }
+
     /// Number of nodes in the graph.
     pub fn len(&self) -> usize {
         self.nodes.len()
