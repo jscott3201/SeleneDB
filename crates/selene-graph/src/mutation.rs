@@ -120,6 +120,9 @@ impl<'g> TrackedMutation<'g> {
             props.insert(key, value);
         }
 
+        // Promote dictionary-flagged string properties to InternedStr.
+        Self::apply_node_dictionary_encoding(&self.graph.schema, &labels, &mut props);
+
         let id = self.graph.allocate_node_id()?;
 
         // Emit change events FIRST (IStr is Copy, so this costs nothing).
@@ -627,6 +630,10 @@ impl<'g> TrackedMutation<'g> {
             }
         }
 
+        // Promote dictionary-flagged string properties to InternedStr.
+        let mut props = props;
+        Self::apply_edge_dictionary_encoding(&self.graph.schema, label, &mut props);
+
         let id = self.graph.allocate_edge_id()?;
         let edge = Edge::new(id, source, target, label, props.clone());
         self.graph.insert_edge_raw(edge);
@@ -1026,6 +1033,61 @@ impl<'g> TrackedMutation<'g> {
                     }
                 }
             }
+        }
+    }
+
+    // ── Dictionary encoding helpers ─────────────────────────────────────
+
+    /// Promote `Value::String` to `Value::InternedStr` for properties whose
+    /// schema has `dictionary: true`. Operates in-place on the `PropertyMap`.
+    fn apply_node_dictionary_encoding(
+        schema: &crate::schema::SchemaValidator,
+        labels: &LabelSet,
+        props: &mut PropertyMap,
+    ) {
+        let promotions: Vec<(IStr, Value)> = props
+            .iter()
+            .filter_map(|(key, value)| {
+                if let Value::String(s) = value {
+                    for label in labels.iter() {
+                        if let Some(ns) = schema.node_schema(label.as_str())
+                            && let Some(pd) =
+                                ns.properties.iter().find(|p| *p.name == *key.as_str())
+                            && pd.dictionary
+                        {
+                            return Some((*key, Value::InternedStr(IStr::new(s.as_str()))));
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+        for (key, value) in promotions {
+            props.insert(key, value);
+        }
+    }
+
+    /// Promote dictionary-flagged string properties on an edge.
+    fn apply_edge_dictionary_encoding(
+        schema: &crate::schema::SchemaValidator,
+        label: IStr,
+        props: &mut PropertyMap,
+    ) {
+        let promotions: Vec<(IStr, Value)> = props
+            .iter()
+            .filter_map(|(key, value)| {
+                if let Value::String(s) = value
+                    && let Some(es) = schema.edge_schema(label.as_str())
+                    && let Some(pd) = es.properties.iter().find(|p| *p.name == *key.as_str())
+                    && pd.dictionary
+                {
+                    return Some((*key, Value::InternedStr(IStr::new(s.as_str()))));
+                }
+                None
+            })
+            .collect();
+        for (key, value) in promotions {
+            props.insert(key, value);
         }
     }
 }

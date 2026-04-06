@@ -1047,16 +1047,11 @@ mod tests {
     // --- Dictionary encoding through import path ---
 
     #[test]
-    fn import_preserves_string_values_without_dictionary_promotion() {
-        // The RDF import path uses TrackedMutation::create_node directly,
-        // bypassing the GQL layer's maybe_intern_value. This test verifies
-        // the current behavior: string property values remain as
-        // Value::String even when a DICTIONARY schema is registered.
-        //
-        // Cross-variant equality (Value::String == Value::InternedStr for
-        // matching content) ensures queries still work correctly. If the
-        // graph layer adds dictionary promotion in the future, this test
-        // should be updated to assert Value::InternedStr instead.
+    fn import_promotes_dictionary_flagged_strings() {
+        // TrackedMutation::create_node applies dictionary encoding for
+        // properties whose schema has `dictionary: true`. The RDF import
+        // path passes through TrackedMutation, so dictionary-flagged
+        // properties are promoted to Value::InternedStr automatically.
         use selene_core::{NodeSchema, PropertyDef, ValueType};
 
         let ns = test_ns();
@@ -1091,32 +1086,21 @@ mod tests {
         sg.read(|g| {
             let node = g.get_node(NodeId(1)).expect("node should exist");
 
-            // The import path stores values as Value::String, not
-            // Value::InternedStr, because TrackedMutation does not apply
-            // dictionary encoding. The GQL mutation layer handles that.
+            // Dictionary-flagged property is promoted to InternedStr.
             let unit_val = node.properties.get(IStr::new("unit")).unwrap();
             assert!(
-                matches!(unit_val, Value::String(_)),
-                "import path should store as Value::String, got: {unit_val:?}"
+                matches!(unit_val, Value::InternedStr(_)),
+                "dictionary property should be Value::InternedStr, got: {unit_val:?}"
             );
             assert_eq!(unit_val.as_str(), Some("degC"));
 
+            // Non-dictionary property remains Value::String.
             let name_val = node.properties.get(IStr::new("name")).unwrap();
             assert!(
                 matches!(name_val, Value::String(_)),
-                "non-dictionary prop should also be Value::String, got: {name_val:?}"
+                "non-dictionary prop should remain Value::String, got: {name_val:?}"
             );
             assert_eq!(name_val.as_str(), Some("TempSensor-1"));
-
-            // Cross-variant equality: a Value::InternedStr with the same
-            // content must compare equal to the stored Value::String. This
-            // is critical for GQL query correctness when mixing import and
-            // GQL mutation paths.
-            let interned = Value::InternedStr(IStr::new("degC"));
-            assert_eq!(
-                unit_val, &interned,
-                "cross-variant equality between String and InternedStr"
-            );
         });
     }
 
