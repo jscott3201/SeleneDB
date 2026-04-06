@@ -676,3 +676,82 @@ fn cross_feature_memory_and_sensor_counts() {
         .value(0);
     assert_eq!(sensor_cnt, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Test 13: Parameters propagate through CALL procedure in subquery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parameters_propagate_through_subquery_call() {
+    let (graph, _query_vec) = build_ai_fixture();
+
+    // Use $param in a CALL procedure inside a CALL { subquery } to verify
+    // parameter propagation through the subquery context.
+    // Note: $param in MATCH inline properties ({key: $param}) is not yet
+    // supported in subqueries (requires threading EvalContext through the
+    // pattern scan layer). Use FILTER instead for parameterized conditions.
+    let query = "MATCH (s:Sensor) \
+                 CALL { \
+                     MATCH (m:__Memory) \
+                     FILTER m.namespace = $ns \
+                     RETURN count(m) AS mem_count \
+                 } \
+                 RETURN count(s) AS sensor_count, mem_count";
+
+    let mut params = selene_gql::ParameterMap::new();
+    params.insert(IStr::new("ns"), GqlValue::String("test".into()));
+
+    let result = QueryBuilder::new(query, &graph)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+
+    assert!(
+        result.row_count() > 0,
+        "subquery with $param should return results"
+    );
+
+    let batch = &result.batches[0];
+    let mem_count = batch
+        .column_by_name("MEM_COUNT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(
+        mem_count, 2,
+        "should find 2 memories in 'test' namespace via $ns param"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Parameters work in CALL procedure arguments
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parameters_in_call_procedure_arguments() {
+    let (graph, query_vec) = build_ai_fixture();
+
+    // Verify $param works in CALL procedure arguments (fixed in fec2d0e).
+    let query = "CALL graph.vectorSearch($label, $prop, $qvec, $k) \
+                 YIELD nodeId, score \
+                 RETURN nodeId, score";
+
+    let mut params = selene_gql::ParameterMap::new();
+    params.insert(IStr::new("label"), GqlValue::String("Sensor".into()));
+    params.insert(IStr::new("prop"), GqlValue::String("embedding".into()));
+    params.insert(IStr::new("qvec"), GqlValue::Vector(query_vec));
+    params.insert(IStr::new("k"), GqlValue::Int(2));
+
+    let result = QueryBuilder::new(query, &graph)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result.row_count(),
+        2,
+        "should return 2 results with all params"
+    );
+}

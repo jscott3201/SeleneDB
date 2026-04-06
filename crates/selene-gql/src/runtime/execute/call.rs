@@ -85,6 +85,9 @@ pub(super) fn execute_call(
 }
 
 /// Execute a CALL { subquery } for each input binding.
+///
+/// When `parent_ctx` is provided, query parameters (`$param` bindings) are
+/// inherited so that subquery expressions can reference them.
 pub(super) fn execute_subquery(
     bindings: Vec<Binding>,
     sub_plan: &ExecutionPlan,
@@ -92,9 +95,15 @@ pub(super) fn execute_subquery(
     scope: Option<&RoaringBitmap>,
     hot_tier: Option<&selene_ts::HotTier>,
     procedures: Option<&ProcedureRegistry>,
+    parent_ctx: Option<&super::eval::EvalContext<'_>>,
 ) -> Result<Vec<Binding>, GqlError> {
     let registry = FunctionRegistry::builtins();
-    let ctx = super::eval::EvalContext::new(graph, registry).with_scope(scope);
+    let mut ctx = super::eval::EvalContext::new(graph, registry).with_scope(scope);
+    if let Some(parent) = parent_ctx
+        && let Some(params) = parent.parameters
+    {
+        ctx = ctx.with_parameters(params);
+    }
 
     let mut output = Vec::new();
     for outer_binding in &bindings {
@@ -143,8 +152,15 @@ pub(super) fn execute_subquery(
                     )?;
                 }
                 PipelineOp::Subquery { plan: nested } => {
-                    sub_bindings =
-                        execute_subquery(sub_bindings, nested, graph, scope, hot_tier, procedures)?;
+                    sub_bindings = execute_subquery(
+                        sub_bindings,
+                        nested,
+                        graph,
+                        scope,
+                        hot_tier,
+                        procedures,
+                        Some(&ctx),
+                    )?;
                 }
                 _ => {
                     sub_bindings = stages::execute_pipeline_op(op, sub_bindings, &ctx)?;

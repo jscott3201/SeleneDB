@@ -425,7 +425,13 @@ fn execute_statement_with_csr(
                         }
                         PipelineOp::Subquery { plan: sub_plan } => {
                             bindings = execute_subquery(
-                                bindings, sub_plan, graph, scope, hot_tier, procedures,
+                                bindings,
+                                sub_plan,
+                                graph,
+                                scope,
+                                hot_tier,
+                                procedures,
+                                Some(&ctx),
                             )?;
                         }
                         _ => {
@@ -849,8 +855,15 @@ fn execute_plan_inner(
             // Subquery needs correlated execution with graph context
             PipelineOp::Subquery { plan: sub_plan } => {
                 let bindings = c.to_bindings();
-                let result =
-                    execute_subquery(bindings, sub_plan, graph, scope, hot_tier, procedures)?;
+                let result = execute_subquery(
+                    bindings,
+                    sub_plan,
+                    graph,
+                    scope,
+                    hot_tier,
+                    procedures,
+                    Some(&ctx),
+                )?;
                 chunk = Some(join::bindings_to_chunk_generic(&result));
             }
             // ViewScan: read materialized view state via provider
