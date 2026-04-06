@@ -507,6 +507,21 @@ pub(super) async fn configure_memory_impl(
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
+
+    if let Some(ref policy) = p.eviction_policy {
+        const VALID_POLICIES: &[&str] = &["clock", "oldest", "lowest_confidence"];
+        if !VALID_POLICIES.contains(&policy.as_str()) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: format!(
+                    "unknown eviction policy '{policy}'; valid options: clock, oldest, lowest_confidence"
+                )
+                .into(),
+                data: None,
+            });
+        }
+    }
+
     let namespace = p.namespace;
 
     let mut gql_params = HashMap::new();

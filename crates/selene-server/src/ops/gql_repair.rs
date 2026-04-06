@@ -144,7 +144,7 @@ fn extract_dot_properties(query: &str) -> Vec<String> {
             if end > start {
                 let prop: String = chars[start..end].iter().collect();
                 // Skip common non-property dot-access patterns
-                if !["id", "name"].contains(&prop.as_str()) {
+                if prop != "id" {
                     props.push(prop);
                 }
             }

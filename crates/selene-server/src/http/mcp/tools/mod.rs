@@ -488,18 +488,20 @@ impl SeleneTools {
 
         // Route to ts.window via GQL for aggregated results
         let agg_fn = p.function.as_deref().unwrap_or("avg");
-        let safe_prop = p.property.replace('\'', "''");
-        let query = format!(
-            "CALL ts.window({}, '{safe_prop}', '{agg_mode}', '{agg_fn}', '{agg_mode}') \
-             YIELD window_start, window_end, value RETURN window_start, window_end, value",
-            p.entity_id
-        );
+        let query = "CALL ts.window($entityId, $prop, $aggMode, $aggFn, $aggMode) \
+                     YIELD window_start, window_end, value RETURN window_start, window_end, value";
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert("entityId".into(), Value::Int(p.entity_id as i64));
+        gql_params.insert("prop".into(), Value::from(p.property.as_str()));
+        gql_params.insert("aggMode".into(), Value::from(agg_mode));
+        gql_params.insert("aggFn".into(), Value::from(agg_fn));
 
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
-            &query,
-            None,
+            query,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -862,25 +864,24 @@ impl SeleneTools {
             });
         }
 
-        let safe_text = p.query_text.replace('\'', "''");
+        let mut gql_params = HashMap::new();
+        gql_params.insert("queryText".into(), Value::from(p.query_text.as_str()));
+        gql_params.insert("k".into(), Value::Int(p.k));
+
         let query = if let Some(ref label) = p.label {
-            let safe_label = label.replace('\'', "''");
-            format!(
-                "CALL graph.semanticSearch('{safe_text}', {}, '{safe_label}') YIELD nodeId, score, path RETURN nodeId, score, path",
-                p.k
-            )
+            gql_params.insert("label".into(), Value::from(label.as_str()));
+            "CALL graph.semanticSearch($queryText, $k, $label) \
+             YIELD nodeId, score, path RETURN nodeId, score, path"
         } else {
-            format!(
-                "CALL graph.semanticSearch('{safe_text}', {}) YIELD nodeId, score, path RETURN nodeId, score, path",
-                p.k
-            )
+            "CALL graph.semanticSearch($queryText, $k) \
+             YIELD nodeId, score, path RETURN nodeId, score, path"
         };
 
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
-            &query,
-            None,
+            query,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -941,17 +942,19 @@ impl SeleneTools {
             });
         }
 
-        let safe_prop = p.property.replace('\'', "''");
-        let query = format!(
-            "CALL graph.similarNodes({}, '{safe_prop}', {}) YIELD nodeId, score RETURN nodeId, score",
-            p.node_id, p.k
-        );
+        let query = "CALL graph.similarNodes($nodeId, $prop, $k) \
+                     YIELD nodeId, score RETURN nodeId, score";
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert("nodeId".into(), Value::Int(p.node_id as i64));
+        gql_params.insert("prop".into(), Value::from(p.property.as_str()));
+        gql_params.insert("k".into(), Value::Int(p.k));
 
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
-            &query,
-            None,
+            query,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -1005,20 +1008,22 @@ impl SeleneTools {
         }
 
         // Strategy 2: Exact name match via GQL
-        let safe_name = p.identifier.replace('\'', "''");
+        let mut name_params = HashMap::new();
+        name_params.insert("name".into(), Value::from(p.identifier.as_str()));
+
         let name_query = match &p.label {
             Some(label) => {
-                let safe_label = label.replace('\'', "''");
-                format!("MATCH (n:{safe_label}) WHERE n.name = '{safe_name}' RETURN n.id LIMIT 1")
+                validate_label(label)?;
+                format!("MATCH (n:{label}) WHERE n.name = $name RETURN n.id LIMIT 1")
             }
-            None => format!("MATCH (n) WHERE n.name = '{safe_name}' RETURN n.id LIMIT 1"),
+            None => "MATCH (n) WHERE n.name = $name RETURN n.id LIMIT 1".to_string(),
         };
 
         let name_id = ops::gql::execute_gql(
             &self.state,
             &auth,
             &name_query,
-            None,
+            Some(&name_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -1036,24 +1041,24 @@ impl SeleneTools {
         }
 
         // Strategy 3: Semantic search fallback
-        let safe_text = p.identifier.replace('\'', "''");
-        let sem_query = match &p.label {
-            Some(label) => {
-                let safe_label = label.replace('\'', "''");
-                format!(
-                    "CALL graph.semanticSearch('{safe_text}', 3, '{safe_label}') YIELD nodeId, score RETURN nodeId, score"
-                )
-            }
-            None => format!(
-                "CALL graph.semanticSearch('{safe_text}', 3) YIELD nodeId, score RETURN nodeId, score"
-            ),
+        let mut sem_params = HashMap::new();
+        sem_params.insert("queryText".into(), Value::from(p.identifier.as_str()));
+        sem_params.insert("k".into(), Value::Int(3));
+
+        let sem_query = if let Some(ref label) = p.label {
+            sem_params.insert("label".into(), Value::from(label.as_str()));
+            "CALL graph.semanticSearch($queryText, $k, $label) \
+             YIELD nodeId, score RETURN nodeId, score"
+        } else {
+            "CALL graph.semanticSearch($queryText, $k) \
+             YIELD nodeId, score RETURN nodeId, score"
         };
 
         let rows: Vec<serde_json::Value> = ops::gql::execute_gql(
             &self.state,
             &auth,
-            &sem_query,
-            None,
+            sem_query,
+            Some(&sem_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -1183,13 +1188,14 @@ impl SeleneTools {
         params: Parameters<SparqlQueryParams>,
     ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
-        let safe_query = params.0.query.replace('\'', "''");
-        let gql = format!("CALL graph.sparql('{safe_query}') YIELD result RETURN result");
+        let query = "CALL graph.sparql($query) YIELD result RETURN result";
+        let mut gql_params = HashMap::new();
+        gql_params.insert("query".into(), Value::from(params.0.query.as_str()));
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
-            &gql,
-            None,
+            query,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -1489,6 +1495,23 @@ impl SeleneTools {
             return None;
         }
         Some(path_parts.join(" > "))
+    }
+}
+
+/// Validate that a label string is a safe GQL identifier (letters, digits, underscores).
+/// Labels occupy an identifier position in the grammar and cannot use `$param` placeholders.
+fn validate_label(label: &str) -> Result<(), McpError> {
+    if !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Ok(())
+    } else {
+        Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "invalid label '{label}': must contain only alphanumeric characters and underscores"
+            )
+            .into(),
+            data: None,
+        })
     }
 }
 

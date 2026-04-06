@@ -361,18 +361,8 @@ fn hnsw_or_fallback(
 ) -> Vec<super::vector::ScoredNode> {
     // Try HNSW index first
     if let Some(hnsw) = graph.hnsw_index() {
-        let filter = if let Some(scope_bm) = scope {
-            scope_bm.clone()
-        } else {
-            // No scope filter: use all nodes
-            let mut all = RoaringBitmap::new();
-            for nid in graph.all_node_ids() {
-                all.insert(nid.0 as u32);
-            }
-            all
-        };
-
-        let hnsw_results = hnsw.search(query_vec, k, None, Some(&filter));
+        let filter = scope.cloned();
+        let hnsw_results = hnsw.search(query_vec, k, None, filter.as_ref());
 
         if !hnsw_results.is_empty() {
             return hnsw_results
@@ -435,7 +425,7 @@ fn build_context(graph: &SeleneGraph, node_id: NodeId) -> String {
         }
         let val_str = format!("{value}");
         let truncated = if val_str.len() > 200 {
-            format!("{}...", &val_str[..197])
+            format!("{}...", &val_str[..val_str.floor_char_boundary(197)])
         } else {
             val_str
         };
@@ -443,7 +433,7 @@ fn build_context(graph: &SeleneGraph, node_id: NodeId) -> String {
     }
 
     if ctx.len() > MAX_CONTEXT_CHARS {
-        ctx.truncate(MAX_CONTEXT_CHARS);
+        ctx.truncate(ctx.floor_char_boundary(MAX_CONTEXT_CHARS));
     }
 
     ctx

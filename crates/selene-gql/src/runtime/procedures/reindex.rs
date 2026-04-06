@@ -13,6 +13,7 @@ use selene_core::{IStr, NodeId, Value};
 use selene_graph::SeleneGraph;
 use selene_ts::HotTier;
 use smallvec::smallvec;
+use smol_str::SmolStr;
 
 use super::{
     GqlType, GqlValue, Procedure, ProcedureParam, ProcedureRow, ProcedureSignature, YieldColumn,
@@ -71,6 +72,10 @@ impl Procedure for Reindex {
                     name: "errors",
                     typ: GqlType::Int,
                 },
+                YieldColumn {
+                    name: "message",
+                    typ: GqlType::String,
+                },
             ],
         }
     }
@@ -122,6 +127,7 @@ impl Procedure for Reindex {
                 .and_then(|n| n.properties.get(text_key))
                 .and_then(|v| match v {
                     Value::String(s) => Some(s.to_string()),
+                    Value::InternedStr(s) => Some(s.as_str().to_string()),
                     _ => None,
                 });
 
@@ -156,6 +162,13 @@ impl Procedure for Reindex {
             (IStr::new("total"), GqlValue::Int(total as i64)),
             (IStr::new("embedded"), GqlValue::Int(embedded as i64)),
             (IStr::new("errors"), GqlValue::Int(errors as i64)),
+            (
+                IStr::new("message"),
+                GqlValue::String(SmolStr::new(
+                    "Dry run complete. Vectors validated but not written. \
+                     Use SET n.embedding = ... or re-insert nodes to apply new embeddings.",
+                )),
+            ),
         ]])
     }
 }

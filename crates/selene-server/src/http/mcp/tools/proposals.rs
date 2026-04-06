@@ -12,7 +12,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use selene_core::Value;
 
-use super::{SeleneTools, mcp_auth, op_err};
+use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::http::mcp::params::{ListProposalsParams, ProposalIdParams, ProposeActionParams};
 use crate::ops;
 use crate::ops::gql::ResultFormat;
@@ -24,6 +24,7 @@ pub(super) async fn propose_action_impl(
     p: ProposeActionParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
     let expires_at = now_ms + EXPIRY_MS;
@@ -95,13 +96,15 @@ pub(super) async fn list_proposals_impl(
     // Mark expired proposals
     params.insert("now".into(), Value::Int(now_ms));
 
+    params.insert("lim".into(), Value::Int(limit as i64));
+
     let query = format!(
         "MATCH (p:__Proposal){filter} \
          RETURN id(p) AS id, p.description AS description, p.query AS query, \
          p.status AS status, p.category AS category, p.priority AS priority, \
          p.created_at AS created_at, p.expires_at AS expires_at \
          ORDER BY p.created_at DESC \
-         LIMIT {limit}"
+         LIMIT $lim"
     );
 
     let result = ops::gql::execute_gql(
@@ -127,6 +130,7 @@ pub(super) async fn approve_proposal_impl(
     p: ProposalIdParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
     update_proposal_status(tools, &auth, p.proposal_id, "approved", p.reason.as_deref()).await
 }
 
@@ -135,6 +139,7 @@ pub(super) async fn reject_proposal_impl(
     p: ProposalIdParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
     update_proposal_status(tools, &auth, p.proposal_id, "rejected", p.reason.as_deref()).await
 }
 
@@ -143,6 +148,7 @@ pub(super) async fn execute_proposal_impl(
     p: ProposalIdParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
 
     // Verify proposal exists and is approved
     let mut check_params = HashMap::new();
@@ -189,15 +195,28 @@ pub(super) async fn execute_proposal_impl(
         .unwrap_or("")
         .to_string();
 
-    // Execute the proposed query
-    let st = Arc::clone(&tools.state);
-    let auth2 = auth.clone();
-    let pq = proposal_query.clone();
-    let exec_result = tools
-        .submit_mut(move || {
-            ops::gql::execute_gql(&st, &auth2, &pq, None, false, false, ResultFormat::Json)
-        })
-        .await?;
+    // Execute the proposed query: route writes through batcher, reads directly
+    let exec_result = if crate::http::routes::is_gql_write(&proposal_query) {
+        let st = Arc::clone(&tools.state);
+        let auth2 = auth.clone();
+        let pq = proposal_query.clone();
+        tools
+            .submit_mut(move || {
+                ops::gql::execute_gql(&st, &auth2, &pq, None, false, false, ResultFormat::Json)
+            })
+            .await?
+    } else {
+        ops::gql::execute_gql(
+            &tools.state,
+            &auth,
+            &proposal_query,
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .map_err(op_err)?
+    };
 
     // Mark as executed
     let _ =

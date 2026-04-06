@@ -12,7 +12,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 use selene_core::Value;
 
-use super::{SeleneTools, mcp_auth, op_err};
+use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::http::mcp::params::{ExportTracesParams, LogTraceParams};
 use crate::ops;
 use crate::ops::gql::ResultFormat;
@@ -23,6 +23,7 @@ pub(super) async fn log_trace_impl(
     p: LogTraceParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
 
     let mut params = HashMap::new();
     params.insert("session_id".into(), Value::from(p.session_id.as_str()));
@@ -133,6 +134,8 @@ pub(super) async fn export_traces_impl(
     };
 
     let limit = p.limit.unwrap_or(1000).min(10_000);
+    params.insert("lim".into(), Value::Int(limit as i64));
+
     let query = format!(
         "MATCH (t:__Trace){filter} \
          RETURN t.session_id AS session_id, t.turn AS turn, \
@@ -143,7 +146,7 @@ pub(super) async fn export_traces_impl(
          t.model_id AS model_id, t.latency_ms AS latency_ms, \
          t.timestamp AS timestamp \
          ORDER BY t.timestamp \
-         LIMIT {limit}"
+         LIMIT $lim"
     );
 
     let result = ops::gql::execute_gql(
