@@ -181,6 +181,83 @@ impl HnswGraph {
         }
     }
 
+    /// Reconnect neighbors of a deleted node to maintain graph connectivity.
+    ///
+    /// For each layer, removes the deleted node from its neighbors' adjacency
+    /// lists and fills empty slots with connections to the deleted node's other
+    /// neighbors, ranked by cosine similarity. This suppresses the "unreachable
+    /// points" phenomenon that degrades recall at high tombstone ratios.
+    pub(crate) fn reconnect_neighbors(
+        &mut self,
+        deleted_idx: u32,
+        params: &super::params::HnswParams,
+    ) {
+        use super::distance::cosine_similarity;
+        use std::collections::HashSet;
+
+        // Snapshot the deleted node's data before mutating the graph.
+        let deleted_neighbors = self.nodes[deleted_idx as usize].neighbors.clone();
+
+        for (layer, layer_neighbors) in deleted_neighbors.iter().enumerate() {
+            if layer_neighbors.is_empty() {
+                continue;
+            }
+            let max_m = params.max_neighbors(layer as u8);
+
+            for &neighbor_idx in layer_neighbors {
+                // Remove the deleted node from this neighbor's list.
+                self.nodes[neighbor_idx as usize].neighbors[layer]
+                    .retain(|&idx| idx != deleted_idx);
+
+                let current_len = self.nodes[neighbor_idx as usize].neighbors[layer].len();
+                if current_len >= max_m {
+                    continue; // already at capacity
+                }
+                let slots = max_m - current_len;
+
+                // Existing connections (avoid duplicates).
+                let existing: HashSet<u32> = self.nodes[neighbor_idx as usize].neighbors[layer]
+                    .iter()
+                    .copied()
+                    .collect();
+
+                // Score candidate replacements from the deleted node's other
+                // neighbors on this layer, excluding self and already-connected.
+                let neighbor_vec = Arc::clone(&self.nodes[neighbor_idx as usize].vector);
+                let mut candidates: Vec<(u32, f32)> = layer_neighbors
+                    .iter()
+                    .filter(|&&c| c != neighbor_idx && c != deleted_idx && !existing.contains(&c))
+                    .map(|&c| {
+                        let sim = cosine_similarity(&neighbor_vec, &self.nodes[c as usize].vector);
+                        (c, sim)
+                    })
+                    .collect();
+
+                // Sort by descending similarity (best first).
+                candidates.sort_unstable_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Add the top candidates up to available slots.
+                for &(c, _) in candidates.iter().take(slots) {
+                    self.nodes[neighbor_idx as usize].neighbors[layer].push(c);
+                }
+            }
+        }
+
+        // If the entry point was deleted, pick the surviving node with the
+        // highest max_layer.
+        if self.entry_point == Some(deleted_idx) {
+            self.entry_point = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i as u32 != deleted_idx)
+                .max_by_key(|(_, n)| n.max_layer)
+                .map(|(i, _)| i as u32);
+        }
+    }
+
     /// Serialize this graph to postcard bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)

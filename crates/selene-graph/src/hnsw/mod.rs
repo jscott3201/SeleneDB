@@ -130,12 +130,24 @@ impl HnswIndex {
         self.generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Mark a node as deleted.
+    /// Mark a node as deleted, reconnecting its neighbors first.
+    ///
+    /// Before tombstoning, repairs the write graph by removing the deleted
+    /// node from its neighbors' adjacency lists and filling empty slots with
+    /// connections to the deleted node's other neighbors (MN-RU). This
+    /// suppresses the "unreachable points" phenomenon at high tombstone ratios.
     ///
     /// Tombstoned nodes are excluded from all future search results. The node
-    /// remains in the graph structure (neighbors can still traverse through it)
-    /// until the next `snapshot()` or `rebuild()` removes it.
+    /// remains in the graph structure until the next `snapshot()` or `rebuild()`
+    /// removes it physically.
     pub fn remove(&self, node_id: NodeId) {
+        // Reconnect mutual neighbors before tombstoning.
+        {
+            let mut wg = self.write_graph.write();
+            if let Some(&idx) = wg.node_id_to_idx.get(&node_id.0) {
+                wg.reconnect_neighbors(idx, &self.params);
+            }
+        }
         self.tombstones.lock().insert(node_id.0 as u32);
         self.generation.fetch_add(1, Ordering::Release);
     }
@@ -732,5 +744,41 @@ mod tests {
         // Rebuild clears pending.
         index.rebuild(vec![(NodeId(2), axis_vector(1, 4))]);
         assert!(!index.has_pending_mutations());
+    }
+
+    #[test]
+    fn remove_reconnects_mutual_neighbors() {
+        // Build a small graph: nodes 1-5 in a 4D space.
+        let vectors: Vec<(NodeId, Arc<[f32]>)> = (1..=5)
+            .map(|i| (NodeId(i), axis_vector(((i - 1) % 4) as usize, 4)))
+            .collect();
+        let index = HnswIndex::new(HnswParams::new(4), 4);
+        for (id, vec) in &vectors {
+            index.insert(*id, Arc::clone(vec));
+        }
+        index.snapshot();
+
+        // Before deletion: node 3 should have neighbors.
+        let wg = index.write_graph.read();
+        let idx3 = *wg.node_id_to_idx.get(&3).unwrap();
+        let neighbors_of_3: Vec<u32> = wg.nodes[idx3 as usize].neighbors[0].clone();
+        assert!(!neighbors_of_3.is_empty(), "node 3 should have neighbors");
+        drop(wg);
+
+        // Delete node 3. MN-RU should reconnect its neighbors.
+        index.remove(NodeId(3));
+
+        // After deletion: node 3's former neighbors should no longer reference
+        // node 3 in their adjacency lists (in the write graph).
+        let wg = index.write_graph.read();
+        let idx3_after = *wg.node_id_to_idx.get(&3).unwrap();
+        for &neighbor_idx in &neighbors_of_3 {
+            let nb = &wg.nodes[neighbor_idx as usize];
+            assert!(
+                !nb.neighbors[0].contains(&idx3_after),
+                "neighbor {neighbor_idx} should not reference deleted node {idx3_after}"
+            );
+        }
+        drop(wg);
     }
 }
