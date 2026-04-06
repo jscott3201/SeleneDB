@@ -16,6 +16,16 @@ pub enum SliceType {
         root_id: u64,
         max_depth: Option<u32>,
     },
+    /// Directed traversal from a root node, following specified edge labels.
+    Traverse {
+        root_id: u64,
+        /// Edge labels to follow. Empty = follow all.
+        edge_labels: Vec<String>,
+        /// Direction: "outgoing", "incoming", or "both".
+        direction: String,
+        /// Maximum traversal depth (default: 3).
+        max_depth: u32,
+    },
 }
 
 /// Request: get a graph slice.

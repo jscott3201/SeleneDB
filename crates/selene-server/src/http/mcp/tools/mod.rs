@@ -437,7 +437,11 @@ impl SeleneTools {
 
     #[tool(
         name = "ts_query",
-        description = "Query time-series samples for a specific node and property. Returns timestamp/value pairs from the hot tier (retention period is configurable, default 24h). Use start/end timestamps to filter."
+        description = "Query time-series samples for a specific node and property. \
+        Supports aggregation: set aggregation to '5m', '15m', '1h', '1d', or 'auto' \
+        to get bucketed results instead of raw samples. 'auto' picks the bucket size \
+        based on the time range. Function options: 'avg' (default), 'min', 'max', 'sum', 'count'. \
+        Raw mode (default) returns timestamp/value pairs with optional limit."
     )]
     async fn ts_query(
         &self,
@@ -445,26 +449,78 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let p = params.0;
-        let samples = ops::ts::ts_range(
+        let start = p.start.unwrap_or(0);
+        let end = p.end.unwrap_or(i64::MAX);
+
+        // Determine aggregation mode
+        let agg_mode = p.aggregation.as_deref().unwrap_or("raw");
+        let agg_mode = if agg_mode == "auto" {
+            let range_ns = end.saturating_sub(start);
+            let hours = range_ns / 3_600_000_000_000;
+            match hours {
+                0..4 => "raw",
+                4..24 => "5m",
+                24..168 => "15m", // 7 days
+                168..720 => "1h", // 30 days
+                _ => "1d",
+            }
+        } else {
+            agg_mode
+        };
+
+        if agg_mode == "raw" {
+            let samples = ops::ts::ts_range(
+                &self.state,
+                &auth,
+                p.entity_id,
+                &p.property,
+                start,
+                end,
+                Some(p.limit.unwrap_or(1000) as usize),
+            )
+            .map_err(op_err)?;
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&samples).unwrap_or_default(),
+            )]));
+        }
+
+        // Route to ts.window via GQL for aggregated results
+        let agg_fn = p.function.as_deref().unwrap_or("avg");
+        let safe_prop = p.property.replace('\'', "''");
+        let query = format!(
+            "CALL ts.window({}, '{safe_prop}', '{agg_mode}', '{agg_fn}', '{agg_mode}') \
+             YIELD window_start, window_end, value RETURN window_start, window_end, value",
+            p.entity_id
+        );
+
+        let result = ops::gql::execute_gql(
             &self.state,
             &auth,
-            p.entity_id,
-            &p.property,
-            p.start.unwrap_or(0),
-            p.end.unwrap_or(i64::MAX),
-            Some(p.limit.unwrap_or(1000) as usize),
+            &query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&samples).unwrap_or_default(),
-        )]))
+
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let text = format!(
+            "ts_query aggregation ({}): {} buckets\n{data}",
+            agg_mode, result.row_count
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     // ── Graph Slice ──────────────────────────────────────────────────
 
     #[tool(
         name = "graph_slice",
-        description = "Get a snapshot of the graph. Slice types: 'full' (everything), 'labels' (nodes with specific labels + connecting edges), 'containment' (subtree from a root node). Supports pagination via limit/offset."
+        description = "Get a snapshot of the graph. Slice types: 'full' (everything), \
+        'labels' (nodes with specific labels + connecting edges), 'containment' (subtree \
+        from a root node), 'traverse' (BFS from root following specified edge labels and \
+        direction to max_depth). Traverse returns nodes with _depth property. \
+        Supports pagination via limit/offset."
     )]
     async fn graph_slice(
         &self,
@@ -481,11 +537,17 @@ impl SeleneTools {
                 root_id: p.root_id.unwrap_or(1),
                 max_depth: p.max_depth,
             },
+            "traverse" => selene_wire::dto::graph_slice::SliceType::Traverse {
+                root_id: p.root_id.unwrap_or(1),
+                edge_labels: p.labels.unwrap_or_default(),
+                direction: p.direction.clone().unwrap_or_else(|| "outgoing".into()),
+                max_depth: p.max_depth.unwrap_or(3),
+            },
             other => {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: format!(
-                        "invalid slice_type '{other}' -- use full, labels, or containment"
+                        "invalid slice_type '{other}' -- use full, labels, containment, or traverse"
                     )
                     .into(),
                     data: None,
@@ -1180,7 +1242,14 @@ impl SeleneTools {
             Err(e) => {
                 let message = e.to_string();
                 let suggestion = parse_error_suggestion(&message);
-                let result = serde_json::json!({
+
+                // Fuzzy-match labels/properties against schema for repair hints
+                let repairs = self
+                    .state
+                    .graph
+                    .read(|g| ops::gql_repair::suggest_repairs(&message, query, g));
+
+                let mut result = serde_json::json!({
                     "valid": false,
                     "query": query,
                     "errors": [{
@@ -1188,6 +1257,11 @@ impl SeleneTools {
                         "suggestion": suggestion,
                     }],
                 });
+
+                if !repairs.is_empty() {
+                    result["repairs"] = serde_json::json!(repairs);
+                }
+
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                 )]))

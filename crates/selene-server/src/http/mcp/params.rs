@@ -165,25 +165,36 @@ pub(crate) struct TsQueryParams {
     /// End timestamp (nanos). Omit for latest.
     #[serde(default)]
     pub(crate) end: Option<i64>,
-    /// Maximum number of samples to return (default: 1000).
+    /// Maximum number of samples to return (default: 1000). Only used when aggregation is "raw".
     #[serde(default)]
     pub(crate) limit: Option<u64>,
+    /// Aggregation bucket duration: "5m", "15m", "1h", "1d", "auto", or "raw" (default).
+    /// "auto" selects based on time range: <4h=raw, <24h=5m, <7d=15m, <30d=1h, else=1d.
+    #[serde(default)]
+    pub(crate) aggregation: Option<String>,
+    /// Aggregate function: "avg" (default), "min", "max", "sum", "count".
+    /// Only used when aggregation is not "raw".
+    #[serde(default)]
+    pub(crate) function: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GraphSliceParams {
-    /// Slice type: "full", "labels", or "containment".
+    /// Slice type: "full", "labels", "containment", or "traverse".
     #[serde(default = "default_slice_type")]
     pub(crate) slice_type: String,
-    /// For "labels" slice: which labels to include.
+    /// For "labels" slice: which labels to include. For "traverse": edge labels to follow.
     #[serde(default)]
     pub(crate) labels: Option<Vec<String>>,
-    /// For "containment" slice: root node ID.
+    /// For "containment"/"traverse" slice: root node ID.
     #[serde(default)]
     pub(crate) root_id: Option<u64>,
-    /// For "containment" slice: maximum traversal depth.
+    /// For "containment"/"traverse" slice: maximum traversal depth.
     #[serde(default)]
     pub(crate) max_depth: Option<u32>,
+    /// For "traverse" slice: "outgoing" (default), "incoming", or "both".
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
     /// Pagination: max nodes to return.
     #[serde(default)]
     pub(crate) limit: Option<usize>,
