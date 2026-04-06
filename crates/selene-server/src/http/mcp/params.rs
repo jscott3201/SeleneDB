@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+#[allow(clippy::unnecessary_wraps)]
+fn default_true_opt() -> Option<bool> {
+    Some(true)
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GqlParams {
     /// GQL query text. Example: MATCH (s:sensor) FILTER s.temp > 72 RETURN s.name AS name
@@ -33,6 +38,12 @@ pub(crate) struct NodeIdParams {
 pub(crate) struct NodeEdgesParams {
     /// Numeric node ID.
     pub(crate) id: u64,
+    /// Filter by direction: "outgoing", "incoming", or "both" (default).
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
+    /// Filter to specific edge label(s). Omit for all labels.
+    #[serde(default)]
+    pub(crate) labels: Option<Vec<String>>,
     /// Maximum number of edges to return (default: 1000, max: 10000).
     #[serde(default)]
     pub(crate) limit: Option<usize>,
@@ -257,6 +268,10 @@ pub(crate) struct SemanticSearchParams {
     /// Optional label filter (e.g., "sensor"). Omit to search all nodes.
     #[serde(default)]
     pub(crate) label: Option<String>,
+    /// If true, include full node properties (name, labels, all properties)
+    /// with each result. Saves follow-up get_node calls. Default: false.
+    #[serde(default)]
+    pub(crate) include_properties: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -404,6 +419,36 @@ pub(crate) struct ForgetParams {
     /// Content substring to match for deletion.
     #[serde(default)]
     pub(crate) query: Option<String>,
+}
+
+// ── Resolve + Related ────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ResolveParams {
+    /// The identifier to resolve. Can be a numeric ID, exact name, or
+    /// natural language description.
+    pub(crate) identifier: String,
+    /// Optional label hint to narrow resolution (e.g., "equipment", "zone").
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// If true, include the containment path (parent chain). Default: true.
+    #[serde(default = "default_true_opt")]
+    pub(crate) include_path: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RelatedParams {
+    /// Numeric node ID.
+    pub(crate) id: u64,
+    /// Filter to specific edge label(s). Omit for all labels.
+    #[serde(default)]
+    pub(crate) edge_labels: Option<Vec<String>>,
+    /// Filter by direction: "outgoing", "incoming", or "both" (default).
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
+    /// Maximum number of neighbors to return (default: 25).
+    #[serde(default)]
+    pub(crate) neighbor_limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]

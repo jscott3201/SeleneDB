@@ -1177,9 +1177,9 @@ async fn node_edges_returns_both_directions() {
     ops::edges::create_edge(&state, &admin(), 1, 2, IStr::new("out"), PropertyMap::new()).unwrap();
     ops::edges::create_edge(&state, &admin(), 3, 1, IStr::new("in"), PropertyMap::new()).unwrap();
 
-    let result = ops::edges::node_edges(&state, &admin(), 1, 0, 100).unwrap();
+    let result = ops::edges::node_edges(&state, &admin(), 1, None, None, 0, 100).unwrap();
     assert_eq!(result.total, 2);
-    assert_eq!(result.edges.len(), 2);
+    assert_eq!(result.outgoing.len() + result.incoming.len(), 2);
 }
 
 #[tokio::test]
@@ -1187,7 +1187,7 @@ async fn node_edges_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::for_testing(dir.path()).await;
 
-    let result = ops::edges::node_edges(&state, &admin(), 999, 0, 100);
+    let result = ops::edges::node_edges(&state, &admin(), 999, None, None, 0, 100);
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err, ops::OpError::NotFound { .. }));
@@ -1219,9 +1219,9 @@ async fn node_edges_with_pagination() {
         .unwrap();
     }
 
-    let result = ops::edges::node_edges(&state, &admin(), 1, 1, 2).unwrap();
+    let result = ops::edges::node_edges(&state, &admin(), 1, None, None, 1, 2).unwrap();
     assert_eq!(result.total, 4);
-    assert_eq!(result.edges.len(), 2);
+    assert_eq!(result.outgoing.len() + result.incoming.len(), 2);
 }
 
 #[tokio::test]

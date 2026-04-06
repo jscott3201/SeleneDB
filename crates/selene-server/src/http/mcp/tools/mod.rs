@@ -251,7 +251,10 @@ impl SeleneTools {
 
     #[tool(
         name = "node_edges",
-        description = "Get edges connected to a node (both incoming and outgoing). Uses the adjacency index for fast lookup. Returns edge objects with source, target, label, and properties. Supports pagination via limit/offset; total reflects the full count before pagination."
+        description = "Get edges connected to a node with optional direction and label filtering. \
+        Returns edges grouped by direction (outgoing/incoming) with neighbor node names included. \
+        Filter by direction ('outgoing', 'incoming', or 'both') and/or edge labels. \
+        Supports pagination via limit/offset."
     )]
     async fn node_edges(
         &self,
@@ -261,12 +264,21 @@ impl SeleneTools {
         let p = &params.0;
         let offset = p.offset.unwrap_or(0);
         let limit = p.limit.unwrap_or(1000).min(10_000);
-        let result =
-            ops::edges::node_edges(&self.state, &auth, p.id, offset, limit).map_err(op_err)?;
+        let result = ops::edges::node_edges(
+            &self.state,
+            &auth,
+            p.id,
+            p.direction.as_deref(),
+            p.labels.as_deref(),
+            offset,
+            limit,
+        )
+        .map_err(op_err)?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "node_id": p.id,
-                "edges": result.edges,
+                "outgoing": result.outgoing,
+                "incoming": result.incoming,
                 "total": result.total,
             }))
             .unwrap_or_default(),
@@ -811,10 +823,37 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
+        let include_props = p.include_properties.unwrap_or(false);
+        if !include_props {
+            let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+            let text = format!(
+                "Semantic search for '{}': {} results\n{data}",
+                p.query_text, result.row_count
+            );
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
+
+        // Enrich results with full node properties
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+
+        let enriched: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|row| {
+                let node_id = row.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut enriched = row;
+                if let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id) {
+                    enriched["node"] = serde_json::to_value(&node).unwrap_or_default();
+                }
+                enriched
+            })
+            .collect();
+
         let text = format!(
-            "Semantic search for '{}': {} results\n{data}",
-            p.query_text, result.row_count
+            "Semantic search for '{}': {} results\n{}",
+            p.query_text,
+            enriched.len(),
+            serde_json::to_string_pretty(&enriched).unwrap_or_default()
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -861,6 +900,191 @@ impl SeleneTools {
             p.node_id, result.row_count
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    // ── Entity Resolution + Neighborhood ─────────────────────────────
+
+    #[tool(
+        name = "resolve",
+        description = "Resolve a human-friendly name, alias, or description to a graph node. \
+        Tries exact ID match, then exact name match, then semantic search. Returns the full \
+        node with all properties, labels, and optional containment path. \
+        Use this instead of writing GQL just to look up a node by name."
+    )]
+    async fn resolve(&self, params: Parameters<ResolveParams>) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let p = &params.0;
+        let include_path = p.include_path.unwrap_or(true);
+
+        // Helper: build node response JSON with optional containment path
+        let build_response = |node: &selene_wire::dto::entity::NodeDto,
+                              resolved_by: &str,
+                              extra: Option<(&str, f64)>| {
+            let mut val = serde_json::to_value(node).unwrap_or_default();
+            val["resolved_by"] = serde_json::Value::String(resolved_by.into());
+            if let Some((key, v)) = extra {
+                val[key] = serde_json::Value::from(v);
+            }
+            if include_path && let Some(path) = self.containment_path(&auth, node.id) {
+                val["containment_path"] = serde_json::Value::String(path);
+            }
+            CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&val).unwrap_or_default(),
+            )])
+        };
+
+        // Strategy 1: Parse as numeric ID
+        if let Ok(id) = p.identifier.parse::<u64>()
+            && let Ok(node) = ops::nodes::get_node(&self.state, &auth, id)
+        {
+            return Ok(build_response(&node, "id_lookup", None));
+        }
+
+        // Strategy 2: Exact name match via GQL
+        let safe_name = p.identifier.replace('\'', "''");
+        let name_query = match &p.label {
+            Some(label) => {
+                let safe_label = label.replace('\'', "''");
+                format!("MATCH (n:{safe_label}) WHERE n.name = '{safe_name}' RETURN n.id LIMIT 1")
+            }
+            None => format!("MATCH (n) WHERE n.name = '{safe_name}' RETURN n.id LIMIT 1"),
+        };
+
+        let name_id = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            &name_query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .ok()
+        .filter(|r| r.row_count > 0)
+        .and_then(|r| r.data_json)
+        .and_then(|data| serde_json::from_str::<Vec<serde_json::Value>>(&data).ok())
+        .and_then(|rows| rows.first()?.get("n.id")?.as_u64());
+
+        if let Some(id) = name_id
+            && let Ok(node) = ops::nodes::get_node(&self.state, &auth, id)
+        {
+            return Ok(build_response(&node, "name_match", None));
+        }
+
+        // Strategy 3: Semantic search fallback
+        let safe_text = p.identifier.replace('\'', "''");
+        let sem_query = match &p.label {
+            Some(label) => {
+                let safe_label = label.replace('\'', "''");
+                format!(
+                    "CALL graph.semanticSearch('{safe_text}', 3, '{safe_label}') YIELD nodeId, score RETURN nodeId, score"
+                )
+            }
+            None => format!(
+                "CALL graph.semanticSearch('{safe_text}', 3) YIELD nodeId, score RETURN nodeId, score"
+            ),
+        };
+
+        let rows: Vec<serde_json::Value> = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            &sem_query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .ok()
+        .and_then(|r| r.data_json)
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default();
+
+        // Return top match if similarity > 0.75
+        if let Some(top) = rows.first() {
+            let score = top.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let node_id = top.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            if score > 0.75
+                && node_id > 0
+                && let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id)
+            {
+                return Ok(build_response(
+                    &node,
+                    "semantic_search",
+                    Some(("similarity", score)),
+                ));
+            }
+        }
+
+        // Suggest alternatives if no strong match
+        let suggestions: Vec<serde_json::Value> = rows
+            .iter()
+            .filter_map(|r| {
+                let nid = r.get("nodeId")?.as_u64()?;
+                let sc = r.get("score")?.as_f64()?;
+                let name = ops::nodes::get_node(&self.state, &auth, nid)
+                    .ok()
+                    .and_then(|n| n.properties.get("name").map(|v| v.to_string()));
+                Some(serde_json::json!({ "node_id": nid, "score": sc, "name": name }))
+            })
+            .collect();
+
+        if !suggestions.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "error": "no_exact_match",
+                    "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
+                    "suggestions": suggestions,
+                }))
+                .unwrap_or_default(),
+            )]));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "error": "not_found",
+                "message": format!("Could not resolve '{}'", p.identifier),
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        name = "related",
+        description = "Get a node and all its connections in one call. Returns the node's full \
+        properties plus its edges grouped by direction, with neighbor names and key properties \
+        included. Saves multiple get_node + node_edges calls. Use this for 'tell me about X \
+        and its connections'."
+    )]
+    async fn related(&self, params: Parameters<RelatedParams>) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let p = &params.0;
+        let neighbor_limit = p.neighbor_limit.unwrap_or(25);
+
+        // Get the target node
+        let node = ops::nodes::get_node(&self.state, &auth, p.id).map_err(op_err)?;
+
+        // Get edges with direction/label filtering
+        let edge_result = ops::edges::node_edges(
+            &self.state,
+            &auth,
+            p.id,
+            p.direction.as_deref(),
+            p.edge_labels.as_deref(),
+            0,
+            neighbor_limit,
+        )
+        .map_err(op_err)?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "node": node,
+                "outgoing": edge_result.outgoing,
+                "incoming": edge_result.incoming,
+                "total_edges": edge_result.total,
+            }))
+            .unwrap_or_default(),
+        )]))
     }
 
     // ── RDF/SPARQL ────────────────────────────────────────────────────
@@ -1041,6 +1265,64 @@ impl SeleneTools {
         params: Parameters<ConfigureMemoryParams>,
     ) -> Result<CallToolResult, McpError> {
         memory::configure_memory_impl(self, params.0).await
+    }
+}
+
+// ── Helper methods (outside the #[tool_router] impl block) ──────────
+
+impl SeleneTools {
+    /// Build a containment path string by walking "contains" edges upward.
+    /// Returns e.g. "Building > Floor 3 > Zone 301 > AHU-2".
+    fn containment_path(
+        &self,
+        _auth: &crate::auth::handshake::AuthContext,
+        node_id: u64,
+    ) -> Option<String> {
+        let mut path_parts = Vec::new();
+        let mut current_id = node_id;
+
+        for _ in 0..10 {
+            // Safety bound: max 10 levels deep
+            let (name, parent) = self.state.graph.read(|g| {
+                let name = g
+                    .get_node(selene_core::NodeId(current_id))
+                    .and_then(|n| {
+                        n.properties
+                            .get(selene_core::IStr::new("name"))
+                            .and_then(|v| match v {
+                                selene_core::Value::String(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or_else(|| format!("[{current_id}]"));
+
+                let parent = g
+                    .incoming(selene_core::NodeId(current_id))
+                    .iter()
+                    .find_map(|&eid| {
+                        let e = g.get_edge(eid)?;
+                        if e.label.as_str() == "contains" {
+                            Some(e.source.0)
+                        } else {
+                            None
+                        }
+                    });
+
+                (name, parent)
+            });
+
+            path_parts.push(name);
+            match parent {
+                Some(pid) => current_id = pid,
+                None => break,
+            }
+        }
+
+        path_parts.reverse();
+        if path_parts.len() <= 1 {
+            return None;
+        }
+        Some(path_parts.join(" > "))
     }
 }
 

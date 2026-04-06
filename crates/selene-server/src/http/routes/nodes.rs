@@ -138,6 +138,10 @@ pub(in crate::http) async fn delete_node(
 
 #[derive(Deserialize)]
 pub(in crate::http) struct NodeEdgesQuery {
+    /// Filter by direction: "outgoing", "incoming", or "both" (default).
+    direction: Option<String>,
+    /// Comma-separated edge labels to filter by.
+    labels: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 }
@@ -151,11 +155,23 @@ pub(in crate::http) async fn node_edges(
     let auth = auth.0;
     let offset = q.offset.unwrap_or(0);
     let limit = q.limit.unwrap_or(1000).min(10_000);
-    let result = ops::edges::node_edges(&state, &auth, id, offset, limit)?;
-    let edges: Vec<serde_json::Value> = result.edges.iter().map(super::edge_json).collect();
+    let label_filter: Option<Vec<String>> = q
+        .labels
+        .as_ref()
+        .map(|s| s.split(',').map(|l| l.trim().to_string()).collect());
+    let result = ops::edges::node_edges(
+        &state,
+        &auth,
+        id,
+        q.direction.as_deref(),
+        label_filter.as_deref(),
+        offset,
+        limit,
+    )?;
     Ok(Json(serde_json::json!({
         "node_id": id,
-        "edges": edges,
+        "outgoing": result.outgoing,
+        "incoming": result.incoming,
         "total": result.total,
     })))
 }
