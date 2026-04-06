@@ -2,7 +2,9 @@
 
 mod ai;
 mod memory;
+mod proposals;
 mod schemas;
+mod traces;
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -1339,6 +1341,96 @@ impl SeleneTools {
         params: Parameters<ConfigureMemoryParams>,
     ) -> Result<CallToolResult, McpError> {
         memory::configure_memory_impl(self, params.0).await
+    }
+
+    // ── Training Data ───────────────────────────────────────────────
+
+    #[tool(
+        name = "log_trace",
+        description = "Log a tool interaction trace for training data collection. \
+        Called by the agent orchestrator after each tool call, not by the agent itself. \
+        Stores as a __Trace node for later export via export_traces."
+    )]
+    async fn log_trace(
+        &self,
+        params: Parameters<LogTraceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::log_trace_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "export_traces",
+        description = "Export interaction traces as JSONL for fine-tuning. \
+        Filter by session, tool name, feedback type, model, or date range. \
+        Output format compatible with TRL, Axolotl, and Unsloth pipelines."
+    )]
+    async fn export_traces(
+        &self,
+        params: Parameters<ExportTracesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::export_traces_impl(self, params.0).await
+    }
+
+    // ── Action Proposals ────────────────────────────────────────────
+
+    #[tool(
+        name = "propose_action",
+        description = "Propose an action for human review. Creates a __Proposal node with \
+        pending status. The proposal includes a GQL query to execute if approved. \
+        Proposals auto-expire after 24 hours."
+    )]
+    async fn propose_action(
+        &self,
+        params: Parameters<ProposeActionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        proposals::propose_action_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_proposals",
+        description = "List action proposals, optionally filtered by status \
+        (pending, approved, executed, rejected, expired)."
+    )]
+    async fn list_proposals(
+        &self,
+        params: Parameters<ListProposalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        proposals::list_proposals_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "approve_proposal",
+        description = "Approve a pending proposal. Only non-agent principals can approve. \
+        Changes status from pending to approved."
+    )]
+    async fn approve_proposal(
+        &self,
+        params: Parameters<ProposalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        proposals::approve_proposal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "reject_proposal",
+        description = "Reject a pending proposal with an optional reason."
+    )]
+    async fn reject_proposal(
+        &self,
+        params: Parameters<ProposalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        proposals::reject_proposal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "execute_proposal",
+        description = "Execute an approved proposal. Runs the stored GQL query and \
+        changes status to executed."
+    )]
+    async fn execute_proposal(
+        &self,
+        params: Parameters<ProposalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        proposals::execute_proposal_impl(self, params.0).await
     }
 }
 

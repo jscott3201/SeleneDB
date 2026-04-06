@@ -134,7 +134,8 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // 4 MB for CSV
         .route("/import/csv", post(routes::csv_import)
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // deprecated alias
-        .route("/export/csv", get(routes::csv_export)); // deprecated alias
+        .route("/export/csv", get(routes::csv_export)) // deprecated alias
+        .route("/subscribe", get(routes::subscribe::subscribe));
 
     // RDF import/export
     let app = app.route(

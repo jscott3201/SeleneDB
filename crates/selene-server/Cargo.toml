@@ -33,6 +33,8 @@ rustls-pki-types.workspace = true
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tokio-stream.workspace = true
+futures.workspace = true
 
 # Serialization
 serde.workspace = true

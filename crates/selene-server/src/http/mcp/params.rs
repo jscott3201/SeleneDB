@@ -462,6 +462,100 @@ pub(crate) struct RelatedParams {
     pub(crate) neighbor_limit: Option<usize>,
 }
 
+// ── Trace (training data) ────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct LogTraceParams {
+    /// Session identifier for grouping related traces.
+    pub(crate) session_id: String,
+    /// Turn number within the session.
+    pub(crate) turn: i64,
+    /// Name of the tool that was called.
+    pub(crate) tool_name: String,
+    /// JSON string of tool parameters.
+    pub(crate) tool_params: String,
+    /// Compact summary of the tool result.
+    pub(crate) tool_result_summary: String,
+    /// What the agent said after this tool call.
+    #[serde(default)]
+    pub(crate) agent_response: Option<String>,
+    /// Feedback: "approved", "rejected", "corrected", or "none" (default).
+    #[serde(default)]
+    pub(crate) feedback: Option<String>,
+    /// If feedback is "corrected", the correct answer.
+    #[serde(default)]
+    pub(crate) correction: Option<String>,
+    /// Which model generated this trace.
+    #[serde(default)]
+    pub(crate) model_id: Option<String>,
+    /// Tool execution time in milliseconds.
+    #[serde(default)]
+    pub(crate) latency_ms: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ExportTracesParams {
+    /// Filter by session ID.
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    /// Filter by tool name.
+    #[serde(default)]
+    pub(crate) tool_name: Option<String>,
+    /// Filter by feedback type.
+    #[serde(default)]
+    pub(crate) feedback: Option<String>,
+    /// Filter by model ID.
+    #[serde(default)]
+    pub(crate) model_id: Option<String>,
+    /// Start timestamp (ms). Omit for earliest.
+    #[serde(default)]
+    pub(crate) start_ms: Option<i64>,
+    /// End timestamp (ms). Omit for latest.
+    #[serde(default)]
+    pub(crate) end_ms: Option<i64>,
+    /// Maximum traces to return (default: 1000, max: 10000).
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+    /// Output format: "jsonl" (default) or "json".
+    #[serde(default)]
+    pub(crate) format: Option<String>,
+}
+
+// ── Proposals (human-in-the-loop) ───────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ProposeActionParams {
+    /// Human-readable description of the proposed action.
+    pub(crate) description: String,
+    /// The GQL query to execute if approved.
+    pub(crate) query: String,
+    /// Category for grouping proposals (e.g., "setpoint_change", "schedule").
+    #[serde(default)]
+    pub(crate) category: Option<String>,
+    /// Priority: "low", "normal" (default), "high".
+    #[serde(default)]
+    pub(crate) priority: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ProposalIdParams {
+    /// Numeric proposal node ID.
+    pub(crate) proposal_id: u64,
+    /// Optional reason for the action.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ListProposalsParams {
+    /// Filter by status: "pending", "approved", "executed", "rejected", "expired". Omit for all.
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    /// Maximum proposals to return (default: 50).
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ConfigureMemoryParams {
     /// Memory namespace to configure.

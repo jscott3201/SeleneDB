@@ -5,6 +5,7 @@ mod edges;
 mod gql;
 mod nodes;
 mod schemas;
+pub(super) mod subscribe;
 mod system;
 
 use crate::bootstrap::ServerState;
