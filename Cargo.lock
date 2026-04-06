@@ -4793,6 +4793,7 @@ dependencies = [
  "selene-graph",
  "selene-testing",
  "selene-ts",
+ "serde",
  "serde_json",
  "smallvec",
  "smol_str",

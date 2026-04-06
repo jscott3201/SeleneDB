@@ -12,6 +12,8 @@
 //! - [`set_model_config`]: Configure model name, path, and dimensions.
 
 pub mod bert;
+pub mod gemma;
+pub(crate) mod gemma_encoder;
 pub mod provider;
 
 pub use provider::{EmbeddingProvider, EmbeddingTask};
@@ -76,11 +78,10 @@ fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
 
     match name {
         "embeddinggemma" => {
-            // Phase 2 will add GemmaProvider here.
-            Err(format!(
-                "embeddinggemma provider not yet implemented (model path: {})",
-                path.display()
-            ))
+            let dims = MODEL_DIMS.get().copied().unwrap_or(768);
+            gemma::GemmaProvider::load(&path, dims)
+                .map(|p| Box::new(p) as Box<dyn EmbeddingProvider>)
+                .map_err(|e| e.to_string())
         }
         _ => bert::BertProvider::load(&path)
             .map(|p| Box::new(p) as Box<dyn EmbeddingProvider>)
