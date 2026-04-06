@@ -12,6 +12,7 @@ selene-core.workspace = true
 selene-graph.workspace = true
 oxrdf = "0.3.3"
 oxttl = "0.2.3"
+rustc-hash.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 base64 = "0.22"

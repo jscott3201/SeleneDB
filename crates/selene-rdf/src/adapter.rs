@@ -10,9 +10,11 @@
 //! the `urn:selene:ontology` named graph and are delegated to the
 //! [`OntologyStore`] when present.
 
+use std::cell::RefCell;
 use std::convert::Infallible;
 
 use oxrdf::{NamedNode, Term};
+use rustc_hash::FxHashMap;
 use selene_core::interner::IStr;
 use selene_graph::SeleneGraph;
 use selene_graph::csr::CsrAdjacency;
@@ -37,6 +39,9 @@ pub struct SeleneDataset<'a> {
     csr: &'a CsrAdjacency,
     namespace: &'a RdfNamespace,
     ontology: Option<&'a OntologyStore>,
+    /// Per-query cache for externalized terms. Avoids repeated `format!()`
+    /// heap allocations for the same type/predicate URIs across result rows.
+    extern_cache: RefCell<FxHashMap<SeleneRdfTerm, Term>>,
 }
 
 impl<'a> SeleneDataset<'a> {
@@ -56,6 +61,7 @@ impl<'a> SeleneDataset<'a> {
             csr,
             namespace,
             ontology,
+            extern_cache: RefCell::new(FxHashMap::default()),
         }
     }
 }
@@ -121,7 +127,12 @@ impl<'a> QueryableDataset<'a> for SeleneDataset<'a> {
     }
 
     fn externalize_term(&self, term: SeleneRdfTerm) -> Result<Term, Infallible> {
-        Ok(term.externalize(self.namespace))
+        if let Some(cached) = self.extern_cache.borrow().get(&term) {
+            return Ok(cached.clone());
+        }
+        let result = term.externalize(self.namespace);
+        self.extern_cache.borrow_mut().insert(term, result.clone());
+        Ok(result)
     }
 }
 
