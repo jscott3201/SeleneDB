@@ -44,12 +44,14 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@v2
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Run tests
-        # Cap link jobs to avoid OOM bus errors on 7 GB runners when linking
-        # selene-server (candle + tantivy + arrow are all unconditional now).
-        run: cargo test --workspace --all-features
-        env:
-          CARGO_BUILD_JOBS: "3"
+        # Limit parallelism to avoid OOM bus errors on 7 GB runners when
+        # linking selene-server (candle + tantivy + arrow all unconditional).
+        run: cargo test --workspace --all-features -j2
 
   doc-audit:
     name: Docs & Audit
