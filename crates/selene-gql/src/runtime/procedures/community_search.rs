@@ -134,7 +134,10 @@ impl Procedure for CommunitySearch {
         };
 
         // ── 2. Embed query text ──
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
 
         // ── 3. Vector search (HNSW fast path or brute-force) ──
         let prop_key = IStr::new("embedding");

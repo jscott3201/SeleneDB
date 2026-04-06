@@ -212,7 +212,10 @@ impl Procedure for HybridSearch {
             .unwrap_or_default();
 
         // 2. Vector search
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
         let prop_key = IStr::new("embedding");
         let vec_results = super::vector::top_k_cosine_scan(
             graph,

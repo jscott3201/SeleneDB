@@ -806,7 +806,10 @@ async fn auto_embed_loop(
                 continue;
             }
 
-            match selene_gql::runtime::embed::embed_text(text) {
+            match selene_gql::runtime::embed::embed_text_with_task(
+                text,
+                selene_gql::runtime::embed::EmbeddingTask::Document,
+            ) {
                 Ok(vec) => {
                     let embed_key = IStr::new(&rule.embedding_property);
                     let nid = selene_core::NodeId(*node_id);

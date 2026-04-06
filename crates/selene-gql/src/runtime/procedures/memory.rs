@@ -108,7 +108,10 @@ impl Procedure for MemoryRecall {
         }
 
         // -- 2. Embed query text --
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Document,
+        )?;
 
         // -- 3. Filter __Memory nodes by namespace + temporal validity --
         let namespace_key = IStr::new("namespace");

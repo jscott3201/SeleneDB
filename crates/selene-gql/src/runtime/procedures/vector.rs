@@ -418,7 +418,10 @@ impl Procedure for SemanticSearch {
         };
 
         // 1. Embed the query text
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
 
         // 2. Scan nodes with cosine similarity
         let prop_key = IStr::new("embedding");
