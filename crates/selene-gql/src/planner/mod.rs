@@ -921,6 +921,7 @@ fn is_count_only_query(pattern_ops: &[PatternOp], pipeline_ops: &[PipelineOp]) -
 }
 
 fn derive_output_schema(ops: &[PipelineOp]) -> Arc<arrow::datatypes::Schema> {
+    // Return takes precedence when present.
     for op in ops {
         if let PipelineOp::Return { projections, .. } = op {
             let fields: Vec<arrow::datatypes::Field> = projections
@@ -932,6 +933,26 @@ fn derive_output_schema(ops: &[PipelineOp]) -> Arc<arrow::datatypes::Schema> {
                 })
                 .collect();
             return Arc::new(arrow::datatypes::Schema::new(fields));
+        }
+    }
+    // Standalone CALL/YIELD (no RETURN): derive schema from yield items.
+    for op in ops {
+        if let PipelineOp::Call { procedure } = op {
+            let fields: Vec<arrow::datatypes::Field> = procedure
+                .yields
+                .iter()
+                .map(|yi| {
+                    let col = yi.alias.as_ref().unwrap_or(&yi.name);
+                    arrow::datatypes::Field::new(
+                        col.as_str(),
+                        arrow::datatypes::DataType::Utf8,
+                        true,
+                    )
+                })
+                .collect();
+            if !fields.is_empty() {
+                return Arc::new(arrow::datatypes::Schema::new(fields));
+            }
         }
     }
     Arc::new(arrow::datatypes::Schema::empty())

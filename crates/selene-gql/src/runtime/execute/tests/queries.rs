@@ -420,3 +420,33 @@ fn group_by_variable_still_works() {
     // Each node has a unique name, so one group per node
     assert!(result.row_count() >= 3);
 }
+
+// ── Standalone CALL/YIELD (no RETURN) tests ──
+
+#[test]
+fn call_yield_without_return_produces_rows() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD name", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "standalone CALL/YIELD should return rows without RETURN"
+    );
+}
+
+#[test]
+fn call_yield_with_return_still_works() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD name RETURN name", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "CALL/YIELD followed by RETURN should still work"
+    );
+}
