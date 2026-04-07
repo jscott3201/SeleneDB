@@ -518,7 +518,16 @@ impl std::fmt::Display for GqlValue {
             Self::Bytes(b) => write!(f, "bytes[{}]", b.len()),
             Self::Vector(v) => write!(f, "vector[{}]", v.len()),
             Self::Record(r) => write!(f, "{r}"),
-            Self::List(l) => write!(f, "list[{}]", l.len()),
+            Self::List(l) => {
+                write!(f, "[")?;
+                for (i, item) in l.elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
             Self::Node(id) => write!(f, "node({id})", id = id.0),
             Self::Edge(id) => write!(f, "edge({id})", id = id.0),
             Self::Path(p) => write!(f, "path[{} edges]", p.edge_count()),

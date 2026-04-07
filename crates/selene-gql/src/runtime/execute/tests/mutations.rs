@@ -442,3 +442,151 @@ fn mutation_without_parameters_still_works() {
         .unwrap();
     assert_eq!(result.mutations.nodes_created, 1);
 }
+
+// ── WHERE clause in mutations (regression tests) ──
+
+#[test]
+fn mutation_where_set_filters_by_property() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    for name in &["alpha", "beta", "gamma", "delta", "epsilon"] {
+        MutationBuilder::new(&format!("INSERT (:floor {{name: '{name}'}})"))
+            .execute(&shared)
+            .unwrap();
+    }
+    assert_eq!(shared.read(|g| g.node_count()), 5);
+
+    // SET with WHERE should only update the matching node
+    let result =
+        MutationBuilder::new("MATCH (n:floor) WHERE n.name = 'gamma' SET n.tag = 'updated'")
+            .execute(&shared)
+            .unwrap();
+    assert_eq!(result.mutations.properties_set, 1);
+
+    // Verify only gamma has the tag
+    let graph = shared.read(|g| g.clone());
+    let result = QueryBuilder::new(
+        "MATCH (n:floor) WHERE n.tag = 'updated' RETURN n.name AS name",
+        &graph,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let col = result.batches[0]
+        .column_by_name("NAME")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(col.value(0), "gamma");
+}
+
+#[test]
+fn mutation_where_set_filters_by_id() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    for name in &["a", "b", "c"] {
+        MutationBuilder::new(&format!("INSERT (:item {{name: '{name}'}})"))
+            .execute(&shared)
+            .unwrap();
+    }
+
+    // SET with WHERE id(n) should only update that specific node
+    let result = MutationBuilder::new("MATCH (n:item) WHERE id(n) = 2 SET n.val = 99")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.properties_set, 1);
+
+    // Verify only node 2 has val=99
+    let graph = shared.read(|g| g.clone());
+    let with_val = QueryBuilder::new(
+        "MATCH (n:item) WHERE n.val = 99 RETURN n.name AS name",
+        &graph,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(with_val.row_count(), 1);
+    let col = with_val.batches[0]
+        .column_by_name("NAME")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(col.value(0), "b");
+}
+
+#[test]
+fn mutation_where_delete_filters_correctly() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    for name in &["keep1", "target", "keep2"] {
+        MutationBuilder::new(&format!("INSERT (:item {{name: '{name}'}})"))
+            .execute(&shared)
+            .unwrap();
+    }
+    assert_eq!(shared.read(|g| g.node_count()), 3);
+
+    // DELETE with WHERE should only remove the target node
+    let result = MutationBuilder::new("MATCH (n:item) WHERE n.name = 'target' DELETE n")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_deleted, 1);
+    assert_eq!(shared.read(|g| g.node_count()), 2);
+
+    // Verify the remaining nodes are keep1 and keep2
+    let graph = shared.read(|g| g.clone());
+    let remaining = QueryBuilder::new(
+        "MATCH (n:item) RETURN n.name AS name ORDER BY n.name",
+        &graph,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(remaining.row_count(), 2);
+    let col = remaining.batches[0]
+        .column_by_name("NAME")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(col.value(0), "keep1");
+    assert_eq!(col.value(1), "keep2");
+}
+
+#[test]
+fn mutation_filter_and_where_behave_identically() {
+    // FILTER (which always worked) and WHERE should produce the same result
+    let shared_filter = SharedGraph::new(SeleneGraph::new());
+    let shared_where = SharedGraph::new(SeleneGraph::new());
+
+    for shared in [&shared_filter, &shared_where] {
+        for name in &["x", "y", "z"] {
+            MutationBuilder::new(&format!("INSERT (:thing {{name: '{name}'}})"))
+                .execute(shared)
+                .unwrap();
+        }
+    }
+
+    MutationBuilder::new("MATCH (n:thing) FILTER n.name = 'y' SET n.hit = true")
+        .execute(&shared_filter)
+        .unwrap();
+    MutationBuilder::new("MATCH (n:thing) WHERE n.name = 'y' SET n.hit = true")
+        .execute(&shared_where)
+        .unwrap();
+
+    let count_filter = shared_filter.read(|g| {
+        (1..=3)
+            .filter(|&i| {
+                g.get_node(NodeId(i))
+                    .is_some_and(|n| n.property("hit").is_some())
+            })
+            .count()
+    });
+    let count_where = shared_where.read(|g| {
+        (1..=3)
+            .filter(|&i| {
+                g.get_node(NodeId(i))
+                    .is_some_and(|n| n.property("hit").is_some())
+            })
+            .count()
+    });
+
+    assert_eq!(count_filter, 1);
+    assert_eq!(count_where, 1);
+}

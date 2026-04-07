@@ -83,9 +83,13 @@ fn plan_pipeline_stmt(
             plan_with(with, pipeline_ops);
         }
         PipelineStatement::Call(call) => {
+            let filter = call.filter.clone();
             pipeline_ops.push(PipelineOp::Call {
                 procedure: call.clone(),
             });
+            if let Some(predicate) = filter {
+                pipeline_ops.push(PipelineOp::Filter { predicate });
+            }
         }
         PipelineStatement::Subquery(sub_pipeline) => {
             let sub_plan = plan_query(sub_pipeline, graph)?;
@@ -210,6 +214,13 @@ pub fn plan_mutation(
             match stmt {
                 PipelineStatement::Match(m) => {
                     plan_match(m, &mut pattern_ops, graph, &edge_stats)?;
+
+                    // MATCH ... WHERE predicate → add as pipeline filter
+                    if let Some(ref predicate) = m.where_clause {
+                        pipeline_ops.push(PipelineOp::Filter {
+                            predicate: predicate.clone(),
+                        });
+                    }
                 }
                 PipelineStatement::Return(_) => {
                     return Err(GqlError::parse_error(
