@@ -49,6 +49,25 @@ impl GqlValue {
                 Trilean::from(a_utc == b_utc)
             }
             (GqlValue::Duration(a), GqlValue::Duration(b)) => Trilean::from(a.nanos == b.nanos),
+            (GqlValue::List(a), GqlValue::List(b)) => {
+                if a.len() == b.len() {
+                    let mut all_true = true;
+                    for (x, y) in a.elements.iter().zip(b.elements.iter()) {
+                        match x.gql_eq(y) {
+                            Trilean::False => return Trilean::False,
+                            Trilean::Unknown => all_true = false,
+                            Trilean::True => {}
+                        }
+                    }
+                    if all_true {
+                        Trilean::True
+                    } else {
+                        Trilean::Unknown
+                    }
+                } else {
+                    Trilean::False
+                }
+            }
             // Numeric: coerce and compare
             _ if self.is_numeric() && other.is_numeric() => {
                 match coerce_and_compare_numeric(self, other) {

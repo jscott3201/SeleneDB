@@ -42,6 +42,31 @@ impl GqlResult {
         }
     }
 
+    /// Create a successful DDL result with a confirmation message.
+    pub fn ddl_success(message: &str) -> Self {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field};
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "STATUS",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![message]))],
+        )
+        .expect("ddl_success batch");
+        Self {
+            schema,
+            batches: vec![batch],
+            status: GqlStatus::success(1),
+            mutations: MutationStats::default(),
+            profile: None,
+            changes: Vec::new(),
+        }
+    }
+
     /// Number of rows in the result.
     pub fn row_count(&self) -> usize {
         self.batches.iter().map(|b| b.num_rows()).sum()

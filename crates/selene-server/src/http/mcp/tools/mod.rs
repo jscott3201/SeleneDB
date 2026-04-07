@@ -1219,7 +1219,7 @@ impl SeleneTools {
     )]
     async fn schema_dump(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
-        let query = "CALL graph.schemaDump() YIELD schema RETURN schema";
+        let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,

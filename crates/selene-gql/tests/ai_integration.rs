@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use selene_core::schema::{NodeSchema, PropertyDef, ValueType};
 use selene_core::{IStr, LabelSet, NodeId, PropertyMap, Value};
 use selene_gql::{GqlValue, QueryBuilder};
@@ -197,7 +197,7 @@ fn vector_search_ranks_by_cosine_similarity() {
         .column_by_name("NODEID")
         .unwrap()
         .as_any()
-        .downcast_ref::<UInt64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap();
     let score_col = batch
         .column_by_name("SCORE")
@@ -263,7 +263,7 @@ fn vector_search_uses_hnsw_when_available() {
         .column_by_name("NODEID")
         .unwrap()
         .as_any()
-        .downcast_ref::<UInt64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap();
 
     assert_eq!(id_col.value(0), 1, "HNSW should return node 1 first");
@@ -323,7 +323,7 @@ fn memory_vector_search_ranks_by_similarity() {
         .column_by_name("NODEID")
         .unwrap()
         .as_any()
-        .downcast_ref::<UInt64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap();
 
     // Node 6 (vec_c, ~0.8 cosine) should rank first
@@ -359,7 +359,7 @@ fn schema_dump_excludes_ai_system_labels() {
         )
         .unwrap();
 
-    let query = "CALL graph.schemaDump() YIELD schema RETURN schema";
+    let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
     let result = QueryBuilder::new(query, &graph).execute().unwrap();
 
     assert_eq!(result.row_count(), 1);
@@ -519,7 +519,7 @@ fn graphrag_local_data_flow_vector_then_bfs() {
         .column_by_name("NODEID")
         .unwrap()
         .as_any()
-        .downcast_ref::<UInt64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap()
         .value(0);
     assert_eq!(seed_id, 1, "seed should be TempSensor1");
@@ -540,13 +540,14 @@ fn graphrag_local_data_flow_vector_then_bfs() {
         .column_by_name("ZONEID")
         .unwrap()
         .as_any()
-        .downcast_ref::<UInt64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap()
         .value(0);
     assert_eq!(zone_id, 3, "containing zone should be Zone1");
 
     // Step 3: BFS from the zone to find all contained entities
-    let expanded = selene_graph::algorithms::bfs_with_depth(&graph, NodeId(zone_id), None, 1);
+    let expanded =
+        selene_graph::algorithms::bfs_with_depth(&graph, NodeId(zone_id as u64), None, 1);
 
     let reachable: Vec<u64> = expanded.iter().map(|(nid, _)| nid.0).collect();
     assert!(
@@ -578,7 +579,7 @@ fn parse_check_validates_schema_derived_query() {
         .unwrap();
 
     // Step 1: Get schema dump
-    let dump_query = "CALL graph.schemaDump() YIELD schema RETURN schema";
+    let dump_query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
     let result = QueryBuilder::new(dump_query, &graph).execute().unwrap();
 
     let batch = &result.batches[0];

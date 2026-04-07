@@ -342,6 +342,9 @@ pub(super) fn execute_mutations_write(
                 std::collections::HashSet::new();
             let mut deleted_edges: std::collections::HashSet<EdgeId> =
                 std::collections::HashSet::new();
+            // Snapshot properties of deleted nodes/edges so RETURN can
+            // access pre-deletion values (e.g. DELETE n RETURN n.name).
+            let mut deleted_node_props: HashMap<NodeId, PropertyMap> = HashMap::new();
 
             for mutation in mutations {
                 match mutation {
@@ -549,6 +552,10 @@ pub(super) fn execute_mutations_write(
                                             format!("cannot delete node {} with {degree} incident edges, use DETACH DELETE", id.0)
                                         ));
                                     }
+                                    if let Some(node) = m.graph().get_node(*id) {
+                                        deleted_node_props
+                                            .insert(*id, node.properties.clone());
+                                    }
                                     m.delete_node(*id)?;
                                     deleted_nodes.insert(*id);
                                     stats.nodes_deleted += 1;
@@ -581,6 +588,10 @@ pub(super) fn execute_mutations_write(
                                         std::collections::HashSet::new();
                                     incident.extend(graph.outgoing(*id));
                                     incident.extend(graph.incoming(*id));
+                                    if let Some(node) = m.graph().get_node(*id) {
+                                        deleted_node_props
+                                            .insert(*id, node.properties.clone());
+                                    }
                                     m.delete_node(*id)?; // cascades edges
                                     deleted_nodes.insert(*id);
                                     stats.nodes_deleted += 1;
@@ -793,7 +804,7 @@ pub(super) fn execute_mutations_write(
                 }
             }
 
-            Ok((node_var_map, edge_var_map, per_row_maps))
+            Ok((node_var_map, edge_var_map, per_row_maps, deleted_node_props))
         })
         .map_err(GqlError::from)?;
 
@@ -803,7 +814,34 @@ pub(super) fn execute_mutations_write(
     }
 
     // Propagate INSERT variables into bindings for RETURN access.
-    let (node_var_map, edge_var_map, per_row_maps) = var_maps;
+    let (node_var_map, edge_var_map, per_row_maps, deleted_node_props) = var_maps;
+
+    // Materialize properties for deleted nodes so RETURN can access
+    // pre-deletion values (e.g. DELETE n RETURN n.name).
+    if !deleted_node_props.is_empty() {
+        use crate::types::value::{GqlRecord, GqlValue};
+        for binding in bindings.iter_mut() {
+            let replacements: Vec<(IStr, GqlValue)> = binding
+                .iter()
+                .filter_map(|(var, bv)| {
+                    if let BoundValue::Node(id) = bv {
+                        deleted_node_props.get(id).map(|props| {
+                            let fields: Vec<(IStr, GqlValue)> = props
+                                .iter()
+                                .map(|(k, v)| (*k, GqlValue::from(v)))
+                                .collect();
+                            (*var, GqlValue::Record(GqlRecord { fields }))
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (var, val) in replacements {
+                binding.bind(var, BoundValue::Scalar(val));
+            }
+        }
+    }
     if !node_var_map.is_empty() || !edge_var_map.is_empty() {
         // Filter to only newly created variables (not seeded from existing bindings)
         let existing_vars: std::collections::HashSet<IStr> = bindings

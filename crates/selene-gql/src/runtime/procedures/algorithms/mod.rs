@@ -93,6 +93,8 @@ fn get_projection_or_build(
     // Ensure the projection exists and is fresh. If it was created by
     // graph.project() but the graph mutated since, rebuild it from its
     // original config so the user's label/edge filters are preserved.
+    // If no projection with this name exists, a default full-graph
+    // projection is created automatically for convenience.
     catalog.write().ensure_fresh(graph, &name);
 
     Ok(name)

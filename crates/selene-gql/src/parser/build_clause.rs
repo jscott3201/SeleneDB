@@ -282,7 +282,9 @@ pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldI
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::ident if name.is_none() => name = Some(intern_var(inner)),
+            Rule::ident | Rule::prop_ident if name.is_none() => {
+                name = Some(intern_var(inner));
+            }
             Rule::alias => {
                 let ident_pair = inner
                     .into_inner()

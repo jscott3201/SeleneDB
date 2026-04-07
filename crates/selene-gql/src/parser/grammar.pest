@@ -226,10 +226,10 @@ group_by_item   = { expr }
 call_stmt      = { ^"CALL" ~ (call_subquery | call_procedure) }
 call_subquery  = { "{" ~ query_pipeline ~ "}" }
 call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause ~ yield_filter? }
-qualified_name = { ident ~ ("." ~ ident)* }
+qualified_name = { ident ~ ("." ~ prop_ident)* }
 arg_list       = { expr ~ ("," ~ expr)* }
 yield_clause   = { ^"YIELD" ~ yield_item ~ ("," ~ yield_item)* }
-yield_item     = { ("*" | ident) ~ alias? }
+yield_item     = { ("*" | prop_ident) ~ alias? }
 yield_filter   = { (^"WHERE" | ^"FILTER" ~ ^"WHERE"?) ~ expr }
 
 // ── Mutations ──────────────────────────────────────────────────────

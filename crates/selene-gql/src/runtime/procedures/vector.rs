@@ -560,10 +560,18 @@ impl Procedure for SimilarNodes {
         let prop_key = IStr::new(property);
         let ref_vec = match ref_node.properties.get(prop_key) {
             Some(Value::Vector(v)) => v.as_ref(),
-            _ => {
+            Some(_) => {
                 return Err(GqlError::InvalidArgument {
                     message: format!(
-                        "node {} does not have a vector property '{property}'",
+                        "node {} property '{property}' is not a vector; similarNodes requires a vector embedding property",
+                        ref_id.0
+                    ),
+                });
+            }
+            None => {
+                return Err(GqlError::InvalidArgument {
+                    message: format!(
+                        "node {} does not have property '{property}'; ensure the node has an embedding stored in this property",
                         ref_id.0
                     ),
                 });

@@ -254,16 +254,18 @@ fn build_label_and(pair: Pair<'_, Rule>) -> Result<LabelExpr, GqlError> {
 }
 
 fn build_label_not(pair: Pair<'_, Rule>) -> Result<LabelExpr, GqlError> {
-    let parts: Vec<Pair<'_, Rule>> = pair.into_inner().collect();
-    if parts.len() == 1 {
-        // label_atom
-        build_label_atom(parts[0].clone())
+    // Pest's into_inner() only yields rule children, not the literal "!"
+    // token. Detect negation from the raw text span instead.
+    let negated = pair.as_str().trim_start().starts_with('!');
+    let atom = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| GqlError::parse_error("empty label_not"))?;
+    let inner = build_label_atom(atom)?;
+    if negated {
+        Ok(LabelExpr::Not(Box::new(inner)))
     } else {
-        // "!" ~ label_atom
-        let atom = parts
-            .last()
-            .ok_or_else(|| GqlError::parse_error("empty label_not"))?;
-        Ok(LabelExpr::Not(Box::new(build_label_atom(atom.clone())?)))
+        Ok(inner)
     }
 }
 

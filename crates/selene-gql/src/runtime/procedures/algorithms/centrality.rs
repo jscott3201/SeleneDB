@@ -125,7 +125,7 @@ impl Procedure for GraphBetweenness {
                 GqlValue::Null => None,
                 _ => v.as_int().ok(),
             })
-            .map(|n| n as usize);
+            .map(|n| n.max(1) as usize);
 
         let cat = self.catalog.read();
         let proj_ref = cat

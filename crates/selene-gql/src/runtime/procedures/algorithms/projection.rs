@@ -37,10 +37,6 @@ impl Procedure for GraphProject {
                     name: "edgeLabels",
                     typ: GqlType::List(Box::new(GqlType::String)),
                 },
-                ProcedureParam {
-                    name: "weightProp",
-                    typ: GqlType::String,
-                },
             ],
             yields: vec![
                 YieldColumn {

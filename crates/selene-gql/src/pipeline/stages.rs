@@ -849,29 +849,51 @@ fn execute_return(
 ) -> Result<Vec<Binding>, GqlError> {
     let has_aggregates = projections.iter().any(|p| p.expr.is_aggregate());
 
-    // Detect horizontal aggregation: all Expr::Aggregate inner expressions
-    // resolve to List values per-row (from Group variables)
-    let horizontal = has_aggregates && group_by.is_empty() && !bindings.is_empty() && {
-        projections
+    // Implicit GROUP BY: when projections mix aggregated and non-aggregated
+    // expressions without an explicit GROUP BY, the non-aggregated expressions
+    // become implicit group keys (standard SQL/GQL behavior).
+    let implicit_group_by: Vec<Expr>;
+    let effective_group_by = if !group_by.is_empty() {
+        group_by
+    } else if has_aggregates {
+        implicit_group_by = projections
             .iter()
-            .filter(|p| p.expr.is_aggregate())
-            .all(|p| match &p.expr {
-                Expr::Aggregate(agg) => {
-                    if let Some(inner) = &agg.expr {
-                        matches!(
-                            eval_expr_ctx(inner, &bindings[0], ctx),
-                            Ok(GqlValue::List(_))
-                        )
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            })
+            .filter(|p| !p.expr.is_aggregate())
+            .map(|p| p.expr.clone())
+            .collect();
+        if implicit_group_by.is_empty() {
+            group_by // all projections are aggregates, no grouping
+        } else {
+            &implicit_group_by
+        }
+    } else {
+        group_by
     };
 
-    let mut result = if !group_by.is_empty() {
-        execute_grouped_return(bindings, projections, group_by, ctx)?
+    // Detect horizontal aggregation: all Expr::Aggregate inner expressions
+    // resolve to List values per-row (from Group variables)
+    let horizontal =
+        has_aggregates && effective_group_by.is_empty() && !bindings.is_empty() && {
+            projections
+                .iter()
+                .filter(|p| p.expr.is_aggregate())
+                .all(|p| match &p.expr {
+                    Expr::Aggregate(agg) => {
+                        if let Some(inner) = &agg.expr {
+                            matches!(
+                                eval_expr_ctx(inner, &bindings[0], ctx),
+                                Ok(GqlValue::List(_))
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                })
+        };
+
+    let mut result = if !effective_group_by.is_empty() {
+        execute_grouped_return(bindings, projections, effective_group_by, ctx)?
     } else if has_aggregates && !horizontal {
         execute_aggregate_return(bindings, projections, ctx)?
     } else {

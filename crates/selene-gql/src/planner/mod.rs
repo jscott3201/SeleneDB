@@ -196,22 +196,41 @@ pub fn plan_query(
                     let shared: Vec<IStr> = bound_vars.intersection(&new_vars).copied().collect();
                     if pattern_ops.is_empty() {
                         pattern_ops.extend(new_ops);
+                        // Push WHERE as IntermediateFilter to reduce bindings before
+                        // a potential subsequent Join (avoids cartesian explosion).
+                        if let Some(ref predicate) = m.where_clause {
+                            if expr_references_outer_var(predicate, &new_vars) {
+                                pipeline_ops.push(PipelineOp::Filter {
+                                    predicate: predicate.clone(),
+                                });
+                            } else {
+                                pattern_ops.push(PatternOp::IntermediateFilter {
+                                    predicate: predicate.clone(),
+                                });
+                            }
+                        }
                     } else {
                         let right_start = pattern_ops.len();
                         pattern_ops.extend(new_ops);
+                        // Push WHERE for the right side as IntermediateFilter
+                        // (filters right-side bindings before the Join).
+                        if let Some(ref predicate) = m.where_clause {
+                            if expr_references_outer_var(predicate, &new_vars) {
+                                // References left-side vars: keep as pipeline filter
+                                pipeline_ops.push(PipelineOp::Filter {
+                                    predicate: predicate.clone(),
+                                });
+                            } else {
+                                pattern_ops.push(PatternOp::IntermediateFilter {
+                                    predicate: predicate.clone(),
+                                });
+                            }
+                        }
                         let right_end = pattern_ops.len();
                         pattern_ops.push(PatternOp::Join {
                             right_start,
                             right_end,
                             join_vars: shared,
-                        });
-                    }
-                    // MATCH ... WHERE predicate → add as pipeline filter.
-                    // OPTIONAL MATCH WHERE is pushed inside inner_ops above.
-                    // after_with MATCH WHERE is embedded in NestedMatch above.
-                    if let Some(ref predicate) = m.where_clause {
-                        pipeline_ops.push(PipelineOp::Filter {
-                            predicate: predicate.clone(),
                         });
                     }
                     bound_vars.extend(new_vars);
@@ -244,6 +263,10 @@ pub fn plan_query(
             }
         }
     }
+
+    // Canonicalize LIMIT/OFFSET order: OFFSET must precede LIMIT per SQL/GQL
+    // semantics regardless of their textual order in the query.
+    canonicalize_limit_offset(&mut pipeline_ops);
 
     // Rewrite Sort/TopK expressions that follow Return to reference projected aliases.
     // After RETURN, original pattern variables are destroyed -- Sort must use alias names.
@@ -832,11 +855,22 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
         .enumerate()
         .map(|(i, p)| {
             let alias = p.alias.unwrap_or_else(|| {
-                // Infer alias from bare variable references (standard GQL
-                // behavior: `RETURN x` produces a column named `x`).
-                // All other expressions fall back to positional `col_{i}`.
+                // Infer alias from expression structure. Standard GQL
+                // behavior: `RETURN x` produces column `x`, `RETURN n.prop`
+                // produces column `n.prop`, function calls use the function
+                // name. Fall back to positional `col_{i}` for complex exprs.
                 match &p.expr {
-                    crate::ast::expr::Expr::Var(name) => *name,
+                    Expr::Var(name) => *name,
+                    Expr::Property(base, prop) => {
+                        if let Expr::Var(var) = base.as_ref() {
+                            IStr::new(&format!("{var}.{prop}"))
+                        } else {
+                            IStr::new(&format!("col_{i}"))
+                        }
+                    }
+                    Expr::Function(fc) => {
+                        IStr::new(&format!("{}()", fc.name))
+                    }
                     _ => IStr::new(&format!("col_{i}")),
                 }
             });
@@ -853,6 +887,19 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
 /// After RETURN, original pattern variables (s, n, etc.) are replaced by
 /// projection aliases (col_0, name, temp, etc.). Any Sort/TopK that follows
 /// must use the alias names. If an ORDER BY expression wasn't projected, it's
+/// Swap adjacent Limit/Offset so OFFSET always precedes LIMIT. Users may
+/// write `LIMIT 3 OFFSET 2` (SQL-style) but the correct execution order is
+/// skip-then-take regardless of textual order.
+fn canonicalize_limit_offset(pipeline: &mut [PipelineOp]) {
+    for i in 0..pipeline.len().saturating_sub(1) {
+        if matches!(pipeline[i], PipelineOp::Limit { .. })
+            && matches!(pipeline[i + 1], PipelineOp::Offset { .. })
+        {
+            pipeline.swap(i, i + 1);
+        }
+    }
+}
+
 /// added as a hidden projection (prefixed with `_sort_`) that is computed but
 /// excluded from the output Arrow schema.
 fn rewrite_sort_after_return(pipeline: &mut [PipelineOp]) {
