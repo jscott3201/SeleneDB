@@ -16,6 +16,12 @@ use crate::types::value::GqlValue;
 
 use super::pattern::execute_pattern_ops_with_eval_ctx;
 
+/// Normalize a column name for flexible matching: uppercase and strip underscores.
+/// This lets `node_count` match `nodeCount` (both become `NODECOUNT`).
+fn normalize_col(s: &str) -> String {
+    s.to_uppercase().replace('_', "")
+}
+
 /// Execute a CALL procedure for each input binding.
 ///
 /// Accepts an optional `EvalContext` so that query parameters (`$param`)
@@ -33,11 +39,35 @@ pub(super) fn execute_call(
 ) -> Result<Vec<Binding>, GqlError> {
     let registry =
         procedures.ok_or_else(|| GqlError::internal("no procedure registry available"))?;
+
+    // Case-insensitive procedure lookup: normalize to lowercase before
+    // querying the registry so `CALL graph.Labels()` finds `graph.labels`.
+    let lookup_name = IStr::new(&call.name.as_str().to_lowercase());
     let proc = registry
-        .get(&call.name)
+        .get(&lookup_name)
         .ok_or_else(|| GqlError::UnknownProcedure {
             name: call.name.as_str().to_string(),
         })?;
+
+    // Validate explicit YIELD columns against the procedure signature.
+    if !call.yield_star && !call.yields.is_empty() {
+        let sig = proc.signature();
+        let available: Vec<String> = sig.yields.iter().map(|y| normalize_col(y.name)).collect();
+        for yi in &call.yields {
+            let normalized = normalize_col(yi.name.as_str());
+            if !available.contains(&normalized) {
+                let col_names: Vec<&str> = sig.yields.iter().map(|y| y.name).collect();
+                return Err(GqlError::Type {
+                    message: format!(
+                        "procedure '{}' does not yield column '{}'; available columns: {:?}",
+                        call.name.as_str(),
+                        yi.name.as_str().to_lowercase(),
+                        col_names,
+                    ),
+                });
+            }
+        }
+    }
 
     // Build a fallback context when the caller does not supply one.
     let owned_ctx;
@@ -65,14 +95,19 @@ pub(super) fn execute_call(
         for row in rows {
             let mut extended = binding.clone();
             for (name, value) in &row {
-                // Apply YIELD aliases: match procedure column names
-                // case-insensitively against parsed YIELD names (which are
-                // uppercased by the parser's intern_var).
+                // Apply YIELD aliases: match procedure column names using
+                // normalized comparison (uppercase + strip underscores) so
+                // `node_count` matches `nodeCount`.
+                let norm_name = normalize_col(name.as_str());
                 let upper_name = IStr::new(&name.as_str().to_uppercase());
                 // YIELD * or no explicit yields: include all columns
                 if call.yield_star || call.yields.is_empty() {
                     extended.bind(upper_name, BoundValue::Scalar(value.clone()));
-                } else if let Some(yi) = call.yields.iter().find(|y| y.name == upper_name) {
+                } else if let Some(yi) = call
+                    .yields
+                    .iter()
+                    .find(|y| normalize_col(y.name.as_str()) == norm_name)
+                {
                     let alias = yi.alias.unwrap_or(yi.name);
                     extended.bind(alias, BoundValue::Scalar(value.clone()));
                 }

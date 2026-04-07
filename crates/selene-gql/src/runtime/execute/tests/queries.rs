@@ -545,3 +545,92 @@ fn call_yield_where_filters_rows() {
         .unwrap();
     assert_eq!(arr.value(0), "sensor");
 }
+
+// ── Case-insensitive procedure lookup tests ──
+
+#[test]
+fn call_case_insensitive_procedure_name() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    // Mixed case: graph.Labels should resolve to graph.labels
+    let result = QueryBuilder::new("CALL graph.Labels() YIELD label RETURN label", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "case-insensitive procedure lookup should find graph.labels"
+    );
+}
+
+#[test]
+fn call_upper_case_procedure_name() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    // Full uppercase
+    let result = QueryBuilder::new("CALL GRAPH.LABELS() YIELD label RETURN label", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "uppercase procedure name should resolve"
+    );
+}
+
+// ── Underscore-insensitive YIELD column matching tests ──
+
+#[test]
+fn yield_underscore_flexible_column_match() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    // graph.labels yields column "label"; YIELD la_bel (with underscore)
+    // should match after normalization (both become LABEL).
+    let result = QueryBuilder::new("CALL graph.labels() YIELD la_bel RETURN la_bel", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "underscore-flexible YIELD match should work"
+    );
+}
+
+// ── YIELD column validation tests ──
+
+#[test]
+fn yield_nonexistent_column_returns_error() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new(
+        "CALL graph.labels() YIELD nonexistent_col RETURN nonexistent_col",
+        &g,
+    )
+    .with_procedures(procs)
+    .execute();
+    assert!(result.is_err(), "invalid YIELD column should error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("does not yield column"),
+        "error should mention 'does not yield column', got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("label"),
+        "error should list available columns, got: {err_msg}"
+    );
+}
+
+#[test]
+fn yield_nonexistent_column_error_message_lists_available() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD bogus RETURN bogus", &g)
+        .with_procedures(procs)
+        .execute();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("name") && err_msg.contains("params") && err_msg.contains("yields"),
+        "error should list all available columns: {err_msg}"
+    );
+}
