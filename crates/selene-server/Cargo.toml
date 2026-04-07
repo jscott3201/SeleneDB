@@ -104,7 +104,7 @@ tower-http = { version = "0.6", features = ["cors", "request-id", "set-header", 
 subtle = "2"
 
 # MCP (always compiled, runtime toggle via config)
-rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+rmcp = { workspace = true, features = ["transport-streamable-http-server", "transport-io"] }
 schemars.workspace = true
 
 # Used by replica mode (always) and federation (feature-gated)

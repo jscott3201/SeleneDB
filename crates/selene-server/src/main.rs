@@ -15,6 +15,7 @@ use selene_server::tls;
 
 #[derive(Parser)]
 #[command(name = "selene-server", about = "Selene property graph server")]
+#[allow(clippy::struct_excessive_bools)]
 struct ServerCli {
     /// Path to TOML config file.
     #[arg(long)]
@@ -44,6 +45,11 @@ struct ServerCli {
     /// Start as a read-only replica of the given primary address (host:port).
     #[arg(long)]
     replica_of: Option<String>,
+    /// Run MCP server over stdin/stdout instead of HTTP/QUIC.
+    /// Designed for IDE integrations and agent frameworks that spawn
+    /// the database as a subprocess.
+    #[arg(long)]
+    stdio: bool,
 }
 
 fn parse_profile(s: &str) -> Result<selene_server::config::ProfileType, String> {
@@ -159,6 +165,22 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
 
     let cancel = tokio_util::sync::CancellationToken::new();
     let bg = tasks::spawn_background_tasks(Arc::clone(&state), cancel);
+
+    // stdio mode: serve MCP over stdin/stdout, skip HTTP/QUIC
+    if cli.stdio {
+        state.set_ready();
+        tracing::info!("serving MCP over stdio (stdin/stdout)");
+
+        if let Err(e) = selene_server::serve_stdio_mcp(Arc::clone(&state)).await {
+            tracing::error!("stdio MCP server error: {e}");
+        }
+
+        tracing::info!("stdio client disconnected, shutting down");
+        bg.shutdown();
+        tasks::shutdown_snapshot(&state);
+        bg.wait().await;
+        return Ok(());
+    }
 
     // Bootstrap federation peers
     if let Some(fed_svc) = state
