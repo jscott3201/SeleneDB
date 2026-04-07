@@ -166,7 +166,9 @@ impl Accumulator for MinMaxAccumulator {
 struct CollectListAccumulator(Vec<GqlValue>);
 impl Accumulator for CollectListAccumulator {
     fn accumulate(&mut self, value: &GqlValue) -> Result<(), GqlError> {
-        self.0.push(value.clone());
+        if !value.is_null() {
+            self.0.push(value.clone());
+        }
         Ok(())
     }
     fn finish(&self) -> GqlValue {
