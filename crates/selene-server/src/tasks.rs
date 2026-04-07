@@ -98,15 +98,24 @@ pub fn spawn_background_tasks(
     }));
 
     // Auto-embed task (vector service with configured rules)
+    // Built-in rule: __Memory nodes always get auto-embedding on the content property.
+    let mut auto_embed_rules = state.config.vector.auto_embed.clone();
+    if !auto_embed_rules.iter().any(|r| r.label == "__Memory") {
+        auto_embed_rules.push(crate::config::AutoEmbedRule {
+            label: "__Memory".into(),
+            text_property: "content".into(),
+            embedding_property: "embedding".into(),
+        });
+    }
     if state
         .services
         .get::<crate::vector_store::VectorStoreService>()
         .is_some()
-        && !state.config.vector.auto_embed.is_empty()
+        && !auto_embed_rules.is_empty()
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        let rules = state.config.vector.auto_embed.clone();
+        let rules = auto_embed_rules;
         handles.push(tokio::spawn(async move {
             auto_embed_loop(s, rules, token).await;
         }));
