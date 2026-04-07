@@ -17,6 +17,8 @@ use selene_core::label_set::LabelSet;
 use selene_core::property_map::PropertyMap;
 use selene_core::EdgeId;
 use selene_graph::SeleneGraph;
+use selene_graph::csr::CsrAdjacency;
+use spareval::{DeleteInsertQuad, QueryEvaluator};
 use spargebra::{GraphUpdateOperation, SparqlParser};
 
 use crate::namespace::{ParsedUri, RdfNamespace, RDF_TYPE};
@@ -73,9 +75,19 @@ pub fn execute_update(
                 let quads: Vec<Quad> = data.iter().map(spargebra_ground_quad_to_oxrdf).collect();
                 apply_delete_data(graph, namespace, &quads, &mut result)?;
             }
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                using,
+                pattern,
+            } => {
+                apply_delete_insert(
+                    graph, namespace, delete, insert, using.clone(), pattern, &mut result,
+                )?;
+            }
             other => {
                 return Err(UpdateError::Unsupported(format!(
-                    "{} (only INSERT DATA and DELETE DATA are supported)",
+                    "{} is not yet supported",
                     update_op_name(other)
                 )));
             }
@@ -245,6 +257,59 @@ fn apply_delete_data(
     }
 
     m.commit(0)?;
+    Ok(())
+}
+
+/// Apply a DELETE/INSERT WHERE operation.
+///
+/// Evaluates the WHERE pattern against a read-only snapshot of the graph
+/// (via spareval), collects the resulting delete/insert quads, then applies
+/// them as mutations. Deletes are applied before inserts to avoid conflicts.
+fn apply_delete_insert(
+    graph: &mut SeleneGraph,
+    ns: &RdfNamespace,
+    delete: &[spargebra::term::GroundQuadPattern],
+    insert: &[spargebra::term::QuadPattern],
+    using: Option<spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+    result: &mut UpdateResult,
+) -> Result<(), UpdateError> {
+    use crate::adapter::SeleneDataset;
+
+    // Phase 1: evaluate WHERE against an immutable snapshot.
+    let csr = CsrAdjacency::build(graph);
+    let dataset = SeleneDataset::new(graph, &csr, ns, None);
+
+    let evaluator = QueryEvaluator::new();
+    let prepared = evaluator.prepare_delete_insert(
+        delete.to_vec(),
+        insert.to_vec(),
+        None, // base_iri
+        using,
+        pattern,
+    );
+    let iter = prepared
+        .execute(dataset)
+        .map_err(|e| UpdateError::Parse(e.to_string()))?;
+
+    // Collect all quads (releases the immutable borrow on graph).
+    let mut deletes = Vec::new();
+    let mut inserts = Vec::new();
+    for item in iter {
+        match item.map_err(|e| UpdateError::Parse(e.to_string()))? {
+            DeleteInsertQuad::Delete(q) => deletes.push(q),
+            DeleteInsertQuad::Insert(q) => inserts.push(q),
+        }
+    }
+
+    // Phase 2: apply mutations (deletes first, then inserts).
+    if !deletes.is_empty() {
+        apply_delete_data(graph, ns, &deletes, result)?;
+    }
+    if !inserts.is_empty() {
+        apply_insert_data(graph, ns, &inserts, result)?;
+    }
+
     Ok(())
 }
 
@@ -441,5 +506,82 @@ mod tests {
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.properties_set, 1);
         assert_eq!(result.properties_removed, 1);
+    }
+
+    // ── Phase 2: DELETE/INSERT WHERE ──
+
+    #[test]
+    fn delete_where_removes_matching() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        // Delete the unit property from all Sensor nodes
+        let sparql = format!(
+            "DELETE {{ ?s <{NS}prop/unit> ?v }} WHERE {{ ?s a <{NS}type/Sensor> . ?s <{NS}prop/unit> ?v }}"
+        );
+        let result = execute_update(&mut g, &ns, &sparql).unwrap();
+        assert_eq!(result.properties_removed, 1);
+        let node = g.get_node(NodeId(1)).unwrap();
+        assert!(node.property("unit").is_none());
+    }
+
+    #[test]
+    fn insert_where_sets_matching() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        // Add an alert property to all Sensor nodes
+        let sparql = format!(
+            "INSERT {{ ?s <{NS}prop/alert> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> }} \
+             WHERE {{ ?s a <{NS}type/Sensor> }}"
+        );
+        let result = execute_update(&mut g, &ns, &sparql).unwrap();
+        assert_eq!(result.properties_set, 1);
+        let node = g.get_node(NodeId(1)).unwrap();
+        assert_eq!(node.property("alert"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn delete_insert_where_replaces_property() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        // Replace unit from degC to degF on all Sensor nodes
+        let sparql = format!(
+            "DELETE {{ ?s <{NS}prop/unit> ?old }} \
+             INSERT {{ ?s <{NS}prop/unit> \"degF\" }} \
+             WHERE {{ ?s a <{NS}type/Sensor> . ?s <{NS}prop/unit> ?old }}"
+        );
+        let result = execute_update(&mut g, &ns, &sparql).unwrap();
+        assert_eq!(result.properties_removed, 1);
+        assert_eq!(result.properties_set, 1);
+        let node = g.get_node(NodeId(1)).unwrap();
+        assert_eq!(
+            node.property("unit"),
+            Some(&Value::str("degF"))
+        );
+    }
+
+    #[test]
+    fn delete_where_no_match_is_noop() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        let sparql = format!(
+            "DELETE {{ ?s <{NS}prop/nonexistent> ?v }} WHERE {{ ?s <{NS}prop/nonexistent> ?v }}"
+        );
+        let result = execute_update(&mut g, &ns, &sparql).unwrap();
+        assert_eq!(result.properties_removed, 0);
+    }
+
+    #[test]
+    fn insert_where_add_edge() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        // Create a "monitors" edge from each Sensor to the Room
+        let sparql = format!(
+            "INSERT {{ ?s <{NS}rel/monitors> ?r }} \
+             WHERE {{ ?s a <{NS}type/Sensor> . ?r a <{NS}type/Room> }}"
+        );
+        let result = execute_update(&mut g, &ns, &sparql).unwrap();
+        assert_eq!(result.edges_created, 1);
+        let edges: Vec<_> = g.outgoing(NodeId(1)).iter().filter_map(|&eid| g.get_edge(eid)).collect();
+        assert!(edges.iter().any(|e| e.label == IStr::new("monitors")));
     }
 }
