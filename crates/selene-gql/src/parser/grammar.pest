@@ -248,8 +248,8 @@ insert_op = { ^"INSERT" ~ insert_graph_pattern }
 insert_graph_pattern = { insert_path_pattern ~ ("," ~ insert_path_pattern)* }
 insert_path_pattern = { insert_node_pattern ~ (insert_edge_pattern ~ insert_node_pattern)* }
 insert_node_pattern = { "(" ~ ident? ~ insert_label_set? ~ property_map? ~ ")" }
-// INSERT uses AND-only label set (spec §16.5), not full label_expr (no OR/NOT/wildcard)
-insert_label_set = { ":" ~ ident ~ ("&" ~ ":" ~ ident)* }
+// INSERT label set: reuses full label_expr (AND-only semantics enforced by executor)
+insert_label_set = { label_expr }
 insert_edge_pattern = { insert_edge_right | insert_edge_left }
 insert_edge_right = { "-" ~ "[" ~ edge_var? ~ label_expr? ~ property_map? ~ "]" ~ "->" }
 insert_edge_left  = { "<-" ~ "[" ~ edge_var? ~ label_expr? ~ property_map? ~ "]" ~ "-" }

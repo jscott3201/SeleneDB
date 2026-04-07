@@ -308,3 +308,32 @@ fn e2e_trigger_fires_on_set() {
     });
     assert_eq!(result, Some(Value::String(SmolStr::new("hot"))));
 }
+
+// ── Multi-label INSERT tests ──
+
+#[test]
+fn insert_multi_label_node() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("INSERT (n:A&B {name: 'test'}) RETURN id(n) AS id")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+    assert_eq!(result.batches[0].num_rows(), 1);
+
+    // Verify both labels via MATCH
+    shared.read(|g| {
+        let qr = QueryBuilder::new("MATCH (n:A&B) RETURN n.name AS name", g)
+            .execute()
+            .unwrap();
+        assert_eq!(qr.batches[0].num_rows(), 1);
+    });
+}
+
+#[test]
+fn insert_single_label_still_works() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("INSERT (:OnlyOne {val: 1})")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+}

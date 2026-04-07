@@ -535,15 +535,16 @@ fn build_insert_pattern(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                     for p in elem.into_inner() {
                         match p.as_rule() {
                             Rule::ident => var = Some(intern_var(p)),
-                            Rule::insert_label_set => {
-                                for lbl in p.into_inner() {
-                                    if lbl.as_rule() == Rule::ident {
-                                        labels.push(intern_name(lbl));
-                                    }
-                                }
-                            }
-                            Rule::label_expr => {
-                                if let Ok(le) = build_label_expr(p) {
+                            Rule::insert_label_set | Rule::label_expr => {
+                                // insert_label_set wraps label_expr; unwrap if needed
+                                let le_pair = if p.as_rule() == Rule::insert_label_set {
+                                    p.into_inner().find(|c| c.as_rule() == Rule::label_expr)
+                                } else {
+                                    Some(p)
+                                };
+                                if let Some(lp) = le_pair
+                                    && let Ok(le) = build_label_expr(lp)
+                                {
                                     collect_label_names(&le, &mut labels);
                                 }
                             }
