@@ -14,6 +14,7 @@ pub mod terms;
 
 pub mod adapter;
 pub mod sparql;
+pub mod update;
 
 /// Supported RDF serialization formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

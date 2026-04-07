@@ -390,9 +390,10 @@ pub(in crate::http) async fn sparql_get(
 
 /// `POST /sparql`
 ///
-/// Accepts two content types per the SPARQL Protocol:
+/// Accepts three content types per the SPARQL Protocol:
 /// - `application/sparql-query`: raw SPARQL query in the body
-/// - `application/x-www-form-urlencoded`: `query=...` in the body
+/// - `application/sparql-update`: raw SPARQL Update in the body
+/// - `application/x-www-form-urlencoded`: `query=...` or `update=...` in body
 pub(in crate::http) async fn sparql_post(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -407,41 +408,91 @@ pub(in crate::http) async fn sparql_post(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let query_str = if content_type.starts_with("application/x-www-form-urlencoded") {
-        // Form-encoded: parse `query=...` from body
+    // SPARQL Update path
+    if content_type.starts_with("application/sparql-update") {
+        let update_str = std::str::from_utf8(&body)
+            .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
+        if update_str.is_empty() {
+            return Err(HttpError::bad_request("empty SPARQL Update body"));
+        }
+        return execute_sparql_update_handler(&state, update_str);
+    }
+
+    // Form-encoded path: check for `update=` or `query=` field
+    if content_type.starts_with("application/x-www-form-urlencoded") {
         let body_str = std::str::from_utf8(&body)
             .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
-        form_decode_query(body_str)?
-    } else {
-        // Default: raw SPARQL query in body (application/sparql-query)
-        let s = std::str::from_utf8(&body)
-            .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
-        if s.is_empty() {
-            return Err(HttpError::bad_request("empty SPARQL query body"));
+        // Check for update= field first (SPARQL Update via form)
+        if let Ok(update_str) = form_decode_field(body_str, "update") {
+            return execute_sparql_update_handler(&state, &update_str);
         }
-        s.to_owned()
-    };
+        // Fall through to query= field
+        let query_str = form_decode_field(body_str, "query").map_err(|_| {
+            HttpError::bad_request("missing 'query' or 'update' field in form-encoded body")
+        })?;
+        let accept = headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok());
+        let format = resolve_sparql_format(params.format.as_deref(), accept);
+        return execute_sparql_handler(&state, &query_str, format);
+    }
 
+    // Default: raw SPARQL query in body (application/sparql-query)
+    let query_str = std::str::from_utf8(&body)
+        .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
+    if query_str.is_empty() {
+        return Err(HttpError::bad_request("empty SPARQL query body"));
+    }
     let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let format = resolve_sparql_format(params.format.as_deref(), accept);
-    execute_sparql_handler(&state, &query_str, format)
+    execute_sparql_handler(&state, query_str, format)
 }
 
-/// Extract the `query` field from a URL-encoded form body.
-fn form_decode_query(body: &str) -> Result<String, HttpError> {
+/// Extract a named field from a URL-encoded form body.
+fn form_decode_field(body: &str, field_name: &str) -> Result<String, HttpError> {
     for (key, value) in form_urlencoded::parse(body.as_bytes()) {
-        if key == "query" {
+        if key == field_name {
             if value.is_empty() {
-                return Err(HttpError::bad_request("empty query field in form body"));
+                return Err(HttpError::bad_request(format!(
+                    "empty '{field_name}' field in form body"
+                )));
             }
             return Ok(value.into_owned());
         }
     }
-    Err(HttpError::bad_request(
-        "missing 'query' field in form-encoded body",
-    ))
+    Err(HttpError::bad_request(format!(
+        "missing '{field_name}' field in form-encoded body"
+    )))
+}
+
+/// Execute a SPARQL Update and return a JSON summary.
+fn execute_sparql_update_handler(
+    state: &ServerState,
+    update_str: &str,
+) -> Result<axum::response::Response, HttpError> {
+    let ns = &state.rdf_namespace;
+    let mut graph = state.graph.inner().write();
+    let result = selene_rdf::update::execute_update(&mut graph, ns, update_str)
+        .map_err(|e| HttpError(OpError::QueryError(e.to_string())))?;
+    drop(graph);
+    state.graph.publish_snapshot();
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "nodes_created": result.nodes_created,
+            "properties_set": result.properties_set,
+            "properties_removed": result.properties_removed,
+            "labels_added": result.labels_added,
+            "labels_removed": result.labels_removed,
+            "edges_created": result.edges_created,
+            "edges_deleted": result.edges_deleted,
+        })),
+    )
+        .into_response())
 }
 
 fn execute_sparql_handler(
