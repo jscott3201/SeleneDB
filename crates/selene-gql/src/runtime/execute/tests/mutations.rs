@@ -197,6 +197,40 @@ fn e2e_detach_delete_cascades_edges() {
 }
 
 #[test]
+fn e2e_multi_match_insert_edge_between_existing_nodes() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    // Create two nodes.
+    MutationBuilder::new("INSERT (:person {name: 'Alice'})")
+        .execute(&shared)
+        .unwrap();
+    MutationBuilder::new("INSERT (:person {name: 'Bob'})")
+        .execute(&shared)
+        .unwrap();
+
+    // Also insert a uniquely-labeled node so single-match returns exactly 1 row.
+    MutationBuilder::new("INSERT (:target {name: 'Carol'})")
+        .execute(&shared)
+        .unwrap();
+
+    // Multi-MATCH mutation: bind one person and the target, insert edge.
+    let result = MutationBuilder::new(
+        "MATCH (a:person) WHERE a.name = 'Alice' \
+         MATCH (b:target) \
+         INSERT (a)-[:knows]->(b) \
+         RETURN id(a) AS aid, id(b) AS bid",
+    )
+    .execute(&shared)
+    .unwrap();
+
+    assert_eq!(
+        result.mutations.nodes_created, 0,
+        "no new nodes (got edges_created={}, nodes_created={})",
+        result.mutations.edges_created, result.mutations.nodes_created
+    );
+    assert_eq!(result.mutations.edges_created, 1, "one edge created");
+}
+
+#[test]
 fn e2e_plain_delete_succeeds_without_edges() {
     let shared = SharedGraph::new(SeleneGraph::new());
     MutationBuilder::new("INSERT (:sensor {name: 'S1'})")

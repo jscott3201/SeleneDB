@@ -4,6 +4,7 @@ use roaring::RoaringBitmap;
 use selene_core::IStr;
 use selene_graph::SeleneGraph;
 
+use crate::ast::expr::Expr;
 use crate::ast::expr::ProcedureCall;
 use crate::pipeline::stages;
 use crate::planner::plan::*;
@@ -48,6 +49,28 @@ pub(super) fn execute_call(
         .ok_or_else(|| GqlError::UnknownProcedure {
             name: call.name.as_str().to_string(),
         })?;
+
+    // Validate argument count against the procedure signature.
+    {
+        let sig = proc.signature();
+        let required = sig.params.len();
+        let provided = call.args.len();
+        if provided < required {
+            return Err(GqlError::InvalidArgument {
+                message: format!(
+                    "procedure '{}' requires {} argument(s) but {} provided; expected: {}",
+                    call.name.as_str(),
+                    required,
+                    provided,
+                    sig.params
+                        .iter()
+                        .map(|p| p.name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            });
+        }
+    }
 
     // Validate explicit YIELD columns against the procedure signature.
     if !call.yield_star && !call.yields.is_empty() {
@@ -200,6 +223,19 @@ pub(super) fn execute_subquery(
                         Some(&ctx),
                     )?;
                 }
+                PipelineOp::NestedMatch {
+                    pattern_ops: nested_ops,
+                    where_filter,
+                } => {
+                    sub_bindings = execute_nested_match(
+                        sub_bindings,
+                        nested_ops,
+                        where_filter.as_ref(),
+                        graph,
+                        scope,
+                        Some(&ctx),
+                    )?;
+                }
                 _ => {
                     sub_bindings = stages::execute_pipeline_op(op, sub_bindings, &ctx)?;
                 }
@@ -215,6 +251,74 @@ pub(super) fn execute_subquery(
             }
             output.push(merged);
         }
+    }
+    Ok(output)
+}
+
+/// Execute a NestedMatch: correlated MATCH after WITH.
+///
+/// For each input binding (produced by a prior WITH clause), runs the
+/// pattern ops as a seeded correlated execution, then applies the optional
+/// WHERE filter. Variables already present in the seed binding short-circuit
+/// their LabelScan (the correlated path in `execute_single_pattern_op_chunk`).
+/// Results are merged back with the outer binding to produce the final output.
+pub(super) fn execute_nested_match(
+    bindings: Vec<Binding>,
+    nested_ops: &[crate::planner::plan::PatternOp],
+    where_filter: Option<&Expr>,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    parent_ctx: Option<&EvalContext<'_>>,
+) -> Result<Vec<Binding>, GqlError> {
+    let registry = FunctionRegistry::builtins();
+    let mut ctx = EvalContext::new(graph, registry).with_scope(scope);
+    if let Some(parent) = parent_ctx
+        && let Some(params) = parent.parameters
+    {
+        ctx = ctx.with_parameters(params);
+    }
+
+    let mut output = Vec::new();
+    for outer_binding in &bindings {
+        // Run the nested pattern ops seeded by this binding.
+        let mut inner_bindings = execute_pattern_ops_with_eval_ctx(nested_ops, graph, scope, &ctx)?;
+
+        // Filter inner results to keep only those consistent with the seed.
+        inner_bindings.retain(|inner_b| {
+            outer_binding
+                .iter()
+                .all(|(var, outer_val)| match inner_b.get(var) {
+                    Some(inner_val) => match (outer_val, inner_val) {
+                        (BoundValue::Node(a), BoundValue::Node(b)) => a == b,
+                        (BoundValue::Edge(a), BoundValue::Edge(b)) => a == b,
+                        _ => true,
+                    },
+                    None => true,
+                })
+        });
+
+        // Inner join: no inner results → drop this outer row.
+        if inner_bindings.is_empty() {
+            continue;
+        }
+
+        // Propagate outer variables into each inner binding, then apply WHERE.
+        for inner_b in &mut inner_bindings {
+            for (var, val) in outer_binding.iter() {
+                if !inner_b.contains(var) {
+                    inner_b.bind(*var, val.clone());
+                }
+            }
+        }
+
+        // Apply the optional WHERE filter from the MATCH clause.
+        if let Some(pred) = where_filter {
+            inner_bindings.retain(|b| {
+                crate::runtime::eval::eval_predicate(pred, b, &ctx).is_ok_and(|t| t.is_true())
+            });
+        }
+
+        output.extend(inner_bindings);
     }
     Ok(output)
 }

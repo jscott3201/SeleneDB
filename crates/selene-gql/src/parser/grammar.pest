@@ -234,7 +234,7 @@ yield_filter   = { (^"WHERE" | ^"FILTER" ~ ^"WHERE"?) ~ expr }
 
 // ── Mutations ──────────────────────────────────────────────────────
 
-mutation_pipeline = { (match_stmt ~ filter_stmt?)? ~ mutation_op+ ~ (return_stmt | finish_stmt)? }
+mutation_pipeline = { (match_stmt | filter_stmt)* ~ mutation_op+ ~ (return_stmt | finish_stmt)? }
 finish_stmt       = { ^"FINISH" }
 mutation_op       = { insert_op | merge_op | set_stmt | remove_stmt | detach_delete_op | delete_op }
 

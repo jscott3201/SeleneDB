@@ -421,6 +421,53 @@ fn group_by_variable_still_works() {
     assert!(result.row_count() >= 3);
 }
 
+// GROUP BY projection alias: `GROUP BY alias` where alias is defined in the same
+// RETURN or WITH clause.  Before the fix these returned "unbound variable".
+#[test]
+fn group_by_return_alias() {
+    let g = setup_graph();
+    // RETURN s.name AS nm, count(*) AS cnt GROUP BY nm
+    // nm is an alias for s.name, not a pre-existing binding variable.
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) RETURN s.name AS nm, count(*) AS cnt GROUP BY nm",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Two sensors, each with a unique name -> two groups, each with count 1.
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn group_by_with_alias() {
+    let g = setup_graph();
+    // WITH s.name AS nm, count(s) AS cnt GROUP BY nm RETURN nm, cnt
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) WITH s.name AS nm, count(s) AS cnt GROUP BY nm RETURN nm, cnt",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn group_by_case_alias() {
+    let g = setup_graph();
+    // GROUP BY a CASE expression alias.
+    // Sensor temps are 72.5 and 80.0 -> one 'hot' (>= 75) and one 'cool'.
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) \
+         RETURN CASE WHEN s.temp >= 75.0 THEN 'hot' ELSE 'cool' END AS bucket, \
+                count(*) AS cnt \
+         GROUP BY bucket",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 2);
+}
+
 // ── Standalone CALL/YIELD (no RETURN) tests ──
 
 #[test]

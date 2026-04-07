@@ -1085,7 +1085,7 @@ mod tests {
             GqlStatement::Query(pipeline) => {
                 assert!(pipeline.statements.len() >= 2);
                 match &pipeline.statements[0] {
-                    PipelineStatement::MatchView { name, yields } => {
+                    PipelineStatement::MatchView { name, yields, .. } => {
                         assert_eq!(name.as_str(), "stats");
                         assert_eq!(yields.len(), 2);
                         assert_eq!(yields[0].name.as_str(), "AVG_TEMP");
@@ -1108,6 +1108,26 @@ mod tests {
                 PipelineStatement::MatchView { yields, .. } => {
                     assert_eq!(yields[0].name.as_str(), "AVG_TEMP");
                     assert_eq!(yields[0].alias.unwrap().as_str(), "TEMPERATURE");
+                }
+                _ => panic!("expected MatchView"),
+            },
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn parse_match_view_yield_star() {
+        let stmt = parse_statement("MATCH VIEW stats YIELD *").unwrap();
+        match stmt {
+            GqlStatement::Query(pipeline) => match &pipeline.statements[0] {
+                PipelineStatement::MatchView {
+                    name,
+                    yields,
+                    yield_star,
+                } => {
+                    assert_eq!(name.as_str(), "stats");
+                    assert!(yields.is_empty());
+                    assert!(*yield_star);
                 }
                 _ => panic!("expected MatchView"),
             },

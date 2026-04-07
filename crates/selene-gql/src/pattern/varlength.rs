@@ -157,15 +157,20 @@ fn bindings_to_chunk(
 ) -> DataChunk {
     if bindings.is_empty() {
         let mut schema = ChunkSchema::new();
+        let mut builders: Vec<ColumnBuilder> = Vec::new();
         schema.extend(source_var, ColumnKind::NodeId);
+        builders.push(ColumnBuilder::new_node_ids(0));
         if let Some(ev) = edge_var {
             schema.extend(ev, ColumnKind::Values);
+            builders.push(ColumnBuilder::new_values(0));
         }
         schema.extend(target_var, ColumnKind::NodeId);
+        builders.push(ColumnBuilder::new_node_ids(0));
         if let Some(pv) = path_var {
             schema.extend(pv, ColumnKind::Values);
+            builders.push(ColumnBuilder::new_values(0));
         }
-        return DataChunk::from_builders(vec![], schema, 0);
+        return DataChunk::from_builders(builders, schema, 0);
     }
 
     let len = bindings.len();

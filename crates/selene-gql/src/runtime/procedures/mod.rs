@@ -179,7 +179,9 @@ impl ProcedureRegistry {
     }
 
     pub fn register(&mut self, proc: Arc<dyn Procedure>) {
-        self.procedures.insert(IStr::new(proc.name()), proc);
+        // Normalize to lowercase so case-insensitive dispatch always matches.
+        self.procedures
+            .insert(IStr::new(&proc.name().to_lowercase()), proc);
     }
 
     pub fn get(&self, name: &IStr) -> Option<&Arc<dyn Procedure>> {

@@ -553,12 +553,10 @@ mod tests {
             .unwrap();
         file.write_all(&[0xFF]).unwrap();
 
-        let result = Wal::read_entries_after(&path, 0);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            PersistError::CrcMismatch { .. }
-        ));
+        // CRC mismatch stops replay with a warning (not an error).
+        // The corrupted entry is skipped, so we get zero valid entries.
+        let entries = Wal::read_entries_after(&path, 0).unwrap();
+        assert!(entries.is_empty(), "corrupted entry should be skipped");
     }
 
     #[test]

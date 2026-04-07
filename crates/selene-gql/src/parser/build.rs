@@ -759,20 +759,29 @@ fn build_pipeline_statement(pair: Pair<'_, Rule>) -> Result<PipelineStatement, G
         Rule::match_view_stmt => {
             let mut name = IStr::new("");
             let mut yields = Vec::new();
+            let mut yield_star = false;
             for p in inner.into_inner() {
                 match p.as_rule() {
                     Rule::ident => name = intern_name(p),
                     Rule::yield_clause => {
                         for yi in p.into_inner() {
                             if yi.as_rule() == Rule::yield_item {
-                                yields.push(build_yield_item(yi)?);
+                                if yi.as_str().trim() == "*" {
+                                    yield_star = true;
+                                } else {
+                                    yields.push(build_yield_item(yi)?);
+                                }
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            Ok(PipelineStatement::MatchView { name, yields })
+            Ok(PipelineStatement::MatchView {
+                name,
+                yields,
+                yield_star,
+            })
         }
         Rule::match_stmt => Ok(PipelineStatement::Match(build_match(inner)?)),
         Rule::let_stmt => Ok(PipelineStatement::Let(build_let(inner)?)),

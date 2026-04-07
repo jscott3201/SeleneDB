@@ -275,7 +275,11 @@ pub enum PipelineStatement {
     For { var: IStr, list_expr: Expr },
 
     /// MATCH VIEW name YIELD col1, col2 AS alias -- read from a materialized view.
-    MatchView { name: IStr, yields: Vec<YieldItem> },
+    MatchView {
+        name: IStr,
+        yields: Vec<YieldItem>,
+        yield_star: bool,
+    },
 }
 
 /// Variable binding in a LET statement.

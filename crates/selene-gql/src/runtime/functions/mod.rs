@@ -41,7 +41,8 @@ use functions_string::{
     ListPrependFunction, ListReverseFunction, ListSliceFunction, ListSortFunction, LtrimFunction,
     NormalizeFunction, NullIfFunction, RangeFunction, ReplaceFunction, ReverseFunction,
     RightFunction, RtrimFunction, StartsWithFunction, SubstringFunction, TailFunction,
-    ToStringFunction, ValueTypeFunction,
+    ToFloatFunction, ToIntegerFunction, ToStringCypherFunction, ToStringFunction,
+    ValueTypeFunction,
 };
 use functions_temporal::{
     CosineSimilarityFunction, CurrentDateFunction, CurrentTimeFunction, DateAddFunction,
@@ -189,6 +190,11 @@ impl FunctionRegistry {
         // Aliases
         reg.register(Arc::new(LengthFunction));
         reg.register(Arc::new(DoubleFunction));
+
+        // Cypher-compatible type conversion
+        reg.register(Arc::new(ToStringCypherFunction));
+        reg.register(Arc::new(ToIntegerFunction));
+        reg.register(Arc::new(ToFloatFunction));
 
         // Spec-aligned aliases (register same impl under spec name)
         let char_length_fn = reg.get(&IStr::new("char_length")).cloned();

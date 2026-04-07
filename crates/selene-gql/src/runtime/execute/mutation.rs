@@ -144,7 +144,12 @@ pub(super) fn walk_insert_paths(
                 } => {
                     let node_id = if let Some(v) = var {
                         if let Some(&existing) = var_map.get(v) {
+                            // Already created earlier in this INSERT walk.
                             existing
+                        } else if let Some(BoundValue::Node(nid)) = binding_ref.get(v) {
+                            // Bound from a preceding MATCH clause: reuse.
+                            var_map.insert(*v, *nid);
+                            *nid
                         } else {
                             let (ls, props) = build_insert_node_data_with_binding(
                                 labels,
@@ -200,6 +205,9 @@ pub(super) fn walk_insert_paths(
                         let tgt = if let Some(v) = tgt_var {
                             if let Some(&existing) = var_map.get(v) {
                                 existing
+                            } else if let Some(BoundValue::Node(nid)) = binding_ref.get(v) {
+                                var_map.insert(*v, *nid);
+                                *nid
                             } else {
                                 let (ls, props) = build_insert_node_data_with_binding(
                                     tgt_labels,
@@ -568,9 +576,15 @@ pub(super) fn execute_mutations_write(
                                             selene_graph::GraphError::Other(e.to_string())
                                         })?;
                                     }
+                                    // Count unique incident edges before cascade.
+                                    let mut incident: std::collections::HashSet<EdgeId> =
+                                        std::collections::HashSet::new();
+                                    incident.extend(graph.outgoing(*id));
+                                    incident.extend(graph.incoming(*id));
                                     m.delete_node(*id)?; // cascades edges
                                     deleted_nodes.insert(*id);
                                     stats.nodes_deleted += 1;
+                                    stats.edges_deleted += incident.len();
                                 }
                                 Some(BoundValue::Edge(id)) => {
                                     m.delete_edge(*id)?;

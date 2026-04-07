@@ -1075,3 +1075,161 @@ fn subquery_count_equality_check() {
         .unwrap();
     assert_eq!(arr.value(0), "Bob");
 }
+
+#[test]
+fn subquery_exists_with_starts_with_filter() {
+    use arrow::array::Array;
+    let g = setup_social_graph();
+    // STARTS WITH inside EXISTS: names starting with 'C' (Carol)
+    let result = QueryBuilder::new(
+        "MATCH (n:person) WHERE EXISTS { MATCH (n)-[:knows]->(m:person) WHERE m.name STARTS WITH 'C' } RETURN n.name AS name ORDER BY n.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Alice knows Carol, Bob knows Carol -- both should appear
+    assert_eq!(
+        result.row_count(),
+        2,
+        "STARTS WITH 'C' inside EXISTS should return 2 (Alice and Bob know Carol), got {}",
+        result.row_count()
+    );
+    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let arr = col
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), "Alice");
+    assert_eq!(arr.value(1), "Bob");
+}
+
+#[test]
+fn subquery_exists_department_employs_starts_with() {
+    // Test the exact scenario reported as failing:
+    // MATCH (d:Department) WHERE EXISTS { MATCH (d)-[:employs]->(p:Person) WHERE p.name STARTS WITH 'A' }
+    let mut g = SeleneGraph::new();
+    let mut m = g.mutate();
+
+    // 3 departments
+    let eng = m
+        .create_node(
+            LabelSet::from_strs(&["Department"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Engineering"))]),
+        )
+        .unwrap();
+    let sales = m
+        .create_node(
+            LabelSet::from_strs(&["Department"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Sales"))]),
+        )
+        .unwrap();
+    let hr = m
+        .create_node(
+            LabelSet::from_strs(&["Department"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("HR"))]),
+        )
+        .unwrap();
+
+    // People: some starting with 'A', some not
+    let alice = m
+        .create_node(
+            LabelSet::from_strs(&["Person"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Alice"))]),
+        )
+        .unwrap();
+    let alan = m
+        .create_node(
+            LabelSet::from_strs(&["Person"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Alan"))]),
+        )
+        .unwrap();
+    let bob = m
+        .create_node(
+            LabelSet::from_strs(&["Person"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Bob"))]),
+        )
+        .unwrap();
+    let carol = m
+        .create_node(
+            LabelSet::from_strs(&["Person"]),
+            PropertyMap::from_pairs(vec![(IStr::new("name"), Value::str("Carol"))]),
+        )
+        .unwrap();
+
+    // Engineering employs Alice and Alan (both start with A)
+    m.create_edge(eng, IStr::new("employs"), alice, PropertyMap::new())
+        .unwrap();
+    m.create_edge(eng, IStr::new("employs"), alan, PropertyMap::new())
+        .unwrap();
+    // Sales employs Bob only (does not start with A)
+    m.create_edge(sales, IStr::new("employs"), bob, PropertyMap::new())
+        .unwrap();
+    // HR employs Carol only (does not start with A)
+    m.create_edge(hr, IStr::new("employs"), carol, PropertyMap::new())
+        .unwrap();
+
+    let _ = (bob, carol); // suppress unused warnings
+    m.commit(0).unwrap();
+
+    // Only Engineering employs someone whose name STARTS WITH 'A'
+    let result = QueryBuilder::new(
+        "MATCH (d:Department) WHERE EXISTS { MATCH (d)-[:employs]->(p:Person) WHERE p.name STARTS WITH 'A' } RETURN d.name AS dname ORDER BY d.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+
+    assert_eq!(
+        result.row_count(),
+        1,
+        "Only Engineering should match (employs Alice and Alan who start with 'A'), got {}",
+        result.row_count()
+    );
+
+    // Verify CONTAINS works the same way in EXISTS for comparison
+    let result_contains = QueryBuilder::new(
+        "MATCH (d:Department) WHERE EXISTS { MATCH (d)-[:employs]->(p:Person) WHERE p.name CONTAINS 'A' } RETURN d.name AS dname ORDER BY d.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result_contains.row_count(),
+        1,
+        "CONTAINS 'A': only Engineering should match, got {}",
+        result_contains.row_count()
+    );
+
+    // Verify ENDS WITH works the same way in EXISTS for comparison
+    let result_ends = QueryBuilder::new(
+        "MATCH (d:Department) WHERE EXISTS { MATCH (d)-[:employs]->(p:Person) WHERE p.name ENDS WITH 'e' } RETURN d.name AS dname ORDER BY d.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result_ends.row_count(),
+        1,
+        "ENDS WITH 'e': only Engineering should match (Alice ends with 'e'), got {}",
+        result_ends.row_count()
+    );
+}
+
+#[test]
+fn subquery_exists_with_ends_with_filter() {
+    let g = setup_social_graph();
+    // ENDS WITH inside EXISTS: names ending with 'b' (Bob)
+    let result = QueryBuilder::new(
+        "MATCH (n:person) WHERE EXISTS { MATCH (n)-[:knows]->(m:person) WHERE m.name ENDS WITH 'b' } RETURN n.name AS name ORDER BY n.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Only Alice knows Bob, so 1 result
+    assert_eq!(
+        result.row_count(),
+        1,
+        "ENDS WITH 'b' inside EXISTS should return 1 (only Alice knows Bob), got {}",
+        result.row_count()
+    );
+}

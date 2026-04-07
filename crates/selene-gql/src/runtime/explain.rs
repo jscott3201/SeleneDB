@@ -345,15 +345,35 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
             format!("Subquery(pipeline=[{}])", inner.join("; "))
         }
         PipelineOp::For { var, .. } => format!("For({})", var.as_str()),
-        PipelineOp::ViewScan { view_name, yields } => {
-            let cols: Vec<String> = yields
-                .iter()
-                .map(|(name, alias)| match alias {
-                    Some(a) => format!("{name} AS {a}"),
-                    None => name.to_string(),
-                })
-                .collect();
-            format!("ViewScan({}, yields: [{}])", view_name, cols.join(", "))
+        PipelineOp::NestedMatch {
+            pattern_ops,
+            where_filter,
+        } => {
+            let ops: Vec<String> = pattern_ops.iter().map(|op| format!("{op:?}")).collect();
+            let where_part = if where_filter.is_some() {
+                " WHERE ..."
+            } else {
+                ""
+            };
+            format!("NestedMatch([{}]{})", ops.join(", "), where_part)
+        }
+        PipelineOp::ViewScan {
+            view_name,
+            yields,
+            yield_star,
+        } => {
+            if *yield_star {
+                format!("ViewScan({view_name}, yields: [*])")
+            } else {
+                let cols: Vec<String> = yields
+                    .iter()
+                    .map(|(name, alias)| match alias {
+                        Some(a) => format!("{name} AS {a}"),
+                        None => name.to_string(),
+                    })
+                    .collect();
+                format!("ViewScan({view_name}, yields: [{}])", cols.join(", "))
+            }
         }
     }
 }

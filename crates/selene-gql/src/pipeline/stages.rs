@@ -160,6 +160,12 @@ pub(crate) fn execute_pipeline_op(
                 "CALL { subquery } must be handled by the executor",
             ))
         }
+        PipelineOp::NestedMatch { .. } => {
+            // NestedMatch execution is handled by the main executor (needs graph access)
+            Err(GqlError::internal(
+                "NestedMatch must be handled by the executor",
+            ))
+        }
         PipelineOp::For { var, list_expr } => {
             let mut output = Vec::new();
             for binding in &bindings {
@@ -186,18 +192,26 @@ pub(crate) fn execute_pipeline_op(
             Ok(output)
         }
         PipelineOp::ViewScan {
-            view_name, yields, ..
+            view_name,
+            yields,
+            yield_star,
         } => {
             let provider = crate::runtime::procedures::view_provider::get_view_provider()?;
             let row = provider.read_view(view_name.as_str())?;
             let mut binding = Binding::empty();
-            for (col, alias) in yields {
-                let key = alias.unwrap_or(*col);
-                let val = row
-                    .iter()
-                    .find(|(k, _)| *k == *col)
-                    .map_or(GqlValue::Null, |(_, v)| v.clone());
-                binding.bind(key, BoundValue::Scalar(val));
+            if *yield_star {
+                for (col, val) in &row {
+                    binding.bind(*col, BoundValue::Scalar(val.clone()));
+                }
+            } else {
+                for (col, alias) in yields {
+                    let key = alias.unwrap_or(*col);
+                    let val = row
+                        .iter()
+                        .find(|(k, _)| *k == *col)
+                        .map_or(GqlValue::Null, |(_, v)| v.clone());
+                    binding.bind(key, BoundValue::Scalar(val));
+                }
             }
             Ok(vec![binding])
         }
@@ -955,7 +969,22 @@ fn execute_grouped_return(
     for binding in bindings {
         let key_values: Vec<GqlValue> = group_by
             .iter()
-            .map(|expr| eval_expr_ctx(expr, &binding, ctx))
+            .map(|expr| {
+                // If the GROUP BY expression is a variable name that matches a
+                // projection alias (e.g. `GROUP BY type` where `type` was
+                // defined via `s.type AS type`), evaluate the aliased expression
+                // rather than trying to look up the alias name as a binding
+                // variable, which would fail with "unbound variable".
+                let resolved_expr = if let Expr::Var(name) = expr {
+                    projections
+                        .iter()
+                        .find(|p| p.alias == *name)
+                        .map_or(expr, |p| &p.expr)
+                } else {
+                    expr
+                };
+                eval_expr_ctx(resolved_expr, &binding, ctx)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let key = GroupKey(key_values);
 
@@ -1406,6 +1435,155 @@ mod tests {
         match f1.get(&IStr::new("sensor_count")) {
             Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
             other => panic!("expected Int(2) for F1, got {other:?}"),
+        }
+    }
+
+    // ── RETURN (GROUP BY alias) ──
+
+    #[test]
+    fn return_group_by_projection_alias() {
+        // Simulates: WITH s.floor AS fl, count(s) AS cnt GROUP BY fl
+        // Before the fix, GROUP BY fl failed with "unbound variable 'fl'"
+        // because the alias name wasn't in the raw binding.
+        let g = test_graph();
+        let bindings = sensor_bindings();
+
+        let projections = vec![
+            PlannedProjection {
+                expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("floor")),
+                alias: IStr::new("fl"),
+            },
+            PlannedProjection {
+                expr: Expr::Function(FunctionCall {
+                    name: IStr::new("count"),
+                    args: vec![],
+                    count_star: true,
+                }),
+                alias: IStr::new("cnt"),
+            },
+        ];
+        // GROUP BY fl (uses the projection alias, not the raw expression)
+        let result = execute_return(
+            bindings,
+            &projections,
+            &[Expr::Var(IStr::new("fl"))],
+            false,
+            None,
+            &make_ctx(&g),
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 2); // F1 (2 sensors) and F2 (1 sensor)
+
+        let f1 = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("fl")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "F1"
+                )
+            })
+            .unwrap();
+        match f1.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
+            other => panic!("expected Int(2) for F1, got {other:?}"),
+        }
+
+        let f2 = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("fl")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "F2"
+                )
+            })
+            .unwrap();
+        match f2.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(1))) => {}
+            other => panic!("expected Int(1) for F2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn return_group_by_case_alias() {
+        // Simulates:
+        //   RETURN CASE WHEN s.temp >= 75.0 THEN 'hot' ELSE 'cool' END AS bucket,
+        //          count(*) AS cnt
+        //   GROUP BY bucket
+        //
+        // Before the fix, GROUP BY bucket failed with "unbound variable 'bucket'".
+        let g = test_graph();
+        let bindings = sensor_bindings(); // S1=72.5, S2=80.0, S3=68.0
+
+        let case_expr = Expr::Case {
+            branches: vec![(
+                Expr::Compare(
+                    Box::new(Expr::Property(
+                        Box::new(Expr::Var(IStr::new("s"))),
+                        IStr::new("temp"),
+                    )),
+                    CompareOp::Gte,
+                    Box::new(Expr::Literal(GqlValue::Float(75.0))),
+                ),
+                Expr::Literal(GqlValue::String("hot".into())),
+            )],
+            else_expr: Some(Box::new(Expr::Literal(GqlValue::String("cool".into())))),
+        };
+
+        let projections = vec![
+            PlannedProjection {
+                expr: case_expr,
+                alias: IStr::new("bucket"),
+            },
+            PlannedProjection {
+                expr: Expr::Function(FunctionCall {
+                    name: IStr::new("count"),
+                    args: vec![],
+                    count_star: true,
+                }),
+                alias: IStr::new("cnt"),
+            },
+        ];
+        // GROUP BY bucket (alias for the CASE expression)
+        let result = execute_return(
+            bindings,
+            &projections,
+            &[Expr::Var(IStr::new("bucket"))],
+            false,
+            None,
+            &make_ctx(&g),
+        )
+        .unwrap();
+
+        // S2(80.0) => 'hot', S1(72.5) + S3(68.0) => 'cool'
+        assert_eq!(result.len(), 2);
+
+        let hot = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("bucket")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "hot"
+                )
+            })
+            .unwrap();
+        match hot.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(1))) => {}
+            other => panic!("expected Int(1) for 'hot', got {other:?}"),
+        }
+
+        let cool = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("bucket")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "cool"
+                )
+            })
+            .unwrap();
+        match cool.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
+            other => panic!("expected Int(2) for 'cool', got {other:?}"),
         }
     }
 

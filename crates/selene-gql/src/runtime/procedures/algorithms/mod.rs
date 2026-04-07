@@ -22,7 +22,7 @@ pub(crate) use structural::{
     GraphWcc,
 };
 
-use selene_algorithms::{ProjectionCatalog, ProjectionConfig};
+use selene_algorithms::ProjectionCatalog;
 use selene_core::IStr;
 use selene_graph::SeleneGraph;
 
@@ -88,16 +88,10 @@ fn get_projection_or_build(
 ) -> Result<String, GqlError> {
     let name = extract_name(args, 0, "algorithm")?;
 
-    // If projection doesn't exist, build a default "all" projection with that name
-    if !catalog.read().contains(&name) {
-        let config = ProjectionConfig {
-            name: name.clone(),
-            node_labels: vec![],
-            edge_labels: vec![],
-            weight_property: None,
-        };
-        catalog.write().project(graph, &config, None);
-    }
+    // Ensure the projection exists and is fresh. If it was created by
+    // graph.project() but the graph mutated since, rebuild it from its
+    // original config so the user's label/edge filters are preserved.
+    catalog.write().ensure_fresh(graph, &name);
 
     Ok(name)
 }

@@ -902,6 +902,23 @@ fn execute_plan_inner(
                 )?;
                 chunk = Some(join::bindings_to_chunk_generic(&result));
             }
+            // NestedMatch: correlated MATCH after WITH -- run pattern ops seeded
+            // by each input binding and merge results.
+            PipelineOp::NestedMatch {
+                pattern_ops: nested_ops,
+                where_filter,
+            } => {
+                let bindings = c.to_bindings();
+                let result = execute_nested_match(
+                    bindings,
+                    nested_ops,
+                    where_filter.as_ref(),
+                    graph,
+                    scope,
+                    Some(&ctx),
+                )?;
+                chunk = Some(join::bindings_to_chunk_generic(&result));
+            }
             // ViewScan: read materialized view state via provider
             PipelineOp::ViewScan { .. } => {
                 let bindings = c.to_bindings();
@@ -1079,7 +1096,7 @@ mod pattern;
 use arrow_io::{
     apply_set_op, infer_schema_from_bindings, materialize_chunk_to_arrow, materialize_to_arrow,
 };
-use call::{execute_call, execute_subquery};
+use call::{execute_call, execute_nested_match, execute_subquery};
 use mutation::{count_mutation, execute_mutations_write};
 use mutation_txn::execute_single_mutation_in_txn;
 use pattern::{execute_pattern_ops_as_chunk_with_ctx, execute_pattern_ops_with_csr_and_ctx};

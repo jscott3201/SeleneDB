@@ -323,10 +323,22 @@ pub enum PipelineOp {
     /// FOR var IN expr -- unwind list to rows.
     For { var: IStr, list_expr: Expr },
 
+    /// MATCH following a WITH -- correlated pattern expansion seeded by prior bindings.
+    ///
+    /// Generated when a MATCH appears after a WITH clause. At execution time, the
+    /// pattern ops are run per-binding using the WITH output as seeds. Variables
+    /// already present in the seed binding short-circuit their LabelScan (correlated
+    /// path). An optional WHERE filter from the MATCH clause is applied after expansion.
+    NestedMatch {
+        pattern_ops: Vec<PatternOp>,
+        where_filter: Option<Expr>,
+    },
+
     /// Read materialized view state (produced by MATCH VIEW ... YIELD).
     ViewScan {
         view_name: IStr,
         yields: Vec<(IStr, Option<IStr>)>, // (column_name, alias)
+        yield_star: bool,
     },
 }
 
