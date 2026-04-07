@@ -390,3 +390,33 @@ fn yield_explicit_column_still_works() {
         .unwrap();
     assert!(result.row_count() > 0);
 }
+
+// ── GROUP BY expression tests ──
+
+#[test]
+fn group_by_property_expression() {
+    let g = setup_graph();
+    // Group by sensor name property expression
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) RETURN s.name AS name, count(*) AS cnt GROUP BY s.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Each sensor has a unique name, so one group per sensor
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn group_by_variable_still_works() {
+    let g = setup_graph();
+    // Use a LET-bound variable so it exists before RETURN
+    let result = QueryBuilder::new(
+        "MATCH (n) LET t = n.name RETURN t, count(*) AS cnt GROUP BY t",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Each node has a unique name, so one group per node
+    assert!(result.row_count() >= 3);
+}

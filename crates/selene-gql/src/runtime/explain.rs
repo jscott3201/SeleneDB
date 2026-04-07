@@ -302,7 +302,7 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
                 format!("Return({})", cols.join(", "))
             };
             if !group_by.is_empty() {
-                let gk: Vec<&str> = group_by.iter().map(|g| g.as_str()).collect();
+                let gk: Vec<String> = group_by.iter().map(|g| format!("{g:?}")).collect();
                 let _ = write!(s, ", GROUP BY [{}]", gk.join(", "));
             }
             if having.is_some() {
@@ -323,7 +323,7 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
             let cols: Vec<&str> = projections.iter().map(|p| p.alias.as_str()).collect();
             let mut s = format!("With({})", cols.join(", "));
             if !group_by.is_empty() {
-                let gk: Vec<&str> = group_by.iter().map(|g| g.as_str()).collect();
+                let gk: Vec<String> = group_by.iter().map(|g| format!("{g:?}")).collect();
                 let _ = write!(s, ", GROUP BY [{}]", gk.join(", "));
             }
             if having.is_some() {

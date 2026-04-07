@@ -293,7 +293,7 @@ pub enum PipelineOp {
     /// RETURN -- terminal projection with optional GROUP BY + HAVING.
     Return {
         projections: Vec<PlannedProjection>,
-        group_by: Vec<IStr>,
+        group_by: Vec<Expr>,
         distinct: bool,
         having: Option<Expr>,
         /// RETURN * -- project all bound variables (projections will be empty).
@@ -305,7 +305,7 @@ pub enum PipelineOp {
     /// Only projected variables survive into subsequent pipeline stages.
     With {
         projections: Vec<PlannedProjection>,
-        group_by: Vec<IStr>,
+        group_by: Vec<Expr>,
         distinct: bool,
         having: Option<Expr>,
         where_filter: Option<Expr>,

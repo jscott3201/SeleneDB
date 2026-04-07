@@ -311,8 +311,8 @@ pub struct ReturnClause {
     pub all: bool,
     /// Column projections (empty when all=true).
     pub projections: Vec<Projection>,
-    /// GROUP BY variable names.
-    pub group_by: Vec<IStr>,
+    /// GROUP BY expressions (variables, property access, etc.).
+    pub group_by: Vec<Expr>,
     /// HAVING condition -- post-aggregation filter.
     pub having: Option<Expr>,
     /// RETURN-level ORDER BY -- only populated by SELECT desugaring.
@@ -329,7 +329,7 @@ pub struct ReturnClause {
 pub struct WithClause {
     pub distinct: bool,
     pub projections: Vec<Projection>,
-    pub group_by: Vec<IStr>,
+    pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
     /// Optional WHERE filter applied after projection.
     pub where_filter: Option<Expr>,

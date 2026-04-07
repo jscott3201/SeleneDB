@@ -53,6 +53,7 @@ pub(crate) fn parse_raw(input: &str) -> Result<pest::iterators::Pairs<'_, Rule>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::expr::Expr;
     use crate::ast::mutation::InsertElement;
 
     /// Helper: parse and verify success.
@@ -579,7 +580,7 @@ mod tests {
                     })
                     .unwrap();
                 assert_eq!(ret.group_by.len(), 1);
-                assert_eq!(ret.group_by[0].as_str(), "NAME");
+                assert!(matches!(&ret.group_by[0], Expr::Var(n) if n.as_str() == "NAME"));
                 assert_eq!(ret.projections.len(), 2);
             }
             _ => panic!("expected Query"),

@@ -84,24 +84,16 @@ fn build_order_term(pair: Pair<'_, Rule>) -> Result<OrderTerm, GqlError> {
 
 // ── GROUP BY ──────────────────────────────────────────────────────
 
-/// Parse a GROUP BY clause into a list of variable names.
+/// Parse a GROUP BY clause into a list of expressions.
 ///
 /// Shared by `build_return`, `build_with`, and `build_select`.
-pub(in crate::parser) fn build_group_by(pair: Pair<'_, Rule>) -> Result<Vec<IStr>, GqlError> {
+pub(in crate::parser) fn build_group_by(pair: Pair<'_, Rule>) -> Result<Vec<Expr>, GqlError> {
     let mut keys = Vec::new();
     for gb_inner in pair.into_inner() {
         match gb_inner.as_rule() {
-            Rule::ident => keys.push(intern_var(gb_inner)),
+            Rule::ident => keys.push(Expr::Var(intern_var(gb_inner))),
             Rule::group_by_item => {
-                let expr = build_expr(first_inner(gb_inner)?)?;
-                match &expr {
-                    Expr::Var(name) => keys.push(*name),
-                    _ => {
-                        return Err(GqlError::parse_error(
-                            "GROUP BY currently supports variable names only, not expressions",
-                        ));
-                    }
-                }
+                keys.push(build_expr(first_inner(gb_inner)?)?);
             }
             _ => {}
         }

@@ -370,17 +370,6 @@ pub(crate) fn trilean_to_value(t: Trilean) -> GqlValue {
 
 // ── Variable resolution ────────────────────────────────────────────
 
-/// Resolve a variable to a GqlValue. Used by GROUP BY key extraction.
-/// Resolves Node/Edge properties to their values, scalars directly.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn resolve_var_as_value(
-    name: &IStr,
-    binding: &Binding,
-    _ctx: &EvalContext<'_>,
-) -> Result<GqlValue, GqlError> {
-    resolve_var(*name, binding)
-}
-
 /// Resolve a variable name from a binding.
 fn resolve_var(name: IStr, binding: &Binding) -> Result<GqlValue, GqlError> {
     match binding.get(&name) {

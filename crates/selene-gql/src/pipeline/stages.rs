@@ -828,7 +828,7 @@ fn execute_return_all(
 fn execute_return(
     bindings: Vec<Binding>,
     projections: &[PlannedProjection],
-    group_by: &[IStr],
+    group_by: &[Expr],
     distinct: bool,
     having: Option<&Expr>,
     ctx: &EvalContext<'_>,
@@ -919,7 +919,7 @@ fn execute_aggregate_return(
 fn execute_grouped_return(
     bindings: Vec<Binding>,
     projections: &[PlannedProjection],
-    group_by: &[IStr],
+    group_by: &[Expr],
     ctx: &EvalContext<'_>,
 ) -> Result<Vec<Binding>, GqlError> {
     use std::hash::{Hash, Hasher};
@@ -955,7 +955,7 @@ fn execute_grouped_return(
     for binding in bindings {
         let key_values: Vec<GqlValue> = group_by
             .iter()
-            .map(|var| eval::resolve_var_as_value(var, &binding, ctx))
+            .map(|expr| eval_expr_ctx(expr, &binding, ctx))
             .collect::<Result<Vec<_>, _>>()?;
         let key = GroupKey(key_values);
 
@@ -1385,7 +1385,7 @@ mod tests {
         let result = execute_return(
             bindings,
             &projections,
-            &[IStr::new("floor_name")],
+            &[Expr::Var(IStr::new("floor_name"))],
             false,
             None,
             &make_ctx(&g),
