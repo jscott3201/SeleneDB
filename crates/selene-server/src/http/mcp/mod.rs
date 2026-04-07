@@ -118,8 +118,6 @@ pub struct SeleneTools {
     pub(crate) state: Arc<ServerState>,
     /// Auth context for this MCP session (resolved at session creation).
     pub(crate) auth: AuthContext,
-    /// Use compact (minified) JSON in tool responses for LLM token savings.
-    pub(crate) compact: bool,
     /// Tool dispatch router (built once per session by the `#[tool_router]` macro).
     tool_router: ToolRouter<Self>,
     /// Prompt dispatch router.
@@ -181,7 +179,6 @@ impl SeleneTools {
         Self {
             state,
             auth,
-            compact: format::is_compact_enabled(),
             tool_router: Self::build_tool_router(),
             prompt_router: Self::build_prompt_router(),
             log_level: Arc::new(tokio::sync::Mutex::new(LoggingLevel::Warning)),

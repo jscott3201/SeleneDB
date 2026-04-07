@@ -128,7 +128,6 @@ impl SeleneTools {
         let node = ops::nodes::get_node(&self.state, &auth, params.0.id).map_err(op_err)?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &node,
-            self.compact,
         ))]))
     }
 
@@ -157,7 +156,6 @@ impl SeleneTools {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &node,
-            self.compact,
         ))]))
     }
 
@@ -209,7 +207,6 @@ impl SeleneTools {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &node,
-            self.compact,
         ))]))
     }
 
@@ -251,7 +248,6 @@ impl SeleneTools {
                 "nodes": result.nodes,
                 "total": result.total,
             }),
-            self.compact,
         ))]))
     }
 
@@ -287,7 +283,6 @@ impl SeleneTools {
                 "incoming": result.incoming,
                 "total": result.total,
             }),
-            self.compact,
         ))]))
     }
 
@@ -302,7 +297,6 @@ impl SeleneTools {
         let edge = ops::edges::get_edge(&self.state, &auth, params.0.id).map_err(op_err)?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &edge,
-            self.compact,
         ))]))
     }
 
@@ -328,7 +322,6 @@ impl SeleneTools {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &edge,
-            self.compact,
         ))]))
     }
 
@@ -366,7 +359,6 @@ impl SeleneTools {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &edge,
-            self.compact,
         ))]))
     }
 
@@ -408,7 +400,6 @@ impl SeleneTools {
                 "edges": result.edges,
                 "total": result.total,
             }),
-            self.compact,
         ))]))
     }
 
@@ -490,7 +481,6 @@ impl SeleneTools {
             .map_err(op_err)?;
             return Ok(CallToolResult::success(vec![Content::text(format_json(
                 &samples,
-                self.compact,
             ))]));
         }
 
@@ -590,7 +580,6 @@ impl SeleneTools {
 
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &resp,
-            self.compact,
         ))]))
     }
 
@@ -604,7 +593,6 @@ impl SeleneTools {
         let resp = ops::health::health(&self.state);
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &resp,
-            self.compact,
         ))]))
     }
 
@@ -616,7 +604,6 @@ impl SeleneTools {
         let info = crate::ops::info::server_info(&self.state);
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &info,
-            self.compact,
         ))]))
     }
 
@@ -634,7 +621,6 @@ impl SeleneTools {
                 "node_labels": stats.node_labels,
                 "edge_labels": stats.edge_labels,
             }),
-            self.compact,
         ))]))
     }
 
@@ -652,7 +638,6 @@ impl SeleneTools {
         let graph = ops::reactflow::export_reactflow(&self.state, &auth, params.0.label.as_deref());
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &graph,
-            self.compact,
         ))]))
     }
 
@@ -933,7 +918,7 @@ impl SeleneTools {
             "Semantic search for '{}': {} results\n{}",
             p.query_text,
             enriched.len(),
-            format_json(&enriched, self.compact)
+            format_json(&enriched)
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -1010,7 +995,7 @@ impl SeleneTools {
             if include_path && let Some(path) = self.containment_path(&auth, node.id) {
                 val["containment_path"] = serde_json::Value::String(path);
             }
-            CallToolResult::success(vec![Content::text(format_json(&val, self.compact))])
+            CallToolResult::success(vec![Content::text(format_json(&val))])
         };
 
         // Strategy 1: Parse as numeric ID
@@ -1121,7 +1106,6 @@ impl SeleneTools {
                     "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
                     "suggestions": suggestions,
                 }),
-                self.compact,
             ))]));
         }
 
@@ -1130,7 +1114,6 @@ impl SeleneTools {
                 "error": "not_found",
                 "message": format!("Could not resolve '{}'", p.identifier),
             }),
-            self.compact,
         ))]))
     }
 
@@ -1168,7 +1151,6 @@ impl SeleneTools {
                 "incoming": edge_result.incoming,
                 "total_edges": edge_result.total,
             }),
-            self.compact,
         ))]))
     }
 
@@ -1261,7 +1243,6 @@ impl SeleneTools {
                 });
                 Ok(CallToolResult::success(vec![Content::text(format_json(
                     &result,
-                    self.compact,
                 ))]))
             }
             Err(e) => {
@@ -1289,7 +1270,6 @@ impl SeleneTools {
 
                 Ok(CallToolResult::success(vec![Content::text(format_json(
                     &result,
-                    self.compact,
                 ))]))
             }
         }

@@ -39,7 +39,6 @@ pub(super) async fn list_schemas_impl(tools: &SeleneTools) -> Result<CallToolRes
                 })
             }).collect::<Vec<_>>(),
         }),
-        tools.compact,
     ))]))
 }
 
@@ -57,7 +56,6 @@ pub(super) async fn get_schema_impl(
                 "type": "node",
                 "schema": schema,
             }),
-            tools.compact,
         ))]));
     }
 
@@ -68,7 +66,6 @@ pub(super) async fn get_schema_impl(
             "type": "edge",
             "schema": schema,
         }),
-        tools.compact,
     ))]))
 }
 
@@ -264,7 +261,6 @@ pub(super) async fn export_schemas_impl(tools: &SeleneTools) -> Result<CallToolR
 
     Ok(CallToolResult::success(vec![Content::text(format_json(
         &export,
-        tools.compact,
     ))]))
 }
 
