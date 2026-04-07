@@ -34,8 +34,20 @@ pub(super) async fn build_communities_impl(
 
     // 2. MERGE __CommunitySummary nodes via parameterized GQL
     let community_count = communities.len();
+    let total_f64 = community_count as f64;
     let mut total_nodes_covered = 0usize;
-    for community in &communities {
+    for (i, community) in communities.iter().enumerate() {
+        tools
+            .send_progress(
+                i as f64,
+                Some(total_f64),
+                Some(&format!(
+                    "Processing community {}/{}",
+                    i + 1,
+                    community_count
+                )),
+            )
+            .await;
         total_nodes_covered += community.node_count;
         let mut params_map = HashMap::new();
         params_map.insert("cid".into(), Value::UInt(community.community_id));
@@ -116,8 +128,17 @@ pub(super) async fn enrich_communities_impl(
     let data_str = result.data_json.unwrap_or_else(|| "[]".to_string());
     let rows: Vec<serde_json::Value> = serde_json::from_str(&data_str).unwrap_or_default();
 
+    let row_count = rows.len();
+    let total_f64 = row_count as f64;
     let mut enriched = 0u64;
-    for row in &rows {
+    for (i, row) in rows.iter().enumerate() {
+        tools
+            .send_progress(
+                i as f64,
+                Some(total_f64),
+                Some(&format!("Enriching community {}/{row_count}", i + 1)),
+            )
+            .await;
         let node_id = row
             .get("node_id")
             .and_then(|v| v.as_i64())

@@ -131,6 +131,9 @@ pub struct SeleneTools {
     subscribed_uris: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Embedder-registered custom tools (checked after the static router).
     custom_tools: Arc<Vec<Box<dyn CustomMcpTool>>>,
+    /// Progress token for the current in-flight tool call.
+    /// Set in `call_tool` from `request.meta`, cleared after dispatch.
+    progress_token: Arc<tokio::sync::Mutex<Option<rmcp::model::ProgressToken>>>,
 }
 
 /// Return the auth context for the current MCP session.
@@ -141,6 +144,31 @@ pub struct SeleneTools {
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn mcp_auth(tools: &SeleneTools) -> Result<AuthContext, McpError> {
     Ok(tools.auth.clone())
+}
+
+impl SeleneTools {
+    /// Send a progress notification for the current tool call.
+    /// No-op if the client did not send a `progressToken` in `_meta`.
+    pub(crate) async fn send_progress(
+        &self,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<&str>,
+    ) {
+        let token = self.progress_token.lock().await.clone();
+        let Some(token) = token else { return };
+        let peer_guard = self.peer.lock().await;
+        let Some(peer) = peer_guard.as_ref() else { return };
+        let mut param =
+            rmcp::model::ProgressNotificationParam::new(token, progress);
+        if let Some(t) = total {
+            param = param.with_total(t);
+        }
+        if let Some(m) = message {
+            param = param.with_message(m);
+        }
+        let _ = peer.notify_progress(param).await;
+    }
 }
 
 pub(crate) fn op_err(e: ops::OpError) -> McpError {
@@ -185,6 +213,7 @@ impl SeleneTools {
             peer: Arc::new(tokio::sync::Mutex::new(None)),
             subscribed_uris: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             custom_tools,
+            progress_token: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -291,8 +320,14 @@ impl rmcp::ServerHandler for SeleneTools {
             let ct = context.ct.clone();
             let tool_name = request.name.clone();
             let tool_args = request.arguments.clone();
+            // Extract progress token from _meta before the request is consumed.
+            let progress_token = request
+                .meta
+                .as_ref()
+                .and_then(|m| m.get_progress_token());
+            *self.progress_token.lock().await = progress_token;
             let tool_context = ToolCallContext::new(self, request, context);
-            tokio::select! {
+            let result = tokio::select! {
                 result = self.tool_router.call(tool_context) => {
                     match result {
                         // Static router handled it.
@@ -313,7 +348,9 @@ impl rmcp::ServerHandler for SeleneTools {
                     message: "request cancelled by client".into(),
                     data: None,
                 }),
-            }
+            };
+            *self.progress_token.lock().await = None;
+            result
         }
     }
 
