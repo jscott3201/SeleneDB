@@ -43,11 +43,123 @@ pub(crate) fn parse_raw(input: &str) -> Result<pest::iterators::Pairs<'_, Rule>,
             pest::error::LineColLocation::Pos((l, c)) => (l, c),
             pest::error::LineColLocation::Span((l, c), _) => (l, c),
         };
+        let mut message = e.to_string();
+        // Detect reserved keyword usage and add a helpful hint.
+        if col > 0 {
+            let rest = &input[col.saturating_sub(1)..];
+            let word: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !word.is_empty() && is_reserved_keyword(&word) {
+                message = format!(
+                    "{message}\n\nHint: '{word}' is a reserved keyword. \
+                     Use backticks to escape it: `{word}`"
+                );
+            }
+        }
         GqlError::Parse {
-            message: e.to_string(),
+            message,
             position: Some((line, col)),
         }
     })
+}
+
+/// Check if a word is a GQL reserved keyword (case-insensitive).
+fn is_reserved_keyword(word: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "MATCH",
+        "RETURN",
+        "FILTER",
+        "WHERE",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "GROUP",
+        "LET",
+        "SET",
+        "DELETE",
+        "INSERT",
+        "REMOVE",
+        "MERGE",
+        "CALL",
+        "YIELD",
+        "AS",
+        "FINISH",
+        "DETACH",
+        "FOR",
+        "AND",
+        "OR",
+        "NOT",
+        "XOR",
+        "IN",
+        "IS",
+        "EXISTS",
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "UNKNOWN",
+        "WALK",
+        "TRAIL",
+        "ACYCLIC",
+        "SIMPLE",
+        "OPTIONAL",
+        "SHORTEST",
+        "DISTINCT",
+        "ASC",
+        "DESC",
+        "START",
+        "COMMIT",
+        "ROLLBACK",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "OTHERWISE",
+        "NEXT",
+        "CAST",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "COUNT",
+        "SUM",
+        "AVERAGE",
+        "AVG",
+        "WITH",
+        "HAVING",
+        "UNWIND",
+        "NULLS",
+        "CREATE",
+        "DROP",
+        "GRANT",
+        "REVOKE",
+        "SELECT",
+        "FROM",
+        "DIRECTED",
+        "LABELED",
+        "RECORD",
+        "NORMALIZED",
+        "DAY",
+        "HOUR",
+        "MINUTE",
+        "SECOND",
+        "MONTH",
+        "YEAR",
+        "BETWEEN",
+        "LIKE",
+        "ARRAY",
+        "BINDING",
+        "CONNECTING",
+        "DIFFERENT",
+        "KEEP",
+        "ONLY",
+        "MATERIALIZED",
+        "VIEW",
+        "VIEWS",
+    ];
+    let upper = word.to_uppercase();
+    KEYWORDS.iter().any(|k| *k == upper)
 }
 
 #[cfg(test)]
@@ -1197,5 +1309,27 @@ mod tests {
     #[test]
     fn literal_limit_still_works() {
         parse_ok("MATCH (n) RETURN n LIMIT 10");
+    }
+
+    // ── Reserved keyword error hints ──
+
+    #[test]
+    fn reserved_keyword_label_gives_hint() {
+        let result = parse_statement("INSERT (:Commit {msg: 'test'})");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("reserved keyword"),
+            "error should hint about reserved keyword: {err}"
+        );
+        assert!(
+            err.contains("`Commit`"),
+            "error should suggest backtick escaping: {err}"
+        );
+    }
+
+    #[test]
+    fn backtick_escaped_keyword_works() {
+        parse_ok("INSERT (:`Commit` {msg: 'test'})");
     }
 }

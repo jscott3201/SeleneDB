@@ -68,10 +68,11 @@ pub(in crate::http) async fn gql_query(
             .map(|(k, v)| (k.clone(), json_to_value(v.clone())))
             .collect::<HashMap<String, Value>>()
     });
-    let query = body.query.clone();
     let explain = body.explain;
     let profile = body.profile;
     let timeout_ms = body.timeout_ms;
+
+    let query = body.query.clone();
 
     // Content negotiation: Arrow IPC for clients that request it.
     let use_arrow = headers
@@ -83,6 +84,18 @@ pub(in crate::http) async fn gql_query(
     } else {
         ops::gql::ResultFormat::Json
     };
+
+    // Multi-statement support: split on semicolons, execute each in sequence.
+    if query.contains(';') {
+        let statements: Vec<&str> = query
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if statements.len() > 1 {
+            return execute_batch(state, auth, &statements, params.as_ref(), format).await;
+        }
+    }
 
     // Classify the query: read-only queries bypass the mutation batcher for
     // lower latency (no serialization behind writes). Mutations and DDL
@@ -267,4 +280,119 @@ pub(in crate::http) async fn graph_stats(
             "edge_labels": stats.edge_labels,
         })),
     )
+}
+
+// ── Multi-statement batch execution ─────────────────────────────────
+
+/// Execute semicolon-separated GQL statements in sequence.
+/// Returns a JSON array of results (one per statement).
+/// Aborts on first error and returns partial results + error.
+async fn execute_batch(
+    state: Arc<ServerState>,
+    auth: crate::auth::handshake::AuthContext,
+    statements: &[&str],
+    params: Option<&HashMap<String, Value>>,
+    format: ops::gql::ResultFormat,
+) -> axum::response::Response {
+    let mut results = Vec::with_capacity(statements.len());
+
+    for (i, stmt) in statements.iter().enumerate() {
+        let query = (*stmt).to_string();
+        let needs_batcher = is_gql_write(&query);
+
+        let result = if needs_batcher {
+            let st = Arc::clone(&state);
+            let auth2 = auth.clone();
+            let params2 = params.cloned();
+            let batcher_result = state
+                .mutation_batcher
+                .submit(move || {
+                    ops::gql::execute_gql(
+                        &st,
+                        &auth2,
+                        &query,
+                        params2.as_ref(),
+                        false,
+                        false,
+                        format,
+                    )
+                })
+                .await;
+            match batcher_result {
+                Ok(r) => r,
+                Err(e) => {
+                    results.push(serde_json::json!({
+                        "statement": i,
+                        "status": "XX000",
+                        "message": e.to_string(),
+                    }));
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "batch": true,
+                            "total": statements.len(),
+                            "completed": i,
+                            "results": results,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            ops::gql::execute_gql(&state, &auth, &query, params, false, false, format)
+        };
+
+        match result {
+            Ok(r) => {
+                results.push(serde_json::json!({
+                    "statement": i,
+                    "status": r.status_code,
+                    "message": r.message,
+                    "row_count": r.row_count,
+                    "data": r.data_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).unwrap_or(serde_json::Value::Array(vec![])),
+                }));
+                // Abort on error status
+                if !r.status_code.starts_with("00") && !r.status_code.starts_with("0A") {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "batch": true,
+                            "total": statements.len(),
+                            "completed": i,
+                            "results": results,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "statement": i,
+                    "status": "XX000",
+                    "message": e.to_string(),
+                }));
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "batch": true,
+                        "total": statements.len(),
+                        "completed": i,
+                        "results": results,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "batch": true,
+            "total": statements.len(),
+            "completed": statements.len(),
+            "results": results,
+        })),
+    )
+        .into_response()
 }

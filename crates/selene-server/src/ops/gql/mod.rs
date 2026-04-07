@@ -29,6 +29,7 @@ use routing::{
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Result format for GQL output.
+#[derive(Clone, Copy)]
 pub enum ResultFormat {
     Json,
     ArrowIpc,
