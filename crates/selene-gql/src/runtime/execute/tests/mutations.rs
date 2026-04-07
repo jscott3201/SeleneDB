@@ -367,3 +367,26 @@ fn merge_idempotent_returns_same_id() {
     assert_eq!(r1.batches[0].num_rows(), 1);
     assert_eq!(r2.batches[0].num_rows(), 1);
 }
+
+// ── INSERT properties_set counter ──
+
+#[test]
+fn insert_node_counts_inline_properties() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("INSERT (n:Test {a: 1, b: 2, c: 3})")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+    assert_eq!(result.mutations.properties_set, 3);
+}
+
+#[test]
+fn insert_path_counts_node_and_edge_properties() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("INSERT (a:X {x: 1})-[:R {w: 5}]->(b:Y {y: 2})")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 2);
+    assert_eq!(result.mutations.edges_created, 1);
+    assert_eq!(result.mutations.properties_set, 3);
+}

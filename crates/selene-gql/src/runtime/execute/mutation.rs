@@ -142,6 +142,7 @@ pub(super) fn walk_insert_paths(
                                 binding_ref,
                             )
                             .map_err(to_graph_err)?;
+                            stats.properties_set += props.len();
                             let id = m.create_node(ls, props)?;
                             var_map.insert(*v, id);
                             stats.nodes_created += 1;
@@ -155,6 +156,7 @@ pub(super) fn walk_insert_paths(
                             binding_ref,
                         )
                         .map_err(to_graph_err)?;
+                        stats.properties_set += props.len();
                         let id = m.create_node(ls, props)?;
                         stats.nodes_created += 1;
                         id
@@ -193,6 +195,7 @@ pub(super) fn walk_insert_paths(
                                     binding_ref,
                                 )
                                 .map_err(to_graph_err)?;
+                                stats.properties_set += props.len();
                                 let id = m.create_node(ls, props)?;
                                 var_map.insert(*v, id);
                                 stats.nodes_created += 1;
@@ -206,6 +209,7 @@ pub(super) fn walk_insert_paths(
                                 binding_ref,
                             )
                             .map_err(to_graph_err)?;
+                            stats.properties_set += props.len();
                             let id = m.create_node(ls, props)?;
                             stats.nodes_created += 1;
                             id
@@ -224,6 +228,7 @@ pub(super) fn walk_insert_paths(
                             binding_ref,
                         )
                         .map_err(to_graph_err)?;
+                        stats.properties_set += edge_props.len();
                         let eid = m.create_edge(s, edge_label, t, edge_props)?;
                         stats.edges_created += 1;
                         if let Some(ev) = var {
