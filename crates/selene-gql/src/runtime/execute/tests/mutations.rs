@@ -337,3 +337,33 @@ fn insert_single_label_still_works() {
         .unwrap();
     assert_eq!(result.mutations.nodes_created, 1);
 }
+
+// ── MERGE RETURN binding tests ──
+
+#[test]
+fn merge_return_id() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("MERGE (n:TestLabel {name: 'Alice'}) RETURN id(n) AS id")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+    assert_eq!(result.batches[0].num_rows(), 1);
+}
+
+#[test]
+fn merge_idempotent_returns_same_id() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let r1 = MutationBuilder::new("MERGE (n:TestLabel {name: 'Alice'}) RETURN id(n) AS id")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(r1.mutations.nodes_created, 1);
+
+    let r2 = MutationBuilder::new("MERGE (n:TestLabel {name: 'Alice'}) RETURN id(n) AS id")
+        .execute(&shared)
+        .unwrap();
+    // Second MERGE should find existing node, not create
+    assert_eq!(r2.mutations.nodes_created, 0);
+    // Both should return the same ID
+    assert_eq!(r1.batches[0].num_rows(), 1);
+    assert_eq!(r2.batches[0].num_rows(), 1);
+}

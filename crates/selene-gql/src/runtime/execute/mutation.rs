@@ -556,7 +556,7 @@ pub(super) fn execute_mutations_write(
                             }
                         }
                     }
-                    MutationOp::Merge { labels, properties, on_create, on_match } => {
+                    MutationOp::Merge { var, labels, properties, on_create, on_match } => {
                         // Try to find existing node matching labels + properties
                         let label_set = LabelSet::from_strs(
                             &labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
@@ -606,7 +606,9 @@ pub(super) fn execute_mutations_write(
                             })
                         };
 
+                        let result_node_id;
                         if let Some(node_id) = existing {
+                            result_node_id = node_id;
                             // ON MATCH: apply property sets
                             for (_target, prop, expr) in on_match {
                                 let val =
@@ -621,7 +623,7 @@ pub(super) fn execute_mutations_write(
                             }
                         } else {
                             // CREATE: insert new node with properties
-                            let node_id = m.create_node(label_set, match_props)?;
+                            result_node_id = m.create_node(label_set, match_props)?;
                             stats.nodes_created += 1;
                             // ON CREATE: apply additional property sets
                             for (_target, prop, expr) in on_create {
@@ -632,9 +634,13 @@ pub(super) fn execute_mutations_write(
                                     Value::try_from(&val).map_err(to_graph_err)?;
                                 let sv =
                                     maybe_intern_value(m.graph(), &label_slice, *prop, sv);
-                                m.set_property(node_id, *prop, sv)?;
+                                m.set_property(result_node_id, *prop, sv)?;
                                 stats.properties_set += 1;
                             }
+                        }
+                        // Bind variable for RETURN clause access
+                        if let Some(var_name) = var {
+                            node_var_map.insert(*var_name, result_node_id);
                         }
                     }
                 }

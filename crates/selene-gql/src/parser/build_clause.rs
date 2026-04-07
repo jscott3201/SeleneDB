@@ -390,6 +390,7 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
         // are all handled directly in build_mutation_pipeline (multi-item expansion).
         // Only merge_op and fallback cases reach this function.
         Rule::merge_op => {
+            let mut merge_var: Option<IStr> = None;
             let mut labels = Vec::new();
             let mut properties = Vec::new();
             let mut on_create = Vec::new();
@@ -400,6 +401,9 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                     Rule::node_pattern => {
                         for np in inner.into_inner() {
                             match np.as_rule() {
+                                Rule::node_var => {
+                                    merge_var = Some(intern_var(first_inner(np)?));
+                                }
                                 Rule::label_expr => {
                                     if let Ok(le) = build_label_expr(np) {
                                         collect_label_names(&le, &mut labels);
@@ -459,6 +463,7 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                 }
             }
             Ok(MutationOp::Merge {
+                var: merge_var,
                 labels,
                 properties,
                 on_create,

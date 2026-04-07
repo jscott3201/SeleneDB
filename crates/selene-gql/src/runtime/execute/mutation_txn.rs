@@ -70,12 +70,25 @@ pub(super) fn execute_single_mutation_in_txn(
             txn_remove_property(txn, bindings, scope, stats, *target, *property)?;
         }
         MutationOp::Merge {
+            var,
             labels,
             properties,
             on_create,
             on_match,
         } => {
-            txn_merge(txn, stats, labels, properties, on_create, on_match)?;
+            let node_id = txn_merge(txn, stats, labels, properties, on_create, on_match)?;
+            if let Some(var_name) = var {
+                let bindings_was_empty = bindings.is_empty();
+                let mut node_var_map = HashMap::new();
+                node_var_map.insert(*var_name, node_id);
+                propagate_insert_vars(
+                    bindings,
+                    &node_var_map,
+                    &HashMap::new(),
+                    &std::collections::HashSet::new(),
+                    bindings_was_empty,
+                );
+            }
         }
     }
     Ok(())
@@ -480,7 +493,7 @@ fn txn_merge(
     properties: &[(IStr, crate::ast::expr::Expr)],
     on_create: &[(IStr, IStr, crate::ast::expr::Expr)],
     on_match: &[(IStr, IStr, crate::ast::expr::Expr)],
-) -> Result<(), GqlError> {
+) -> Result<NodeId, GqlError> {
     let (label_set, match_props, existing) = {
         let graph = txn.graph();
         let label_set = LabelSet::from_strs(&labels.iter().map(|l| l.as_str()).collect::<Vec<_>>());
@@ -505,7 +518,7 @@ fn txn_merge(
         });
         (label_set, match_props, existing)
     };
-    if let Some(node_id) = existing {
+    let result_node_id = if let Some(node_id) = existing {
         let sets: Vec<(IStr, Value)> = {
             let graph = txn.graph();
             on_match
@@ -521,6 +534,7 @@ fn txn_merge(
             txn.mutate(move |m| m.set_property(node_id, prop, sv))?;
             stats.properties_set += 1;
         }
+        node_id
     } else {
         let node_id = txn.mutate(|m| m.create_node(label_set, match_props))?;
         stats.nodes_created += 1;
@@ -539,6 +553,7 @@ fn txn_merge(
             txn.mutate(move |m| m.set_property(node_id, prop, sv))?;
             stats.properties_set += 1;
         }
-    }
-    Ok(())
+        node_id
+    };
+    Ok(result_node_id)
 }
