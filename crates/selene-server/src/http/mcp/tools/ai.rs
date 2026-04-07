@@ -93,7 +93,7 @@ pub(super) async fn enrich_communities_impl(
 
     // 1. MATCH all __CommunitySummary nodes
     let query = "MATCH (c:__CommunitySummary) \
-                 RETURN id(c) AS nodeId, c.label_distribution AS labels, \
+                 RETURN id(c) AS node_id, c.label_distribution AS labels, \
                  c.key_entities AS entities, c.node_count AS count";
     let result = ops::gql::execute_gql(
         &tools.state,
@@ -118,7 +118,10 @@ pub(super) async fn enrich_communities_impl(
 
     let mut enriched = 0u64;
     for row in &rows {
-        let node_id = row.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+        let node_id = row
+            .get("node_id")
+            .and_then(|v| v.as_i64())
+            .map_or(0, |v| v as u64);
         if node_id == 0 {
             continue;
         }
@@ -179,8 +182,8 @@ pub(super) async fn graphrag_search_impl(
     }
 
     let query = "CALL graphrag.search($queryText, $k, $maxHops, $mode) \
-                 YIELD nodeId, score, source, context, depth \
-                 RETURN nodeId, score, source, context, depth";
+                 YIELD node_id, score, source, context, depth \
+                 RETURN node_id, score, source, context, depth";
 
     let mut gql_params = HashMap::new();
     gql_params.insert("queryText".into(), Value::from(p.query.as_str()));

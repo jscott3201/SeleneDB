@@ -255,7 +255,7 @@ impl Procedure for GraphChanges {
         Ok(entries
             .into_iter()
             .map(|e| {
-                let node_id_val = GqlValue::UInt(e.node_id);
+                let node_id_val = GqlValue::Int(e.node_id as i64);
                 let mut row = history_entry_to_row(e);
                 row.insert(0, (IStr::new("node_id"), node_id_val));
                 row

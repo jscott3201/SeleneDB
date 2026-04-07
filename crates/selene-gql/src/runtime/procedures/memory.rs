@@ -47,15 +47,15 @@ impl Procedure for MemoryRecall {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "content",
                     typ: GqlType::String,
                 },
                 YieldColumn {
-                    name: "memoryType",
+                    name: "memory_type",
                     typ: GqlType::String,
                 },
                 YieldColumn {
@@ -67,7 +67,7 @@ impl Procedure for MemoryRecall {
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "createdAt",
+                    name: "created_at",
                     typ: GqlType::Int,
                 },
             ],
@@ -233,18 +233,18 @@ impl Procedure for MemoryRecall {
                     .unwrap_or(0);
 
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (
                         IStr::new("content"),
                         GqlValue::String(smol_str::SmolStr::new(content))
                     ),
                     (
-                        IStr::new("memoryType"),
+                        IStr::new("memory_type"),
                         GqlValue::String(smol_str::SmolStr::new(memory_type))
                     ),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                     (IStr::new("confidence"), GqlValue::Float(confidence)),
-                    (IStr::new("createdAt"), GqlValue::Int(created_at)),
+                    (IStr::new("created_at"), GqlValue::Int(created_at)),
                 ]
             })
             .collect())

@@ -871,10 +871,10 @@ impl SeleneTools {
         let query = if let Some(ref label) = p.label {
             gql_params.insert("label".into(), Value::from(label.as_str()));
             "CALL graph.semanticSearch($queryText, $k, $label) \
-             YIELD nodeId, score, path RETURN nodeId, score, path"
+             YIELD node_id, score, path RETURN node_id, score, path"
         } else {
             "CALL graph.semanticSearch($queryText, $k) \
-             YIELD nodeId, score, path RETURN nodeId, score, path"
+             YIELD node_id, score, path RETURN node_id, score, path"
         };
 
         let result = ops::gql::execute_gql(
@@ -905,7 +905,10 @@ impl SeleneTools {
         let enriched: Vec<serde_json::Value> = rows
             .into_iter()
             .map(|row| {
-                let node_id = row.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+                let node_id = row
+                    .get("node_id")
+                    .and_then(|v| v.as_i64())
+                    .map_or(0, |v| v as u64);
                 let mut enriched = row;
                 if let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id) {
                     enriched["node"] = serde_json::to_value(&node).unwrap_or_default();
@@ -943,7 +946,7 @@ impl SeleneTools {
         }
 
         let query = "CALL graph.similarNodes($nodeId, $prop, $k) \
-                     YIELD nodeId, score RETURN nodeId, score";
+                     YIELD node_id, score RETURN node_id, score";
 
         let mut gql_params = HashMap::new();
         gql_params.insert("nodeId".into(), Value::Int(p.node_id as i64));
@@ -1048,10 +1051,10 @@ impl SeleneTools {
         let sem_query = if let Some(ref label) = p.label {
             sem_params.insert("label".into(), Value::from(label.as_str()));
             "CALL graph.semanticSearch($queryText, $k, $label) \
-             YIELD nodeId, score RETURN nodeId, score"
+             YIELD node_id, score RETURN node_id, score"
         } else {
             "CALL graph.semanticSearch($queryText, $k) \
-             YIELD nodeId, score RETURN nodeId, score"
+             YIELD node_id, score RETURN node_id, score"
         };
 
         let rows: Vec<serde_json::Value> = ops::gql::execute_gql(
@@ -1071,7 +1074,10 @@ impl SeleneTools {
         // Return top match if similarity > 0.75
         if let Some(top) = rows.first() {
             let score = top.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let node_id = top.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let node_id = top
+                .get("node_id")
+                .and_then(|v| v.as_i64())
+                .map_or(0, |v| v as u64);
 
             if score > 0.75
                 && node_id > 0
@@ -1089,7 +1095,7 @@ impl SeleneTools {
         let suggestions: Vec<serde_json::Value> = rows
             .iter()
             .filter_map(|r| {
-                let nid = r.get("nodeId")?.as_u64()?;
+                let nid = r.get("node_id")?.as_i64()? as u64;
                 let sc = r.get("score")?.as_f64()?;
                 let name = ops::nodes::get_node(&self.state, &auth, nid)
                     .ok()

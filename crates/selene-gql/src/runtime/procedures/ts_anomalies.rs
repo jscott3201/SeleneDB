@@ -138,7 +138,7 @@ impl Procedure for TsAnomalies {
 
 // ── ts.peerAnomalies ──────────────────────────────────────────────
 
-/// ts.peerAnomalies(nodeId, property, maxHops, threshold) -> nodeId, value, z_score
+/// ts.peerAnomalies(nodeId, property, maxHops, threshold) -> node_id, value, z_score
 ///
 /// Compare a node's latest reading against its graph neighborhood.
 /// BFS from the target node, collect latest values from peers with
@@ -154,7 +154,7 @@ impl Procedure for TsPeerAnomalies {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 ProcedureParam {
@@ -172,7 +172,7 @@ impl Procedure for TsPeerAnomalies {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -268,7 +268,7 @@ impl Procedure for TsPeerAnomalies {
             .into_iter()
             .map(|(nid, val, z)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("value"), GqlValue::Float(val)),
                     (IStr::new("z_score"), GqlValue::Float(z)),
                 ]

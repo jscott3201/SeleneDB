@@ -38,7 +38,7 @@ impl Procedure for GraphShortestPath {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -89,7 +89,7 @@ impl Procedure for GraphShortestPath {
                 .enumerate()
                 .map(|(idx, &nid)| {
                     smallvec![
-                        (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                        (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                         (IStr::new("cost"), GqlValue::Float(result.cost)),
                         (IStr::new("index"), GqlValue::Int(idx as i64)),
                     ]
@@ -124,7 +124,7 @@ impl Procedure for GraphSssp {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -159,7 +159,7 @@ impl Procedure for GraphSssp {
             .into_iter()
             .map(|(nid, dist)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("distance"), GqlValue::Float(dist)),
                 ]
             })
@@ -212,7 +212,7 @@ impl Procedure for GraphApsp {
             .get(&name)
             .ok_or_else(|| GqlError::internal("projection not found"))?;
 
-        match selene_algorithms::apsp(proj_ref.projection(), 1000) {
+        match selene_algorithms::apsp(proj_ref.projection(), 5000) {
             Ok(result) => Ok(result
                 .into_iter()
                 .map(|(src, tgt, dist)| {

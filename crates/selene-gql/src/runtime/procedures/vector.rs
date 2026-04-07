@@ -131,8 +131,8 @@ impl Procedure for VectorSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -207,7 +207,7 @@ impl Procedure for VectorSearch {
                     .into_iter()
                     .map(|(node_id, score)| {
                         smallvec![
-                            (IStr::new("nodeId"), GqlValue::UInt(node_id.0)),
+                            (IStr::new("node_id"), GqlValue::Int(node_id.0 as i64)),
                             (IStr::new("score"), GqlValue::Float(f64::from(score))),
                         ]
                     })
@@ -231,7 +231,7 @@ impl Procedure for VectorSearch {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -364,8 +364,8 @@ impl Procedure for SemanticSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -465,7 +465,7 @@ impl Procedure for SemanticSearch {
                     .join(" > ");
 
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                     (
                         IStr::new("path"),
@@ -494,8 +494,8 @@ impl Procedure for SimilarNodes {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 ProcedureParam {
                     name: "property",
@@ -508,8 +508,8 @@ impl Procedure for SimilarNodes {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -590,7 +590,7 @@ impl Procedure for SimilarNodes {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -639,8 +639,8 @@ impl Procedure for ScopedVectorSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -666,11 +666,11 @@ impl Procedure for ScopedVectorSearch {
         }
 
         let root_id = NodeId(match &args[0] {
-            GqlValue::UInt(id) => *id,
             GqlValue::Int(id) if *id >= 0 => *id as u64,
+            GqlValue::UInt(id) => *id,
             other => {
                 return Err(GqlError::type_error(format!(
-                    "scopedVectorSearch: rootNodeId must be UINT, got {}",
+                    "scopedVectorSearch: rootNodeId must be INT, got {}",
                     other.gql_type()
                 )));
             }
@@ -722,7 +722,7 @@ impl Procedure for ScopedVectorSearch {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -834,7 +834,7 @@ mod tests {
         let rows = VectorSearch.execute(&args, &g, None, None).unwrap();
         assert_eq!(rows.len(), 3);
         // First result should be node 1 (exact match at 0 degrees)
-        assert_eq!(rows[0][0].1, GqlValue::UInt(1));
+        assert_eq!(rows[0][0].1, GqlValue::Int(1));
         if let GqlValue::Float(score) = &rows[0][1].1 {
             assert!(*score > 0.99);
         }
@@ -910,7 +910,7 @@ mod tests {
         ];
         let rows = VectorSearch.execute(&args, &g, None, None).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0].1, GqlValue::UInt(2));
+        assert_eq!(rows[0][0].1, GqlValue::Int(2));
     }
 
     // ── dot_product / is_unit_vector tests ────────────────────────

@@ -69,27 +69,27 @@ impl Procedure for CommunitySearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "communityId",
+                    name: "community_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "communitySize",
+                    name: "community_size",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "communityMembers",
-                    typ: GqlType::List(Box::new(GqlType::UInt)),
+                    name: "community_members",
+                    typ: GqlType::List(Box::new(GqlType::Int)),
                 },
                 YieldColumn {
-                    name: "communityLabels",
+                    name: "community_labels",
                     typ: GqlType::String,
                 },
             ],
@@ -169,25 +169,28 @@ impl Procedure for CommunitySearch {
                     .iter()
                     .filter(|nid| scope.is_none_or(|s| s.contains(nid.0 as u32)))
                     .take(MAX_COMMUNITY_MEMBERS)
-                    .map(|nid| GqlValue::UInt(nid.0))
+                    .map(|nid| GqlValue::Int(nid.0 as i64))
                     .collect();
 
                 let labels_str = community_label_summary(graph, members, scope);
 
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(scored.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(scored.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(scored.score))),
-                    (IStr::new("communityId"), GqlValue::Int(community_id as i64)),
-                    (IStr::new("communitySize"), GqlValue::Int(community_size)),
                     (
-                        IStr::new("communityMembers"),
+                        IStr::new("community_id"),
+                        GqlValue::Int(community_id as i64)
+                    ),
+                    (IStr::new("community_size"), GqlValue::Int(community_size)),
+                    (
+                        IStr::new("community_members"),
                         GqlValue::List(GqlList {
-                            element_type: GqlType::UInt,
+                            element_type: GqlType::Int,
                             elements: Arc::from(member_values),
                         }),
                     ),
                     (
-                        IStr::new("communityLabels"),
+                        IStr::new("community_labels"),
                         GqlValue::String(smol_str::SmolStr::new(labels_str)),
                     ),
                 ]

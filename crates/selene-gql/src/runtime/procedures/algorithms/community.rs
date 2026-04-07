@@ -35,11 +35,11 @@ impl Procedure for GraphLabelPropagation {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "communityId",
+                    name: "community_id",
                     typ: GqlType::Int,
                 },
             ],
@@ -65,8 +65,8 @@ impl Procedure for GraphLabelPropagation {
             .into_iter()
             .map(|(nid, cid)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
-                    (IStr::new("communityId"), GqlValue::Int(cid as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("community_id"), GqlValue::Int(cid as i64)),
                 ]
             })
             .collect())
@@ -91,11 +91,11 @@ impl Procedure for GraphLouvain {
             }],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "communityId",
+                    name: "community_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -123,8 +123,8 @@ impl Procedure for GraphLouvain {
             .into_iter()
             .map(|(nid, cid, level)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
-                    (IStr::new("communityId"), GqlValue::Int(cid as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("community_id"), GqlValue::Int(cid as i64)),
                     (IStr::new("level"), GqlValue::Int(i64::from(level))),
                 ]
             })
@@ -150,7 +150,7 @@ impl Procedure for GraphTriangleCount {
             }],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -178,7 +178,7 @@ impl Procedure for GraphTriangleCount {
             .into_iter()
             .map(|(nid, count)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("count"), GqlValue::Int(count as i64)),
                 ]
             })

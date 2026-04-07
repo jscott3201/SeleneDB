@@ -85,8 +85,8 @@ impl Procedure for TextSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -128,7 +128,7 @@ impl Procedure for TextSearch {
             .filter(|(nid, _)| scope.is_none_or(|s| s.contains(nid.0 as u32)))
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(nid.0)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(score))),
                 ]
             })
@@ -167,8 +167,8 @@ impl Procedure for HybridSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -249,7 +249,7 @@ impl Procedure for HybridSearch {
             .into_iter()
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(nid)),
+                    (IStr::new("node_id"), GqlValue::Int(nid as i64)),
                     (IStr::new("score"), GqlValue::Float(score)),
                 ]
             })

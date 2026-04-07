@@ -99,7 +99,7 @@ pub(super) async fn remember_impl(
         let mut mem_params = HashMap::new();
         mem_params.insert("ns".into(), Value::from(namespace.as_str()));
         let mem_query = "MATCH (m:__Memory {namespace: $ns}) \
-                         RETURN id(m) AS nodeId, m.created_at AS created_at, \
+                         RETURN id(m) AS node_id, m.created_at AS created_at, \
                          m.valid_until AS valid_until, m.confidence AS confidence \
                          ORDER BY m.created_at ASC";
         let mem_result = ops::gql::execute_gql(
@@ -123,7 +123,10 @@ pub(super) async fn remember_impl(
         let memories: Vec<(u64, i64, i64, f64)> = mem_rows
             .iter()
             .filter_map(|r| {
-                let nid = r.get("nodeId")?.as_u64()?;
+                let nid = r
+                    .get("node_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as u64)?;
                 let ca = r.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
                 let vu = r.get("valid_until").and_then(|v| v.as_i64()).unwrap_or(0);
                 let conf = r.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
@@ -229,7 +232,7 @@ pub(super) async fn remember_impl(
                         confidence: $conf, \
                         created_at: $cat \
                         }) \
-                        RETURN id(m) AS nodeId";
+                        RETURN id(m) AS node_id";
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
@@ -251,8 +254,9 @@ pub(super) async fn remember_impl(
     let result_rows: Vec<serde_json::Value> = serde_json::from_str(&result_str).unwrap_or_default();
     let node_id = result_rows
         .first()
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_u64())
+        .and_then(|r| r.get("node_id"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u64)
         .ok_or_else(|| {
             op_err(ops::OpError::Internal(
                 "failed to get node ID from INSERT result".into(),
@@ -338,8 +342,8 @@ pub(super) async fn recall_impl(
 
     // Call memory.recall procedure via GQL
     let query = "CALL memory.recall($ns, $queryText, $k) \
-                 YIELD nodeId, content, memoryType, score, confidence, createdAt \
-                 RETURN nodeId, content, memoryType, score, confidence, createdAt";
+                 YIELD node_id, content, memory_type, score, confidence, created_at \
+                 RETURN node_id, content, memory_type, score, confidence, created_at";
 
     let mut gql_params = HashMap::new();
     gql_params.insert("ns".into(), Value::from(namespace.as_str()));
@@ -364,7 +368,7 @@ pub(super) async fn recall_impl(
     // Increment clock counters for returned nodes
     let result_node_ids: Vec<u64> = rows
         .iter()
-        .filter_map(|r| r.get("nodeId")?.as_u64())
+        .filter_map(|r| r.get("node_id").and_then(|v| v.as_i64()).map(|v| v as u64))
         .collect();
 
     if !result_node_ids.is_empty() {
@@ -442,7 +446,7 @@ pub(super) async fn forget_impl(
         // First find matching nodes to get their IDs for counter cleanup
         let find_query = "MATCH (m:__Memory {namespace: $ns}) \
                           FILTER m.content CONTAINS $q \
-                          RETURN id(m) AS nodeId";
+                          RETURN id(m) AS node_id";
         let find_result = ops::gql::execute_gql(
             &tools.state,
             &auth,
@@ -458,7 +462,7 @@ pub(super) async fn forget_impl(
         let find_rows: Vec<serde_json::Value> = serde_json::from_str(&find_str).unwrap_or_default();
         let deleted_ids: Vec<u64> = find_rows
             .iter()
-            .filter_map(|r| r.get("nodeId")?.as_u64())
+            .filter_map(|r| r.get("node_id").and_then(|v| v.as_i64()).map(|v| v as u64))
             .collect();
 
         // Delete matching nodes

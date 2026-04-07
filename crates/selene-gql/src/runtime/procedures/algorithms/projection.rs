@@ -48,11 +48,11 @@ impl Procedure for GraphProject {
                     typ: GqlType::String,
                 },
                 YieldColumn {
-                    name: "nodeCount",
+                    name: "node_count",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "edgeCount",
+                    name: "edge_count",
                     typ: GqlType::Int,
                 },
             ],
@@ -84,8 +84,8 @@ impl Procedure for GraphProject {
 
         Ok(vec![smallvec![
             (IStr::new("name"), GqlValue::String(SmolStr::new(&name))),
-            (IStr::new("nodeCount"), GqlValue::Int(nc as i64)),
-            (IStr::new("edgeCount"), GqlValue::Int(ec as i64)),
+            (IStr::new("node_count"), GqlValue::Int(nc as i64)),
+            (IStr::new("edge_count"), GqlValue::Int(ec as i64)),
         ]])
     }
 }
@@ -147,11 +147,11 @@ impl Procedure for GraphListProjections {
                     typ: GqlType::String,
                 },
                 YieldColumn {
-                    name: "nodeCount",
+                    name: "node_count",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "edgeCount",
+                    name: "edge_count",
                     typ: GqlType::Int,
                 },
             ],
@@ -170,8 +170,8 @@ impl Procedure for GraphListProjections {
             .map(|(name, nc, ec)| {
                 smallvec![
                     (IStr::new("name"), GqlValue::String(SmolStr::new(&name))),
-                    (IStr::new("nodeCount"), GqlValue::Int(nc as i64)),
-                    (IStr::new("edgeCount"), GqlValue::Int(ec as i64)),
+                    (IStr::new("node_count"), GqlValue::Int(nc as i64)),
+                    (IStr::new("edge_count"), GqlValue::Int(ec as i64)),
                 ]
             })
             .collect())

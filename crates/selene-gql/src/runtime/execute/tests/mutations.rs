@@ -590,3 +590,30 @@ fn mutation_filter_and_where_behave_identically() {
     assert_eq!(count_filter, 1);
     assert_eq!(count_where, 1);
 }
+
+#[test]
+fn e2e_insert_edge_between_matched_nodes_by_id() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+
+    // Create two nodes
+    MutationBuilder::new("INSERT (:device {name: 'A'})")
+        .execute(&shared)
+        .unwrap();
+    MutationBuilder::new("INSERT (:device {name: 'B'})")
+        .execute(&shared)
+        .unwrap();
+
+    // Insert an edge between them using id() with FILTER
+    let result = MutationBuilder::new(
+        "MATCH (a:device), (b:device) FILTER id(a) = 1 AND id(b) = 2 \
+         INSERT (a)-[:test_edge]->(b) RETURN id(a), id(b)",
+    )
+    .execute(&shared)
+    .unwrap();
+
+    assert_eq!(result.mutations.edges_created, 1);
+
+    // Verify the edge exists
+    let edge_count = shared.read(|g| g.edge_count());
+    assert_eq!(edge_count, 1);
+}

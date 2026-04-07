@@ -401,7 +401,7 @@ pub(crate) fn resolve_property(
         GqlValue::Node(node_id) => {
             // Special properties
             if key.as_str() == "id" {
-                return Ok(GqlValue::UInt(node_id.0));
+                return Ok(GqlValue::Int(node_id.0 as i64));
             }
             // Look up from graph
             match graph.get_node(*node_id) {
@@ -422,7 +422,7 @@ pub(crate) fn resolve_property(
         GqlValue::Edge(edge_id) => {
             // Special properties
             if key.as_str() == "id" {
-                return Ok(GqlValue::UInt(edge_id.0));
+                return Ok(GqlValue::Int(edge_id.0 as i64));
             }
             match graph.get_edge(*edge_id) {
                 Some(edge) => match edge.properties.get(key) {
@@ -839,7 +839,7 @@ mod tests {
         let g = test_graph();
         let b = binding_with_node("s", 1);
         let expr = Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("id"));
-        assert_eq!(eval_expr(&expr, &b, &g).unwrap(), GqlValue::UInt(1));
+        assert_eq!(eval_expr(&expr, &b, &g).unwrap(), GqlValue::Int(1));
     }
 
     #[test]

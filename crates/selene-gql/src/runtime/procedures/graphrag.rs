@@ -69,8 +69,8 @@ impl Procedure for GraphRagSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -329,18 +329,18 @@ fn global_search(
 // Merge helper for hybrid mode
 // ---------------------------------------------------------------------------
 
-/// Merge global results into local results, deduplicating by nodeId and
+/// Merge global results into local results, deduplicating by node_id and
 /// keeping the highest score for each node.
 fn merge_results(local: &mut Vec<ProcedureRow>, global: Vec<ProcedureRow>) {
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut seen: HashSet<i64> = HashSet::new();
     for row in local.iter() {
-        if let Some((_, GqlValue::UInt(id))) = row.first() {
+        if let Some((_, GqlValue::Int(id))) = row.first() {
             seen.insert(*id);
         }
     }
 
     for row in global {
-        if let Some((_, GqlValue::UInt(id))) = row.first()
+        if let Some((_, GqlValue::Int(id))) = row.first()
             && seen.insert(*id)
         {
             local.push(row);
@@ -390,7 +390,7 @@ fn build_row(
 ) -> ProcedureRow {
     let context = build_context(graph, node_id);
     smallvec![
-        (IStr::new("nodeId"), GqlValue::UInt(node_id.0)),
+        (IStr::new("node_id"), GqlValue::Int(node_id.0 as i64)),
         (IStr::new("score"), GqlValue::Float(score)),
         (IStr::new("source"), GqlValue::String(SmolStr::new(source))),
         (
@@ -559,7 +559,7 @@ mod tests {
         let graph = SeleneGraph::new();
         let row = build_row(&graph, NodeId(42), 0.95, "vector", 0);
         assert_eq!(row.len(), 5);
-        assert_eq!(row[0].0.as_str(), "nodeId");
+        assert_eq!(row[0].0.as_str(), "node_id");
         assert_eq!(row[1].0.as_str(), "score");
         assert_eq!(row[2].0.as_str(), "source");
         assert_eq!(row[3].0.as_str(), "context");
