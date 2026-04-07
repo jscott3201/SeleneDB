@@ -139,6 +139,53 @@ fn get_provider() -> Result<&'static dyn EmbeddingProvider, GqlError> {
     }
 }
 
+/// Embedding model status for health reporting.
+///
+/// Returns the current state of the embedding provider without triggering
+/// initialization. Safe to call from health checks.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingStatus {
+    /// Whether the embedding provider is loaded and operational.
+    pub loaded: bool,
+    /// Model identifier (e.g., "embeddinggemma-300m"). Null if not loaded.
+    pub model_id: Option<String>,
+    /// Output vector dimensions. Null if not loaded.
+    pub dimensions: Option<usize>,
+    /// Configured model path.
+    pub model_path: String,
+    /// Error message if the provider failed to load.
+    pub error: Option<String>,
+}
+
+/// Query the embedding provider status without triggering initialization.
+pub fn embedding_status() -> EmbeddingStatus {
+    let model_path = resolve_model_path().display().to_string();
+
+    match PROVIDER.get() {
+        Some(Ok(provider)) => EmbeddingStatus {
+            loaded: true,
+            model_id: Some(provider.model_id().to_string()),
+            dimensions: Some(provider.dimensions(None)),
+            model_path,
+            error: None,
+        },
+        Some(Err(e)) => EmbeddingStatus {
+            loaded: false,
+            model_id: None,
+            dimensions: None,
+            model_path,
+            error: Some(e.clone()),
+        },
+        None => EmbeddingStatus {
+            loaded: false,
+            model_id: None,
+            dimensions: None,
+            model_path,
+            error: None,
+        },
+    }
+}
+
 /// Generate an embedding for text using the default task (Retrieval).
 ///
 /// This is the backward-compatible public API used by procedures and tools.
