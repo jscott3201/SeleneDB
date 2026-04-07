@@ -174,7 +174,7 @@ pub fn execute_gql_with_timeout(
             return Ok(error_result("42501", "DDL requires Admin role"));
         }
         crate::metrics::query_start();
-        let result = execute_mutation(state, auth, query);
+        let result = execute_mutation(state, auth, query, None);
         crate::metrics::query_end();
 
         // Sync ViewStateStore after materialized view DDL succeeds.
@@ -240,7 +240,7 @@ pub fn execute_gql_with_timeout(
     // Execute -- pass parsed stmt to read path (avoids re-parsing)
     crate::metrics::query_start();
     let result = if is_mutation {
-        execute_mutation(state, auth, query)
+        execute_mutation(state, auth, query, gql_params.as_ref())
     } else {
         execute_read(state, auth, &stmt, gql_params.as_ref())
     };
@@ -336,6 +336,7 @@ fn execute_mutation(
     state: &ServerState,
     auth: &AuthContext,
     query: &str,
+    parameters: Option<&selene_gql::ParameterMap>,
 ) -> Result<selene_gql::GqlResult, selene_gql::GqlError> {
     if state.replica.is_replica {
         return Err(selene_gql::GqlError::Internal {
@@ -351,6 +352,9 @@ fn execute_mutation(
     let mut mb = selene_gql::MutationBuilder::new(query).with_hot_tier(&state.hot_tier);
     if let Some(s) = scope {
         mb = mb.with_scope(s);
+    }
+    if let Some(p) = parameters {
+        mb = mb.with_parameters(p);
     }
     let result = mb.execute(&state.graph)?;
 

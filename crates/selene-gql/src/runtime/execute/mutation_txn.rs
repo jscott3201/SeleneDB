@@ -21,6 +21,7 @@ pub(super) fn execute_single_mutation_in_txn(
     bindings: &mut Vec<Binding>,
     scope: Option<&RoaringBitmap>,
     stats: &mut MutationStats,
+    parameters: Option<&super::ParameterMap>,
 ) -> Result<(), GqlError> {
     match mutation {
         MutationOp::SetProperty {
@@ -28,14 +29,16 @@ pub(super) fn execute_single_mutation_in_txn(
             property,
             value,
         } => {
-            txn_set_property(txn, bindings, scope, stats, *target, *property, value)?;
+            txn_set_property(
+                txn, bindings, scope, stats, *target, *property, value, parameters,
+            )?;
         }
 
         MutationOp::SetAllProperties { target, properties } => {
-            txn_set_all_properties(txn, bindings, scope, stats, *target, properties)?;
+            txn_set_all_properties(txn, bindings, scope, stats, *target, properties, parameters)?;
         }
         MutationOp::InsertPattern(pattern) => {
-            txn_insert_pattern(txn, bindings, stats, pattern)?;
+            txn_insert_pattern(txn, bindings, stats, pattern, parameters)?;
         }
         MutationOp::SetLabel { target, label } => {
             let ids: Vec<NodeId> = bindings
@@ -76,7 +79,9 @@ pub(super) fn execute_single_mutation_in_txn(
             on_create,
             on_match,
         } => {
-            let node_id = txn_merge(txn, stats, labels, properties, on_create, on_match)?;
+            let node_id = txn_merge(
+                txn, stats, labels, properties, on_create, on_match, parameters,
+            )?;
             if let Some(var_name) = var {
                 let bindings_was_empty = bindings.is_empty();
                 let mut node_var_map = HashMap::new();
@@ -96,6 +101,7 @@ pub(super) fn execute_single_mutation_in_txn(
 
 // ── Transaction path per-type handlers ──────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn txn_set_property(
     txn: &mut selene_graph::TransactionHandle<'_>,
     bindings: &[Binding],
@@ -104,14 +110,20 @@ fn txn_set_property(
     target: IStr,
     property: IStr,
     value: &crate::ast::expr::Expr,
+    parameters: Option<&super::ParameterMap>,
 ) -> Result<(), GqlError> {
     use crate::runtime::scope::check_scope;
     let pairs: Vec<(bool, u64, Value)> = {
         let graph = txn.graph();
+        let func_reg = crate::runtime::functions::FunctionRegistry::builtins();
+        let mut ctx = eval::EvalContext::new(graph, func_reg);
+        if let Some(params) = parameters {
+            ctx = ctx.with_parameters(params);
+        }
         bindings
             .iter()
             .map(|binding| {
-                let val = eval::eval_expr(value, binding, graph)?;
+                let val = eval::eval_expr_ctx(value, binding, &ctx)?;
                 let storage_val = Value::try_from(&val)?;
                 match binding.get(&target) {
                     Some(BoundValue::Node(node_id)) => {
@@ -168,10 +180,16 @@ fn txn_set_all_properties(
     stats: &mut MutationStats,
     target: IStr,
     properties: &[(IStr, crate::ast::expr::Expr)],
+    parameters: Option<&super::ParameterMap>,
 ) -> Result<(), GqlError> {
     use crate::runtime::scope::check_scope;
     let pairs: Vec<(NodeId, Vec<IStr>, Vec<(IStr, Value)>)> = {
         let graph = txn.graph();
+        let func_reg = crate::runtime::functions::FunctionRegistry::builtins();
+        let mut ctx = eval::EvalContext::new(graph, func_reg);
+        if let Some(params) = parameters {
+            ctx = ctx.with_parameters(params);
+        }
         bindings
             .iter()
             .map(|binding| {
@@ -190,7 +208,7 @@ fn txn_set_all_properties(
                 let new_props: Vec<(IStr, Value)> = properties
                     .iter()
                     .map(|(key, expr)| {
-                        let val = eval::eval_expr(expr, binding, graph)?;
+                        let val = eval::eval_expr_ctx(expr, binding, &ctx)?;
                         let storage_val = Value::try_from(&val)?;
                         let storage_val = maybe_intern_value(graph, &labels, *key, storage_val);
                         Ok((*key, storage_val))
@@ -221,6 +239,7 @@ fn txn_insert_pattern(
     bindings: &mut Vec<Binding>,
     stats: &mut MutationStats,
     pattern: &crate::ast::mutation::InsertGraphPattern,
+    parameters: Option<&super::ParameterMap>,
 ) -> Result<(), GqlError> {
     use crate::ast::mutation::InsertElement;
     use crate::ast::pattern::EdgeDirection;
@@ -266,6 +285,7 @@ fn txn_insert_pattern(
                                     properties,
                                     txn.graph(),
                                     br,
+                                    parameters,
                                 )?;
                                 let id = txn.mutate(|m| m.create_node(ls, props))?;
                                 var_map.insert(*v, id);
@@ -279,6 +299,7 @@ fn txn_insert_pattern(
                                 properties,
                                 txn.graph(),
                                 br,
+                                parameters,
                             )?;
                             let id = txn.mutate(|m| m.create_node(ls, props))?;
                             stats.nodes_created += 1;
@@ -314,6 +335,7 @@ fn txn_insert_pattern(
                                         tgt_props,
                                         txn.graph(),
                                         br,
+                                        parameters,
                                     )?;
                                     let id = txn.mutate(|m| m.create_node(ls, props))?;
                                     var_map.insert(*v, id);
@@ -327,6 +349,7 @@ fn txn_insert_pattern(
                                     tgt_props,
                                     txn.graph(),
                                     br,
+                                    parameters,
                                 )?;
                                 let id = txn.mutate(|m| m.create_node(ls, props))?;
                                 stats.nodes_created += 1;
@@ -345,6 +368,7 @@ fn txn_insert_pattern(
                                 properties,
                                 txn.graph(),
                                 br,
+                                parameters,
                             )?;
                             let eid =
                                 txn.mutate(|m| m.create_edge(s, edge_label, t, edge_props))?;
@@ -493,13 +517,19 @@ fn txn_merge(
     properties: &[(IStr, crate::ast::expr::Expr)],
     on_create: &[(IStr, IStr, crate::ast::expr::Expr)],
     on_match: &[(IStr, IStr, crate::ast::expr::Expr)],
+    parameters: Option<&super::ParameterMap>,
 ) -> Result<NodeId, GqlError> {
     let (label_set, match_props, existing) = {
         let graph = txn.graph();
+        let func_reg = crate::runtime::functions::FunctionRegistry::builtins();
+        let mut ctx = eval::EvalContext::new(graph, func_reg);
+        if let Some(params) = parameters {
+            ctx = ctx.with_parameters(params);
+        }
         let label_set = LabelSet::from_strs(&labels.iter().map(|l| l.as_str()).collect::<Vec<_>>());
         let mut match_props = PropertyMap::new();
         for (key, expr) in properties {
-            let val = eval::eval_expr(expr, &Binding::empty(), graph)?;
+            let val = eval::eval_expr_ctx(expr, &Binding::empty(), &ctx)?;
             let storage_val = Value::try_from(&val)?;
             match_props.insert(*key, storage_val);
         }
@@ -521,10 +551,15 @@ fn txn_merge(
     let result_node_id = if let Some(node_id) = existing {
         let sets: Vec<(IStr, Value)> = {
             let graph = txn.graph();
+            let func_reg = crate::runtime::functions::FunctionRegistry::builtins();
+            let mut ctx = eval::EvalContext::new(graph, func_reg);
+            if let Some(params) = parameters {
+                ctx = ctx.with_parameters(params);
+            }
             on_match
                 .iter()
                 .map(|(_target, prop, expr)| {
-                    let val = eval::eval_expr(expr, &Binding::empty(), graph)?;
+                    let val = eval::eval_expr_ctx(expr, &Binding::empty(), &ctx)?;
                     let sv = Value::try_from(&val)?;
                     Ok((*prop, sv))
                 })
@@ -540,10 +575,15 @@ fn txn_merge(
         stats.nodes_created += 1;
         let sets: Vec<(IStr, Value)> = {
             let graph = txn.graph();
+            let func_reg = crate::runtime::functions::FunctionRegistry::builtins();
+            let mut ctx = eval::EvalContext::new(graph, func_reg);
+            if let Some(params) = parameters {
+                ctx = ctx.with_parameters(params);
+            }
             on_create
                 .iter()
                 .map(|(_target, prop, expr)| {
-                    let val = eval::eval_expr(expr, &Binding::empty(), graph)?;
+                    let val = eval::eval_expr_ctx(expr, &Binding::empty(), &ctx)?;
                     let sv = Value::try_from(&val)?;
                     Ok((*prop, sv))
                 })

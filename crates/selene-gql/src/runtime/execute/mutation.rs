@@ -8,9 +8,12 @@ use selene_graph::{SeleneGraph, SharedGraph};
 
 use crate::ast::mutation::{InsertElement, MutationOp};
 use crate::ast::pattern::EdgeDirection;
-use crate::runtime::eval::{self};
+use crate::runtime::eval::{self, EvalContext};
+use crate::runtime::functions::FunctionRegistry;
 use crate::types::binding::{Binding, BoundValue};
 use crate::types::error::{GqlError, MutationStats};
+
+use super::ParameterMap;
 
 /// If the property's schema has `dictionary: true` and the value is a String,
 /// promote it to InternedStr for memory deduplication.
@@ -88,11 +91,17 @@ pub(super) fn build_insert_node_data_with_binding(
     properties: &[(IStr, crate::ast::expr::Expr)],
     graph: &SeleneGraph,
     binding: &Binding,
+    parameters: Option<&ParameterMap>,
 ) -> Result<(LabelSet, PropertyMap), GqlError> {
     let ls = LabelSet::from_strs(&labels.iter().map(|l| l.as_str()).collect::<Vec<_>>());
     let mut props = PropertyMap::new();
+    let func_reg = FunctionRegistry::builtins();
+    let mut ctx = EvalContext::new(graph, func_reg);
+    if let Some(params) = parameters {
+        ctx = ctx.with_parameters(params);
+    }
     for (key, expr) in properties {
-        let val = eval::eval_expr(expr, binding, graph)?;
+        let val = eval::eval_expr_ctx(expr, binding, &ctx)?;
         let sv = Value::try_from(&val)
             .map_err(|e| GqlError::internal(format!("property value conversion: {e}")))?;
         let sv = maybe_intern_value(graph, labels, *key, sv);
@@ -109,6 +118,7 @@ pub(super) fn build_insert_node_data_with_binding(
 /// `None` for INSERT-only (evaluates against empty binding).
 /// Walk INSERT pattern paths using a TrackedMutation for node/edge creation.
 /// Shared between auto-commit and (potentially) transaction paths.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_insert_paths(
     paths: &[crate::ast::mutation::InsertPathPattern],
     binding: Option<&Binding>,
@@ -117,6 +127,7 @@ pub(super) fn walk_insert_paths(
     edge_var_map: &mut HashMap<IStr, EdgeId>,
     stats: &mut MutationStats,
     m: &mut selene_graph::TrackedMutation<'_>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<(), selene_graph::GraphError> {
     let empty_binding = Binding::empty();
     let binding_ref = binding.unwrap_or(&empty_binding);
@@ -140,6 +151,7 @@ pub(super) fn walk_insert_paths(
                                 properties,
                                 graph,
                                 binding_ref,
+                                parameters,
                             )
                             .map_err(to_graph_err)?;
                             stats.properties_set += props.len();
@@ -154,6 +166,7 @@ pub(super) fn walk_insert_paths(
                             properties,
                             graph,
                             binding_ref,
+                            parameters,
                         )
                         .map_err(to_graph_err)?;
                         stats.properties_set += props.len();
@@ -193,6 +206,7 @@ pub(super) fn walk_insert_paths(
                                     tgt_props,
                                     graph,
                                     binding_ref,
+                                    parameters,
                                 )
                                 .map_err(to_graph_err)?;
                                 stats.properties_set += props.len();
@@ -207,6 +221,7 @@ pub(super) fn walk_insert_paths(
                                 tgt_props,
                                 graph,
                                 binding_ref,
+                                parameters,
                             )
                             .map_err(to_graph_err)?;
                             stats.properties_set += props.len();
@@ -226,6 +241,7 @@ pub(super) fn walk_insert_paths(
                             properties,
                             graph,
                             binding_ref,
+                            parameters,
                         )
                         .map_err(to_graph_err)?;
                         stats.properties_set += edge_props.len();
@@ -266,6 +282,7 @@ pub(super) fn execute_mutations_write(
     bindings: &mut Vec<Binding>,
     graph: &SeleneGraph,
     scope: Option<&RoaringBitmap>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<(MutationStats, Vec<selene_core::changeset::Change>), GqlError> {
     use crate::runtime::scope::check_scope;
 
@@ -300,6 +317,13 @@ pub(super) fn execute_mutations_write(
             let mut edge_var_map: HashMap<IStr, EdgeId> = HashMap::new();
             // Per-row INSERT variable maps for proper binding propagation
             let mut per_row_maps: Vec<(HashMap<IStr, NodeId>, HashMap<IStr, EdgeId>)> = Vec::new();
+
+            // Build EvalContext for parameter-aware expression evaluation
+            let func_reg = FunctionRegistry::builtins();
+            let mut eval_ctx = EvalContext::new(graph, func_reg);
+            if let Some(params) = parameters {
+                eval_ctx = eval_ctx.with_parameters(params);
+            }
 
             // ── Evaluate all mutations (immediate + deferred) ─────────
             // SET/REMOVE mutations are collected into `deferred` against the
@@ -350,6 +374,7 @@ pub(super) fn execute_mutations_write(
                                 &mut edge_var_map,
                                 &mut stats,
                                 m,
+                                parameters,
                             )?;
 
                             // Diff: edges created by this row's INSERT
@@ -372,7 +397,7 @@ pub(super) fn execute_mutations_write(
                         value,
                     } => {
                         for binding in &bindings_snapshot {
-                            let val = eval::eval_expr(value, binding, graph)
+                            let val = eval::eval_expr_ctx(value, binding, &eval_ctx)
                                 .map_err(to_graph_err)?;
                             let storage_val = Value::try_from(&val)
                                 .map_err(to_graph_err)?;
@@ -423,7 +448,7 @@ pub(super) fn execute_mutations_write(
                             // Evaluate all property expressions against snapshot
                             let mut prop_pairs = Vec::new();
                             for (key, expr) in properties {
-                                let val = eval::eval_expr(expr, binding, graph)
+                                let val = eval::eval_expr_ctx(expr, binding, &eval_ctx)
                                     .map_err(to_graph_err)?;
                                 let storage_val = Value::try_from(&val)
                                     .map_err(to_graph_err)?;
@@ -568,16 +593,26 @@ pub(super) fn execute_mutations_write(
                         );
                         let label_slice: Vec<IStr> = labels.clone();
                         // Build property map for matching (use live graph, not snapshot)
-                        let mut match_props = PropertyMap::new();
-                        for (key, expr) in properties {
-                            let val =
-                                eval::eval_expr(expr, &Binding::empty(), m.graph())
-                                    .map_err(to_graph_err)?;
-                            let sv =
-                                Value::try_from(&val).map_err(to_graph_err)?;
-                            let sv = maybe_intern_value(m.graph(), &label_slice, *key, sv);
-                            match_props.insert(*key, sv);
-                        }
+                        let match_props = {
+                            let merge_func_reg = FunctionRegistry::builtins();
+                            let mut merge_ctx =
+                                EvalContext::new(m.graph(), merge_func_reg);
+                            if let Some(params) = parameters {
+                                merge_ctx = merge_ctx.with_parameters(params);
+                            }
+                            let mut props = PropertyMap::new();
+                            for (key, expr) in properties {
+                                let val =
+                                    eval::eval_expr_ctx(expr, &Binding::empty(), &merge_ctx)
+                                        .map_err(to_graph_err)?;
+                                let sv =
+                                    Value::try_from(&val).map_err(to_graph_err)?;
+                                let sv =
+                                    maybe_intern_value(m.graph(), &label_slice, *key, sv);
+                                props.insert(*key, sv);
+                            }
+                            props
+                        };
 
                         // Use label bitmap to narrow the search instead of scanning all nodes.
                         // This is O(matching_labels) instead of O(all_nodes).
@@ -616,8 +651,13 @@ pub(super) fn execute_mutations_write(
                             result_node_id = node_id;
                             // ON MATCH: apply property sets
                             for (_target, prop, expr) in on_match {
+                                let fr = FunctionRegistry::builtins();
+                                let mut mc = EvalContext::new(m.graph(), fr);
+                                if let Some(params) = parameters {
+                                    mc = mc.with_parameters(params);
+                                }
                                 let val =
-                                    eval::eval_expr(expr, &Binding::empty(), m.graph())
+                                    eval::eval_expr_ctx(expr, &Binding::empty(), &mc)
                                         .map_err(to_graph_err)?;
                                 let sv =
                                     Value::try_from(&val).map_err(to_graph_err)?;
@@ -632,8 +672,13 @@ pub(super) fn execute_mutations_write(
                             stats.nodes_created += 1;
                             // ON CREATE: apply additional property sets
                             for (_target, prop, expr) in on_create {
+                                let fr = FunctionRegistry::builtins();
+                                let mut mc = EvalContext::new(m.graph(), fr);
+                                if let Some(params) = parameters {
+                                    mc = mc.with_parameters(params);
+                                }
                                 let val =
-                                    eval::eval_expr(expr, &Binding::empty(), m.graph())
+                                    eval::eval_expr_ctx(expr, &Binding::empty(), &mc)
                                         .map_err(to_graph_err)?;
                                 let sv =
                                     Value::try_from(&val).map_err(to_graph_err)?;
@@ -1035,6 +1080,7 @@ mod tests {
                 &mut edge_var_map,
                 &mut stats,
                 m,
+                None,
             )
         });
 
@@ -1139,7 +1185,7 @@ mod tests {
         ];
 
         let (stats, _changes) =
-            execute_mutations_write(&shared, &mutations, &mut bindings, &snapshot, None)
+            execute_mutations_write(&shared, &mutations, &mut bindings, &snapshot, None, None)
                 .expect("swap should succeed");
 
         assert_eq!(stats.properties_set, 2);

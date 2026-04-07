@@ -35,17 +35,28 @@ fn execute_mut(
     shared: &SharedGraph,
     hot_tier: Option<&selene_ts::HotTier>,
     scope: Option<&RoaringBitmap>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<GqlResult, GqlError> {
     let stmt = parse_statement(gql)?;
     let snapshot = shared.load_snapshot();
     let registry = ProcedureRegistry::builtins();
     let func_registry = FunctionRegistry::builtins();
-    let ctx = EvalContext::new(&snapshot, func_registry);
+    let mut ctx = EvalContext::new(&snapshot, func_registry);
+    if let Some(params) = parameters {
+        ctx = ctx.with_parameters(params);
+    }
 
     match &stmt {
         GqlStatement::Query(pipeline) => {
             let plan = planner::plan_query(pipeline, &snapshot)?;
-            execute_plan(&plan, &snapshot, scope, hot_tier, Some(registry), None)
+            execute_plan(
+                &plan,
+                &snapshot,
+                scope,
+                hot_tier,
+                Some(registry),
+                parameters,
+            )
         }
         GqlStatement::Chained { blocks } => {
             let mut result = None;
@@ -57,7 +68,7 @@ fn execute_mut(
                     scope,
                     hot_tier,
                     Some(registry),
-                    None,
+                    parameters,
                 )?);
             }
             result.ok_or_else(|| GqlError::internal("empty chained query"))
@@ -66,7 +77,8 @@ fn execute_mut(
             let plan = planner::plan_mutation(mp, &snapshot)?;
 
             // Execute pattern + pre-mutation pipeline against snapshot
-            let mut bindings = execute_pattern_ops(&plan.pattern_ops, &snapshot, scope)?;
+            let mut bindings =
+                execute_pattern_ops_with_eval_ctx(&plan.pattern_ops, &snapshot, scope, &ctx)?;
             for op in &plan.pipeline {
                 match op {
                     PipelineOp::Return { .. } => break,
@@ -97,6 +109,7 @@ fn execute_mut(
                     &mut bindings,
                     &snapshot,
                     scope,
+                    parameters,
                 )?;
                 mutation_stats = stats;
                 mutation_changes = changes;
@@ -149,11 +162,18 @@ fn execute_mut(
                 scope,
                 hot_tier,
                 Some(registry),
-                None,
+                parameters,
             )?;
             for (op, pipeline) in rest {
                 let plan = planner::plan_query(pipeline, &snapshot)?;
-                let other = execute_plan(&plan, &snapshot, scope, hot_tier, Some(registry), None)?;
+                let other = execute_plan(
+                    &plan,
+                    &snapshot,
+                    scope,
+                    hot_tier,
+                    Some(registry),
+                    parameters,
+                )?;
                 result = apply_set_op(*op, result, other);
             }
             let rows = result.row_count();
@@ -249,6 +269,7 @@ fn execute_in_transaction(
     txn: &mut selene_graph::TransactionHandle<'_>,
     hot_tier: Option<&selene_ts::HotTier>,
     scope: Option<&RoaringBitmap>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<GqlResult, GqlError> {
     let stmt = parse_statement(gql)?;
     let graph = txn.graph();
@@ -257,16 +278,20 @@ fn execute_in_transaction(
     match &stmt {
         GqlStatement::Query(pipeline) => {
             let plan = planner::plan_query(pipeline, graph)?;
-            execute_plan(&plan, graph, scope, hot_tier, Some(registry), None)
+            execute_plan(&plan, graph, scope, hot_tier, Some(registry), parameters)
         }
         GqlStatement::Mutate(mp) => {
             // Plan + pattern match + pre-filter (immutable borrow of txn.graph())
             let (plan, mut bindings) = {
                 let graph = txn.graph();
                 let func_reg = FunctionRegistry::builtins();
-                let ctx = EvalContext::new(graph, func_reg).with_scope(scope);
+                let mut ctx = EvalContext::new(graph, func_reg).with_scope(scope);
+                if let Some(params) = parameters {
+                    ctx = ctx.with_parameters(params);
+                }
                 let plan = planner::plan_mutation(mp, graph)?;
-                let mut bindings = execute_pattern_ops(&plan.pattern_ops, graph, scope)?;
+                let mut bindings =
+                    execute_pattern_ops_with_eval_ctx(&plan.pattern_ops, graph, scope, &ctx)?;
                 for op in &plan.pipeline {
                     match op {
                         PipelineOp::Return { .. } => break,
@@ -299,6 +324,7 @@ fn execute_in_transaction(
                     &mut bindings,
                     scope,
                     &mut mutation_stats,
+                    parameters,
                 )?;
             }
 
@@ -1049,10 +1075,7 @@ use arrow_io::{
 use call::{execute_call, execute_subquery};
 use mutation::{count_mutation, execute_mutations_write};
 use mutation_txn::execute_single_mutation_in_txn;
-use pattern::{
-    execute_pattern_ops, execute_pattern_ops_as_chunk_with_ctx,
-    execute_pattern_ops_with_csr_and_ctx,
-};
+use pattern::{execute_pattern_ops_as_chunk_with_ctx, execute_pattern_ops_with_csr_and_ctx};
 pub(crate) use pattern::{
     execute_pattern_ops_correlated_with_ctx, execute_pattern_ops_with_eval_ctx,
     execute_pattern_ops_with_max_and_ctx,
@@ -1255,6 +1278,7 @@ pub struct MutationBuilder<'a> {
     query: &'a str,
     scope: Option<&'a RoaringBitmap>,
     hot_tier: Option<&'a selene_ts::HotTier>,
+    parameters: Option<&'a ParameterMap>,
 }
 
 impl<'a> MutationBuilder<'a> {
@@ -1264,6 +1288,7 @@ impl<'a> MutationBuilder<'a> {
             query,
             scope: None,
             hot_tier: None,
+            parameters: None,
         }
     }
 
@@ -1279,9 +1304,21 @@ impl<'a> MutationBuilder<'a> {
         self
     }
 
+    /// Provide query parameters ($param bindings).
+    pub fn with_parameters(mut self, parameters: &'a ParameterMap) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
     /// Execute as an auto-commit mutation against a shared graph.
     pub fn execute(self, shared: &SharedGraph) -> Result<GqlResult, GqlError> {
-        execute_mut(self.query, shared, self.hot_tier, self.scope)
+        execute_mut(
+            self.query,
+            shared,
+            self.hot_tier,
+            self.scope,
+            self.parameters,
+        )
     }
 
     /// Execute within an existing transaction.
@@ -1292,7 +1329,7 @@ impl<'a> MutationBuilder<'a> {
         self,
         txn: &mut selene_graph::TransactionHandle<'_>,
     ) -> Result<GqlResult, GqlError> {
-        execute_in_transaction(self.query, txn, self.hot_tier, self.scope)
+        execute_in_transaction(self.query, txn, self.hot_tier, self.scope, self.parameters)
     }
 }
 

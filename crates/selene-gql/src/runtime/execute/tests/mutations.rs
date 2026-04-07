@@ -390,3 +390,55 @@ fn insert_path_counts_node_and_edge_properties() {
     assert_eq!(result.mutations.edges_created, 1);
     assert_eq!(result.mutations.properties_set, 3);
 }
+
+// ── Parameter support tests ──
+
+#[test]
+fn insert_with_parameters() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("name"), GqlValue::String(SmolStr::new("Alice")));
+    let result = MutationBuilder::new("INSERT (n:Test {name: $name}) RETURN id(n) AS id")
+        .with_parameters(&params)
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+
+    // Verify the parameter value was used
+    let name = shared.read(|g| {
+        let node = g.get_node(NodeId(1)).unwrap();
+        node.property("name").cloned()
+    });
+    assert_eq!(name, Some(Value::String(SmolStr::new("Alice"))));
+}
+
+#[test]
+fn merge_with_parameters() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("k"), GqlValue::String(SmolStr::new("key1")));
+
+    // First MERGE creates the node
+    let r1 = MutationBuilder::new("MERGE (n:Test {key: $k}) RETURN id(n) AS id")
+        .with_parameters(&params)
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(r1.mutations.nodes_created, 1);
+
+    // Second MERGE with the same parameter matches the existing node
+    let r2 = MutationBuilder::new("MERGE (n:Test {key: $k}) RETURN id(n) AS id")
+        .with_parameters(&params)
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(r2.mutations.nodes_created, 0);
+    assert_eq!(shared.read(|g| g.node_count()), 1);
+}
+
+#[test]
+fn mutation_without_parameters_still_works() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new("INSERT (:Test {name: 'literal'})")
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(result.mutations.nodes_created, 1);
+}
