@@ -61,16 +61,32 @@ pub(in crate::parser) fn parse_uint(pair: Pair<'_, Rule>) -> Result<u32, GqlErro
         .map_err(|_| GqlError::parse_error(format!("invalid unsigned integer: {s}")))
 }
 
-/// Extract uint from offset_stmt or limit_stmt.
-pub(in crate::parser) fn build_uint(pair: Pair<'_, Rule>) -> Result<u64, GqlError> {
-    let uint_pair = pair
+/// Extract a LimitValue (uint literal or $parameter) from a limit_value rule.
+pub(in crate::parser) fn build_limit_value(
+    pair: Pair<'_, Rule>,
+) -> Result<crate::ast::statement::LimitValue, GqlError> {
+    use crate::ast::statement::LimitValue;
+    let inner = pair
         .into_inner()
-        .find(|p| p.as_rule() == Rule::uint)
-        .ok_or_else(|| GqlError::parse_error("expected uint"))?;
-    uint_pair
-        .as_str()
-        .parse::<u64>()
-        .map_err(|_| GqlError::parse_error("invalid uint"))
+        .find(|p| matches!(p.as_rule(), Rule::limit_value))
+        .ok_or_else(|| GqlError::parse_error("expected limit_value"))?;
+    let child = first_inner(inner)?;
+    match child.as_rule() {
+        Rule::uint => {
+            let n = child
+                .as_str()
+                .parse::<u64>()
+                .map_err(|_| GqlError::parse_error("invalid uint in LIMIT/OFFSET"))?;
+            Ok(LimitValue::Literal(n))
+        }
+        Rule::param_ref => {
+            let name = &child.as_str()[1..]; // strip leading '$'
+            Ok(LimitValue::Parameter(IStr::new(name)))
+        }
+        other => Err(GqlError::parse_error(format!(
+            "unexpected rule {other:?} in limit_value"
+        ))),
+    }
 }
 
 /// Create an error for an unexpected rule.

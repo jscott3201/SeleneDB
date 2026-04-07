@@ -117,7 +117,7 @@ impl GqlOptimizerRule for PredicateReorderRule {
                 // Use a placeholder swap to move items without Clone
                 sorted_run.push(std::mem::replace(
                     &mut run[src],
-                    PipelineOp::Limit { count: 0 }, // dummy, will be overwritten
+                    PipelineOp::Limit { value: crate::ast::statement::LimitValue::Literal(0) }, // dummy, will be overwritten
                 ));
             }
             // Splice the sorted run back in

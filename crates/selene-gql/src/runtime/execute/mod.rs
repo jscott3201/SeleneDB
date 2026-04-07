@@ -774,19 +774,21 @@ fn execute_plan_inner(
         // Factorized-native path for simple streaming ops
         if factorized.is_some() {
             match op {
-                PipelineOp::Offset { count } => {
+                PipelineOp::Offset { value } => {
+                    let n = value.resolve(ctx.parameters)? as usize;
                     let fc = factorized.as_mut().unwrap();
                     let deep = fc.deepest_mut();
                     let phys_len = deep.len;
-                    deep.selection.skip(*count as usize, phys_len);
+                    deep.selection.skip(n, phys_len);
                     op_idx += 1;
                     continue;
                 }
-                PipelineOp::Limit { count } => {
+                PipelineOp::Limit { value } => {
+                    let n = value.resolve(ctx.parameters)? as usize;
                     let fc = factorized.as_mut().unwrap();
                     let deep = fc.deepest_mut();
                     let phys_len = deep.len;
-                    deep.selection.truncate(*count as usize, phys_len);
+                    deep.selection.truncate(n, phys_len);
                     op_idx += 1;
                     continue;
                 }
@@ -864,10 +866,11 @@ fn execute_plan_inner(
                 && op_idx + 1 < post_mutation_pipeline.len()
                 && matches!(post_mutation_pipeline[op_idx + 1], PipelineOp::TopK { .. }) =>
             {
-                if let PipelineOp::TopK { terms, limit } = post_mutation_pipeline[op_idx + 1] {
+                if let PipelineOp::TopK { terms, limit } = &post_mutation_pipeline[op_idx + 1] {
+                    let k = limit.resolve(ctx.parameters)?;
                     let bindings = c.to_bindings();
                     let result =
-                        stages::execute_return_topk(bindings, projections, terms, *limit, &ctx)?;
+                        stages::execute_return_topk(bindings, projections, terms, k, &ctx)?;
                     chunk = Some(join::bindings_to_chunk_generic(&result));
                     op_idx += 2;
                     continue;
@@ -1076,10 +1079,10 @@ fn detect_scan_limit(pattern_ops: &[PatternOp], pipeline: &[PipelineOp]) -> Opti
     if has_blocking_op {
         return None;
     }
-    // Find LIMIT in pipeline
+    // Find LIMIT in pipeline (only literal values usable at plan time)
     for op in pipeline {
-        if let PipelineOp::Limit { count } = op {
-            return Some(*count as usize);
+        if let PipelineOp::Limit { value: crate::ast::statement::LimitValue::Literal(n) } = op {
+            return Some(*n as usize);
         }
     }
     None

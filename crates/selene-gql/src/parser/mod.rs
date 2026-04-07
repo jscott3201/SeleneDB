@@ -1134,4 +1134,68 @@ mod tests {
             _ => panic!("expected Query"),
         }
     }
+
+    // ── Record constructor / map literals ──
+
+    #[test]
+    fn record_constructor_with_keyword() {
+        parse_ok("MATCH (n) RETURN RECORD {name: n.name, age: n.age}");
+    }
+
+    #[test]
+    fn record_constructor_bare_map_literal() {
+        parse_ok("MATCH (n) RETURN {name: n.name, age: n.age}");
+    }
+
+    #[test]
+    fn record_constructor_both_forms_same_ast() {
+        let with_kw = parse_statement("MATCH (n) RETURN RECORD {x: n.x}").unwrap();
+        let bare = parse_statement("MATCH (n) RETURN {x: n.x}").unwrap();
+        // Both produce RecordConstruct with the same field
+        let extract = |stmt: crate::GqlStatement| -> String {
+            if let crate::GqlStatement::Query(p) = stmt {
+                format!("{:?}", p.statements.last())
+            } else {
+                panic!("expected Query")
+            }
+        };
+        assert_eq!(extract(with_kw), extract(bare));
+    }
+
+    #[test]
+    fn record_constructor_single_field() {
+        parse_ok("MATCH (n) RETURN {id: id(n)}");
+    }
+
+    #[test]
+    fn record_constructor_nested_expressions() {
+        parse_ok("MATCH (n) RETURN {full: n.first || ' ' || n.last, count: count(*)}");
+    }
+
+    // ── Parameterized LIMIT/OFFSET ──
+
+    #[test]
+    fn parameterized_limit() {
+        parse_ok("MATCH (n) RETURN n LIMIT $n");
+    }
+
+    #[test]
+    fn parameterized_offset() {
+        parse_ok("MATCH (n) RETURN n OFFSET $skip");
+    }
+
+    #[test]
+    fn parameterized_skip_alias() {
+        parse_ok("MATCH (n) RETURN n SKIP $page");
+    }
+
+    #[test]
+    fn parameterized_limit_and_offset() {
+        parse_ok("MATCH (n) RETURN n OFFSET $off LIMIT $lim");
+    }
+
+    #[test]
+    fn literal_limit_still_works() {
+        parse_ok("MATCH (n) RETURN n LIMIT 10");
+    }
 }

@@ -21,8 +21,8 @@ use super::build_clause::{
     build_projection, build_return, build_with, build_yield_item,
 };
 use super::build_expr::{
-    build_expr, build_literal, build_uint, first_inner, intern_name, intern_var, unescape_string,
-    unexpected_rule,
+    build_expr, build_limit_value, build_literal, first_inner, intern_name, intern_var,
+    unescape_string, unexpected_rule,
 };
 use super::build_match::build_match;
 
@@ -167,10 +167,10 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                 order_by = build_order_by(inner)?;
             }
             Rule::offset_stmt => {
-                offset = Some(build_uint(inner)?);
+                offset = Some(build_limit_value(inner)?);
             }
             Rule::limit_stmt => {
-                limit = Some(build_uint(inner)?);
+                limit = Some(build_limit_value(inner)?);
             }
             _ => {}
         }
@@ -822,8 +822,8 @@ fn build_pipeline_statement(pair: Pair<'_, Rule>) -> Result<PipelineStatement, G
         Rule::with_stmt => Ok(PipelineStatement::With(build_with(inner)?)),
         Rule::filter_stmt => Ok(PipelineStatement::Filter(build_filter(inner)?)),
         Rule::sorting_stmt => Ok(PipelineStatement::OrderBy(build_order_by(inner)?)),
-        Rule::offset_stmt => Ok(PipelineStatement::Offset(build_uint(inner)?)),
-        Rule::limit_stmt => Ok(PipelineStatement::Limit(build_uint(inner)?)),
+        Rule::offset_stmt => Ok(PipelineStatement::Offset(build_limit_value(inner)?)),
+        Rule::limit_stmt => Ok(PipelineStatement::Limit(build_limit_value(inner)?)),
         Rule::return_stmt => Ok(PipelineStatement::Return(build_return(inner)?)),
         Rule::call_stmt => {
             let call_inner = first_inner(inner)?;

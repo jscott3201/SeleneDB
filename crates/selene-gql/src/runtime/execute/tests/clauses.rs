@@ -632,3 +632,71 @@ fn e2e_with_then_match_with_count() {
     let cnt_arr = cnt_col.as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(cnt_arr.value(0), 1, "building has 1 floor");
 }
+
+// ── Parameterized LIMIT/OFFSET ──
+
+#[test]
+fn e2e_parameterized_limit() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::Int(2));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn e2e_parameterized_offset() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("skip"), GqlValue::Int(2));
+    let all = QueryBuilder::new("MATCH (x) RETURN x", &g)
+        .execute()
+        .unwrap()
+        .row_count();
+    let result = QueryBuilder::new("MATCH (x) RETURN x OFFSET $skip", &g)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), all - 2);
+}
+
+#[test]
+fn e2e_parameterized_limit_negative_error() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::Int(-1));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "negative LIMIT should error");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("non-negative"), "error should mention non-negative: {err}");
+}
+
+#[test]
+fn e2e_parameterized_limit_type_error() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::String(SmolStr::new("five")));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "string LIMIT should error");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("integer"), "error should mention integer: {err}");
+}
+
+#[test]
+fn e2e_parameterized_limit_unbound_error() {
+    let g = setup_graph();
+    let params = ParameterMap::new();
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "unbound LIMIT param should error");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("not bound"), "error should mention not bound: {err}");
+}

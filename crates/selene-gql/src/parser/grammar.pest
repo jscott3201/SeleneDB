@@ -195,8 +195,9 @@ nulls_order   = { ^"NULLS" ~ (^"FIRST" | ^"LAST") }
 
 // ── OFFSET / LIMIT ─────────────────────────────────────────────────
 
-offset_stmt = { (^"OFFSET" | ^"SKIP") ~ uint }
-limit_stmt  = { ^"LIMIT" ~ uint }
+offset_stmt   = { (^"OFFSET" | ^"SKIP") ~ limit_value }
+limit_stmt    = { ^"LIMIT" ~ limit_value }
+limit_value   = { param_ref | uint }
 
 // ── RETURN ─────────────────────────────────────────────────────────
 
@@ -391,7 +392,8 @@ trim_spec = { ^"LEADING" | ^"TRAILING" | ^"BOTH" }
 trim_char = { expr }
 
 // Record constructor (spec §20.18): RECORD {name: expr, ...}
-record_constructor = { ^"RECORD" ~ "{" ~ record_field ~ ("," ~ record_field)* ~ "}" }
+// The RECORD keyword is optional: both `RECORD {a: 1}` and `{a: 1}` are valid.
+record_constructor = { ^"RECORD"? ~ "{" ~ record_field ~ ("," ~ record_field)* ~ "}" }
 record_field = { prop_ident ~ ":" ~ expr }
 
 // Aggregates with optional DISTINCT (spec §20.9)

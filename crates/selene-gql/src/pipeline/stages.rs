@@ -105,9 +105,18 @@ pub(crate) fn execute_pipeline_op(
         PipelineOp::Let { bindings: lets } => execute_let(bindings, lets, ctx),
         PipelineOp::Filter { predicate } => execute_filter(bindings, predicate, ctx),
         PipelineOp::Sort { terms } => Ok(execute_sort(bindings, terms, ctx)),
-        PipelineOp::TopK { terms, limit } => Ok(execute_topk(bindings, terms, *limit, ctx)),
-        PipelineOp::Offset { count } => Ok(execute_offset(bindings, *count)),
-        PipelineOp::Limit { count } => Ok(execute_limit(bindings, *count)),
+        PipelineOp::TopK { terms, limit } => {
+            let k = limit.resolve(ctx.parameters)?;
+            Ok(execute_topk(bindings, terms, k, ctx))
+        }
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)?;
+            Ok(execute_offset(bindings, n))
+        }
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)?;
+            Ok(execute_limit(bindings, n))
+        }
         PipelineOp::Return {
             projections,
             group_by,
@@ -236,17 +245,19 @@ pub(crate) fn execute_pipeline_op_chunk(
 
         PipelineOp::Sort { terms } => Ok(execute_sort_chunk(chunk, terms, ctx)),
 
-        PipelineOp::Offset { count } => {
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
             let mut chunk = chunk;
             let phys_len = chunk.len();
-            chunk.selection_mut().skip(*count as usize, phys_len);
+            chunk.selection_mut().skip(n, phys_len);
             Ok(chunk)
         }
 
-        PipelineOp::Limit { count } => {
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
             let mut chunk = chunk;
             let phys_len = chunk.len();
-            chunk.selection_mut().truncate(*count as usize, phys_len);
+            chunk.selection_mut().truncate(n, phys_len);
             Ok(chunk)
         }
 

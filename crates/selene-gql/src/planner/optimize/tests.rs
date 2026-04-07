@@ -303,7 +303,7 @@ fn symmetry_breaking_skips_different_labels() {
 
 /// Helper: build an ExecutionPlan with a single LabelScan and
 /// a TopK in the pipeline (simulates post-TopKRule state).
-fn make_index_order_plan(sort_key: &str, descending: bool, limit: u64) -> ExecutionPlan {
+fn make_index_order_plan(sort_key: &str, descending: bool, limit_n: u64) -> ExecutionPlan {
     let scan_var = IStr::new("S");
     let key = IStr::new(sort_key);
     ExecutionPlan {
@@ -323,7 +323,7 @@ fn make_index_order_plan(sort_key: &str, descending: bool, limit: u64) -> Execut
                 descending,
                 nulls_first: None,
             }],
-            limit,
+            limit: crate::ast::statement::LimitValue::Literal(limit_n),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -400,7 +400,7 @@ fn index_order_skips_multiple_scans() {
                 descending: true,
                 nulls_first: None,
             }],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -468,7 +468,7 @@ fn index_order_skips_multi_term_topk() {
                     nulls_first: None,
                 },
             ],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -506,7 +506,7 @@ fn index_order_skips_inline_props() {
                 descending: true,
                 nulls_first: None,
             }],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -659,7 +659,7 @@ fn predicate_reorder_non_contiguous_filters_untouched() {
                     negated: false,
                 },
             },
-            PipelineOp::Limit { count: 5 },
+            PipelineOp::Limit { value: crate::ast::statement::LimitValue::Literal(5) },
             PipelineOp::Filter {
                 predicate: Expr::Compare(
                     Box::new(Expr::Property(

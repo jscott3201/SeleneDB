@@ -73,11 +73,11 @@ fn plan_pipeline_stmt(
                 terms: terms.clone(),
             });
         }
-        PipelineStatement::Offset(n) => {
-            pipeline_ops.push(PipelineOp::Offset { count: *n });
+        PipelineStatement::Offset(v) => {
+            pipeline_ops.push(PipelineOp::Offset { value: v.clone() });
         }
-        PipelineStatement::Limit(n) => {
-            pipeline_ops.push(PipelineOp::Limit { count: *n });
+        PipelineStatement::Limit(v) => {
+            pipeline_ops.push(PipelineOp::Limit { value: v.clone() });
         }
         PipelineStatement::With(with) => {
             plan_with(with, pipeline_ops);
@@ -829,11 +829,11 @@ fn plan_return(ret: &ReturnClause, ops: &mut Vec<PipelineOp>) {
             terms: ret.order_by.clone(),
         });
     }
-    if let Some(offset) = ret.offset {
-        ops.push(PipelineOp::Offset { count: offset });
+    if let Some(offset) = ret.offset.clone() {
+        ops.push(PipelineOp::Offset { value: offset });
     }
-    if let Some(limit) = ret.limit {
-        ops.push(PipelineOp::Limit { count: limit });
+    if let Some(limit) = ret.limit.clone() {
+        ops.push(PipelineOp::Limit { value: limit });
     }
 }
 

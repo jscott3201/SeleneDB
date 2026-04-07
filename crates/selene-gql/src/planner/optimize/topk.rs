@@ -24,15 +24,12 @@ impl GqlOptimizerRule for TopKRule {
         let mut i = 0;
         let mut changed = false;
         while i + 1 < plan.pipeline.len() {
-            if let (PipelineOp::Sort { terms }, PipelineOp::Limit { count }) =
+            if let (PipelineOp::Sort { terms }, PipelineOp::Limit { value }) =
                 (&plan.pipeline[i], &plan.pipeline[i + 1])
             {
                 let terms = terms.clone();
-                let count = *count;
-                plan.pipeline[i] = PipelineOp::TopK {
-                    terms,
-                    limit: count,
-                };
+                let limit = value.clone();
+                plan.pipeline[i] = PipelineOp::TopK { terms, limit };
                 plan.pipeline.remove(i + 1);
                 changed = true;
             }

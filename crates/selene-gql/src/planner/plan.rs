@@ -284,11 +284,11 @@ pub enum PipelineOp {
     /// ORDER BY -- pipeline breaker (must materialize + sort).
     Sort { terms: Vec<OrderTerm> },
 
-    /// OFFSET n -- streaming skip.
-    Offset { count: u64 },
+    /// OFFSET n or $param -- streaming skip.
+    Offset { value: crate::ast::statement::LimitValue },
 
-    /// LIMIT n -- streaming truncate.
-    Limit { count: u64 },
+    /// LIMIT n or $param -- streaming truncate.
+    Limit { value: crate::ast::statement::LimitValue },
 
     /// RETURN -- terminal projection with optional GROUP BY + HAVING.
     Return {
@@ -315,7 +315,7 @@ pub enum PipelineOp {
     Call { procedure: ProcedureCall },
 
     /// ORDER BY + LIMIT fused into bounded heap: O(N log K) vs O(N log N).
-    TopK { terms: Vec<OrderTerm>, limit: u64 },
+    TopK { terms: Vec<OrderTerm>, limit: crate::ast::statement::LimitValue },
 
     /// CALL { subquery } -- inline subquery per input row.
     Subquery { plan: Box<ExecutionPlan> },

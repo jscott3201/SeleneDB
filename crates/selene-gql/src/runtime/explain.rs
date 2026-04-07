@@ -286,8 +286,8 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
                 .collect();
             format!("TopK(k={limit}, {})", ts.join(", "))
         }
-        PipelineOp::Offset { count } => format!("Offset({count})"),
-        PipelineOp::Limit { count } => format!("Limit({count})"),
+        PipelineOp::Offset { value } => format!("Offset({value})"),
+        PipelineOp::Limit { value } => format!("Limit({value})"),
         PipelineOp::Return {
             projections,
             group_by,
