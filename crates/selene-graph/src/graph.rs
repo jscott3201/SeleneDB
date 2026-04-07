@@ -56,9 +56,10 @@ pub struct SeleneGraph {
     pub(crate) composite_indexes:
         FxHashMap<(IStr, Vec<IStr>), std::sync::Arc<crate::typed_index::CompositeTypedIndex>>,
 
-    /// HNSW approximate nearest neighbor index for vector properties.
-    /// None when no vector properties exist or vector feature is disabled.
-    pub(crate) hnsw_index: Option<std::sync::Arc<crate::hnsw::HnswIndex>>,
+    /// HNSW approximate nearest neighbor indexes, keyed by namespace.
+    /// Default namespace `""` holds non-system vectors. System labels (e.g.
+    /// `__Memory`) route to namespaces like `"__memory"`.
+    pub(crate) hnsw_indexes: rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>>,
 
     // Mutation generation -- incremented on every commit for cache invalidation
     generation: u64,
@@ -100,7 +101,7 @@ impl SeleneGraph {
             next_edge_id: 1,
             property_index: FxHashMap::default(),
             composite_indexes: FxHashMap::default(),
-            hnsw_index: None,
+            hnsw_indexes: rustc_hash::FxHashMap::default(),
             generation: 0,
             schema,
             changelog: ChangelogBuffer::new(changelog_capacity),
@@ -428,14 +429,29 @@ impl SeleneGraph {
         &mut self.view_registry
     }
 
-    /// Get the HNSW vector index (if one has been built).
+    /// Get the default-namespace HNSW vector index.
     pub fn hnsw_index(&self) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
-        self.hnsw_index.as_ref()
+        self.hnsw_indexes.get("")
     }
 
-    /// Set the HNSW vector index.
+    /// Get the HNSW vector index for a specific namespace.
+    pub fn hnsw_index_for(&self, namespace: &str) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
+        self.hnsw_indexes.get(namespace)
+    }
+
+    /// Set the HNSW vector index for a namespace (empty string = default).
+    pub fn set_hnsw_index_for(&mut self, namespace: String, index: std::sync::Arc<crate::hnsw::HnswIndex>) {
+        self.hnsw_indexes.insert(namespace, index);
+    }
+
+    /// Set the default-namespace HNSW vector index.
     pub fn set_hnsw_index(&mut self, index: std::sync::Arc<crate::hnsw::HnswIndex>) {
-        self.hnsw_index = Some(index);
+        self.hnsw_indexes.insert(String::new(), index);
+    }
+
+    /// Iterate all HNSW indexes by namespace.
+    pub fn hnsw_indexes(&self) -> &rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>> {
+        &self.hnsw_indexes
     }
 
     /// Read-only access to the node store (for column-level scans).

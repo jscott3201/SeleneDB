@@ -186,8 +186,14 @@ impl Procedure for VectorSearch {
         }
 
         // Fast path: try HNSW index first (approximate nearest neighbor).
-        // Falls through to brute-force if the index is absent or empty.
-        if let Some(hnsw) = graph.hnsw_index() {
+        // Route to namespace based on label: system labels (__*) go to their
+        // own namespace, user labels go to the default namespace.
+        let hnsw_ns = if label.starts_with("__") {
+            label.to_lowercase()
+        } else {
+            String::new()
+        };
+        if let Some(hnsw) = graph.hnsw_index_for(&hnsw_ns) {
             // Build a combined label + scope filter bitmap.
             let label_bitmap: RoaringBitmap =
                 graph.label_bitmap(label).cloned().unwrap_or_default();
