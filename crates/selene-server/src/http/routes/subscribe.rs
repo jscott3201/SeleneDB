@@ -54,7 +54,19 @@ pub(in crate::http) async fn subscribe(
 
     let mut last_seq = state.persistence.changelog.lock().current_sequence();
 
-    let stream = BroadcastStream::new(rx).filter_map(move |msg| {
+    let ack_data = serde_json::json!({
+        "type": "subscription_ack",
+        "filters": {
+            "labels": &label_filter,
+            "changes": &change_filter,
+            "property": &property_filter,
+        }
+    });
+    let ack_event: Result<Event, Infallible> = Ok(Event::default()
+        .event("subscription_ack")
+        .data(serde_json::to_string(&ack_data).unwrap_or_default()));
+
+    let change_stream = BroadcastStream::new(rx).filter_map(move |msg| {
         let Ok(_seq) = msg else {
             return None;
         };
@@ -93,6 +105,11 @@ pub(in crate::http) async fn subscribe(
         let data = serde_json::to_string(&events).unwrap_or_default();
         Some(Ok(Event::default().data(data)))
     });
+
+    let stream = {
+        use futures::StreamExt as _;
+        futures::stream::once(async move { ack_event }).chain(change_stream)
+    };
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
 }

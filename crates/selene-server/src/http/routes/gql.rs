@@ -199,6 +199,8 @@ pub(in crate::http) struct GraphSliceBody {
     labels: Option<Vec<String>>,
     root_id: Option<u64>,
     max_depth: Option<u32>,
+    edge_labels: Option<Vec<String>>,
+    direction: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 }
@@ -222,9 +224,15 @@ pub(in crate::http) async fn graph_slice(
             root_id: body.root_id.unwrap_or(1),
             max_depth: body.max_depth,
         },
+        "traverse" => SliceType::Traverse {
+            root_id: body.root_id.unwrap_or(1),
+            edge_labels: body.edge_labels.unwrap_or_default(),
+            direction: body.direction.unwrap_or_else(|| "outgoing".into()),
+            max_depth: body.max_depth.unwrap_or(3),
+        },
         other => {
             return Err(crate::ops::OpError::InvalidRequest(format!(
-                "invalid slice_type: '{other}' -- use 'full', 'labels', or 'containment'"
+                "invalid slice_type: '{other}' -- use 'full', 'labels', 'containment', or 'traverse'"
             ))
             .into());
         }
