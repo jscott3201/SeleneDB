@@ -80,6 +80,9 @@ hostname = "0.4"
 # CSV import/export
 csv = "1"
 
+# SPARQL form-encoded POST support
+form_urlencoded = "1"
+
 # Metrics
 prometheus = "0.14"
 

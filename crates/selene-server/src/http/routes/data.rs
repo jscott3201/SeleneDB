@@ -319,6 +319,16 @@ pub(in crate::http) async fn import_rdf(
 }
 
 // -- SPARQL Protocol endpoint ------------------------------------------------
+//
+// Implements the SPARQL 1.1 Protocol (W3C Recommendation):
+//   GET  /sparql?query=...                    (URL-encoded query)
+//   POST /sparql  Content-Type: application/sparql-query       (raw body)
+//   POST /sparql  Content-Type: application/x-www-form-urlencoded  (query=... in body)
+//
+// Response format is determined by (in priority order):
+//   1. `?format=` query parameter (convenience extension)
+//   2. HTTP `Accept` header (SPARQL Protocol standard)
+//   3. Default: application/sparql-results+json
 
 #[derive(Deserialize)]
 pub(in crate::http) struct SparqlQueryParams {
@@ -326,46 +336,119 @@ pub(in crate::http) struct SparqlQueryParams {
     format: Option<String>,
 }
 
+/// Resolve the result format from `?format=` param or `Accept` header.
+fn resolve_sparql_format(
+    format_param: Option<&str>,
+    accept_header: Option<&str>,
+) -> selene_rdf::sparql::SparqlResultFormat {
+    use selene_rdf::sparql::SparqlResultFormat;
+    // Priority 1: explicit ?format= parameter
+    if let Some(f) = format_param
+        && let Ok(fmt) = f.parse()
+    {
+        return fmt;
+    }
+    // Priority 2: Accept header content negotiation
+    if let Some(accept) = accept_header {
+        // Check each media type in the Accept header (simplified: no q-value weighting)
+        for media in accept.split(',').map(str::trim) {
+            let media_type = media.split(';').next().unwrap_or("").trim();
+            match media_type {
+                "application/sparql-results+json" | "application/json" => {
+                    return SparqlResultFormat::Json
+                }
+                "application/sparql-results+xml" | "application/xml" => {
+                    return SparqlResultFormat::Xml
+                }
+                "text/csv" => return SparqlResultFormat::Csv,
+                "text/tab-separated-values" => return SparqlResultFormat::Tsv,
+                _ => {}
+            }
+        }
+    }
+    // Default
+    SparqlResultFormat::Json
+}
+
 /// `GET /sparql?query=SELECT...&format=json`
 pub(in crate::http) async fn sparql_get(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
+    headers: axum::http::HeaderMap,
     Query(params): Query<SparqlQueryParams>,
 ) -> Result<axum::response::Response, HttpError> {
     let _ = auth.0;
     let query_str = params
         .query
         .ok_or_else(|| HttpError::bad_request("missing required 'query' parameter"))?;
-    let format_str = params.format.as_deref().unwrap_or("json").to_owned();
-    execute_sparql_handler(&state, &query_str, &format_str)
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok());
+    let format = resolve_sparql_format(params.format.as_deref(), accept);
+    execute_sparql_handler(&state, &query_str, format)
 }
 
-/// `POST /sparql` (Content-Type: application/sparql-query, body = SPARQL query string)
+/// `POST /sparql`
+///
+/// Accepts two content types per the SPARQL Protocol:
+/// - `application/sparql-query`: raw SPARQL query in the body
+/// - `application/x-www-form-urlencoded`: `query=...` in the body
 pub(in crate::http) async fn sparql_post(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
+    headers: axum::http::HeaderMap,
     Query(params): Query<SparqlQueryParams>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, HttpError> {
     let _ = auth.0;
-    let query_str = std::str::from_utf8(&body)
-        .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
-    if query_str.is_empty() {
-        return Err(HttpError::bad_request("empty SPARQL query body"));
+
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let query_str = if content_type.starts_with("application/x-www-form-urlencoded") {
+        // Form-encoded: parse `query=...` from body
+        let body_str = std::str::from_utf8(&body)
+            .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
+        form_decode_query(body_str)?
+    } else {
+        // Default: raw SPARQL query in body (application/sparql-query)
+        let s = std::str::from_utf8(&body)
+            .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
+        if s.is_empty() {
+            return Err(HttpError::bad_request("empty SPARQL query body"));
+        }
+        s.to_owned()
+    };
+
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok());
+    let format = resolve_sparql_format(params.format.as_deref(), accept);
+    execute_sparql_handler(&state, &query_str, format)
+}
+
+/// Extract the `query` field from a URL-encoded form body.
+fn form_decode_query(body: &str) -> Result<String, HttpError> {
+    for (key, value) in form_urlencoded::parse(body.as_bytes()) {
+        if key == "query" {
+            if value.is_empty() {
+                return Err(HttpError::bad_request("empty query field in form body"));
+            }
+            return Ok(value.into_owned());
+        }
     }
-    let format_str = params.format.as_deref().unwrap_or("json").to_owned();
-    execute_sparql_handler(&state, query_str, &format_str)
+    Err(HttpError::bad_request(
+        "missing 'query' field in form-encoded body",
+    ))
 }
 
 fn execute_sparql_handler(
     state: &ServerState,
     query_str: &str,
-    format_str: &str,
+    format: selene_rdf::sparql::SparqlResultFormat,
 ) -> Result<axum::response::Response, HttpError> {
-    let format: selene_rdf::sparql::SparqlResultFormat = format_str
-        .parse()
-        .map_err(|e: String| HttpError::bad_request(e))?;
-
     let ns = &state.rdf_namespace;
     let snap = state.graph.load_snapshot();
     let csr = crate::bootstrap::get_or_build_csr(&state.csr_cache, &snap);
