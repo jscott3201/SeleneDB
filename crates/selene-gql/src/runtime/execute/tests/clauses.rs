@@ -404,3 +404,54 @@ fn e2e_keyword_graph_as_property() {
         .unwrap();
     assert_eq!(result.row_count(), 2);
 }
+
+// ── IN-list on non-indexed property ──
+
+#[test]
+fn e2e_in_list_no_index_returns_results() {
+    // No property index on temp; IN-list must fall through to runtime eval.
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [72.5, 80.0] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        2,
+        "IN-list on non-indexed property must return matching nodes"
+    );
+}
+
+#[test]
+fn e2e_in_list_no_index_partial_match() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [72.5] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        1,
+        "IN-list with single match should return one node"
+    );
+}
+
+#[test]
+fn e2e_in_list_no_index_no_match() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [999.0] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        0,
+        "IN-list with no matches should return zero rows"
+    );
+}

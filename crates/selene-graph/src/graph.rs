@@ -310,6 +310,42 @@ impl SeleneGraph {
         self.property_index.contains_key(&(label, prop_key))
     }
 
+    /// Create or replace a property index for the given (label, property_key) pair,
+    /// populating it from existing nodes that carry the label and have the property set.
+    pub fn create_property_index(&mut self, label: IStr, prop_key: IStr) {
+        use crate::typed_index::TypedIndex;
+        use selene_core::ValueType;
+
+        // Determine the value type from the first matching node's property.
+        let value_type = self
+            .all_node_bitmap()
+            .iter()
+            .filter_map(|nid| self.get_node(NodeId(u64::from(nid))))
+            .filter(|n| n.labels.contains(label))
+            .find_map(|n| {
+                n.properties.get(prop_key).map(|v| match v {
+                    selene_core::Value::Int(_) => ValueType::Int,
+                    selene_core::Value::UInt(_) => ValueType::UInt,
+                    selene_core::Value::Float(_) => ValueType::Float,
+                    _ => ValueType::String,
+                })
+            })
+            .unwrap_or(ValueType::String);
+
+        let mut idx = TypedIndex::new_for_type(&value_type);
+        for nid in &self.all_node_bitmap() {
+            let node_id = NodeId(u64::from(nid));
+            if let Some(node) = self.get_node(node_id)
+                && node.labels.contains(label)
+                && let Some(val) = node.properties.get(prop_key)
+            {
+                idx.insert(val, node_id);
+            }
+        }
+        self.property_index
+            .insert((label, prop_key), std::sync::Arc::new(idx));
+    }
+
     /// Get the TypedIndex for sorted iteration (index-ordered scan).
     /// Returns None if no index exists for this (label, key) pair.
     pub fn property_index_entries(

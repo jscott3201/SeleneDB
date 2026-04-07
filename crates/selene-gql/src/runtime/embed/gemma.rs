@@ -15,9 +15,9 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, VarBuilder};
 use tokenizers::Tokenizer;
 
-use super::bert::{l2_normalize, mean_pool};
 use super::gemma_encoder::{EmbeddingGemmaConfig, EmbeddingGemmaEncoder};
 use super::provider::{EmbeddingProvider, EmbeddingTask};
+use super::{l2_normalize, mean_pool};
 use crate::types::error::GqlError;
 
 /// Valid MRL truncation dimensions for EmbeddingGemma.

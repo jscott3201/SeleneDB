@@ -738,6 +738,7 @@ fn execute_single_pattern_op_chunk(
             if let Some(hint) = in_list_hint
                 && let Some(label_expr) = labels
                 && let Some(label_istr) = scan::single_label(label_expr)
+                && graph.has_property_index(label_istr, hint.key)
             {
                 let mut list_bitmap = roaring::RoaringBitmap::new();
                 for val in &hint.values {

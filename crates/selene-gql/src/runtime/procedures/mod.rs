@@ -18,6 +18,7 @@ pub mod community_search;
 pub mod graph;
 pub mod graphrag;
 pub mod history;
+pub mod introspection;
 pub mod memory;
 pub mod rdf;
 pub mod reindex;
@@ -171,6 +172,9 @@ impl ProcedureRegistry {
         // Embedding re-index
         reg.register(Arc::new(reindex::Reindex));
         reg.register(Arc::new(reindex::ReindexStatus));
+        // Procedure catalog introspection (registered last so it sees all others)
+        let introspect = introspection::GraphProcedures::from_registry(&reg);
+        reg.register(Arc::new(introspect));
         reg
     }
 
@@ -180,5 +184,10 @@ impl ProcedureRegistry {
 
     pub fn get(&self, name: &IStr) -> Option<&Arc<dyn Procedure>> {
         self.procedures.get(name)
+    }
+
+    /// Iterate over all registered procedures.
+    pub fn iter(&self) -> impl Iterator<Item = (&IStr, &Arc<dyn Procedure>)> {
+        self.procedures.iter()
     }
 }
