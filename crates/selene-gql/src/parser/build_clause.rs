@@ -207,7 +207,7 @@ pub(in crate::parser) fn build_projection(pair: Pair<'_, Rule>) -> Result<Projec
             Rule::alias => {
                 let ident_pair = inner
                     .into_inner()
-                    .find(|p| p.as_rule() == Rule::ident)
+                    .find(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::prop_ident)
                     .ok_or_else(|| GqlError::parse_error("expected ident in alias"))?;
                 alias = Some(intern_var(ident_pair));
             }
@@ -288,7 +288,7 @@ pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldI
             Rule::alias => {
                 let ident_pair = inner
                     .into_inner()
-                    .find(|p| p.as_rule() == Rule::ident)
+                    .find(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::prop_ident)
                     .ok_or_else(|| {
                         GqlError::parse_error(
                             "unexpected parser state: missing ident in YIELD alias",

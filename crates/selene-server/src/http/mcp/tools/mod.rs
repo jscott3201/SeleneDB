@@ -14,7 +14,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
-use super::format::{format_json, format_value};
+use super::format::{format_json, format_value, structured_result};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -144,9 +144,9 @@ impl SeleneTools {
     async fn get_node(&self, params: Parameters<NodeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let node = ops::nodes::get_node(&self.state, &auth, params.0.id).map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &node,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&node).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -285,12 +285,10 @@ impl SeleneTools {
             params.0.offset.unwrap_or(0) as usize,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "nodes": result.nodes,
-                "total": result.total,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "nodes": result.nodes,
+            "total": result.total,
+        })))
     }
 
     #[tool(
@@ -324,14 +322,12 @@ impl SeleneTools {
             limit,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "node_id": p.id,
-                "outgoing": result.outgoing,
-                "incoming": result.incoming,
-                "total": result.total,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "node_id": p.id,
+            "outgoing": result.outgoing,
+            "incoming": result.incoming,
+            "total": result.total,
+        })))
     }
 
     // ── Edge CRUD ────────────────────────────────────────────────────
@@ -349,9 +345,9 @@ impl SeleneTools {
     async fn get_edge(&self, params: Parameters<EdgeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let edge = ops::edges::get_edge(&self.state, &auth, params.0.id).map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &edge,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&edge).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -473,12 +469,10 @@ impl SeleneTools {
             params.0.offset.unwrap_or(0) as usize,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "edges": result.edges,
-                "total": result.total,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "edges": result.edges,
+            "total": result.total,
+        })))
     }
 
     // ── Time-Series ──────────────────────────────────────────────────
@@ -728,14 +722,12 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "node_count": stats.node_count,
-                "edge_count": stats.edge_count,
-                "node_labels": stats.node_labels,
-                "edge_labels": stats.edge_labels,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "node_count": stats.node_count,
+            "edge_count": stats.edge_count,
+            "node_labels": stats.node_labels,
+            "edge_labels": stats.edge_labels,
+        })))
     }
 
     // ── React Flow ────────────────────────────────────────────────────

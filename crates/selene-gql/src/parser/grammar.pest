@@ -212,7 +212,7 @@ distinct_kw = { ^"DISTINCT" }
 
 projection_list = { projection ~ ("," ~ projection)* }
 projection      = { expr ~ alias? }
-alias           = { ^"AS" ~ ident }
+alias           = { ^"AS" ~ prop_ident }
 
 group_by_clause = { group_by_kw ~ group_by_item ~ ("," ~ group_by_item)* }
 group_by_kw     = { ^"GROUP" ~ ^"BY" }
