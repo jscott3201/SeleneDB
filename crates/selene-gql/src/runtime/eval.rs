@@ -618,8 +618,9 @@ fn eval_function(
         .map(|a| eval_expr_ctx(a, binding, ctx))
         .collect::<Result<_, _>>()?;
 
-    // Try the function registry
-    if let Some(func) = ctx.functions.get(&call.name) {
+    // Try the function registry (case-insensitive lookup)
+    let lookup_name = IStr::new(&call.name.as_str().to_lowercase());
+    if let Some(func) = ctx.functions.get(&lookup_name) {
         return func.invoke(&args, ctx);
     }
 

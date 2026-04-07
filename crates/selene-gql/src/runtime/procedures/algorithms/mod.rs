@@ -42,10 +42,12 @@ use std::sync::Arc;
 ///
 /// Wrapped in `Arc<RwLock>` because procedures take `&self` and the catalog
 /// needs interior mutability for project/drop operations.
-pub(crate) type SharedCatalog = Arc<RwLock<ProjectionCatalog>>;
+/// Shared projection catalog. Thread-safe, must persist across requests.
+pub type SharedCatalog = Arc<RwLock<ProjectionCatalog>>;
 
 /// Create a new shared catalog for use with algorithm procedures.
-pub(crate) fn new_shared_catalog() -> SharedCatalog {
+/// Create a new shared projection catalog.
+pub fn new_shared_catalog() -> SharedCatalog {
     Arc::new(RwLock::new(ProjectionCatalog::new()))
 }
 

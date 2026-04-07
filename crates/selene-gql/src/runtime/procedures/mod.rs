@@ -110,6 +110,12 @@ impl ProcedureRegistry {
 
     /// Create a registry with all built-in procedures.
     pub fn with_builtins() -> Self {
+        Self::with_builtins_and_catalog(algorithms::new_shared_catalog())
+    }
+
+    /// Create a registry with all built-in procedures, using an existing
+    /// projection catalog so projections persist across requests.
+    pub fn with_builtins_and_catalog(catalog: algorithms::SharedCatalog) -> Self {
         let mut reg = Self::new();
         // Time-series
         reg.register(Arc::new(ts::TsRange));
@@ -136,7 +142,6 @@ impl ProcedureRegistry {
         reg.register(Arc::new(graph::GraphConstraints));
         reg.register(Arc::new(graph::GraphDiscoverSchema));
         // Graph algorithms
-        let catalog = algorithms::new_shared_catalog();
         algorithms::register_algorithm_procedures(&mut reg, catalog.clone());
         // Vector search
         reg.register(Arc::new(vector::VectorSearch));

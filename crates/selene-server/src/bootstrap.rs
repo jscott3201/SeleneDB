@@ -71,6 +71,8 @@ pub struct ServerState {
     /// query when the graph has not changed. The tuple stores
     /// `(generation, Arc<CsrAdjacency>)`.
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
+    /// Projection catalog for graph algorithms (persists across requests).
+    pub(crate) projection_catalog: selene_gql::runtime::procedures::algorithms::SharedCatalog,
     /// Enhanced clock counters for agent memory eviction (2-bit, 0-3).
     /// Per-namespace map of node_id to access counter. Ephemeral (not persisted).
     pub(crate) clock_counters:
@@ -836,6 +838,7 @@ pub async fn bootstrap(
         rdf_ontology,
         rdf_namespace,
         csr_cache,
+        projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
         clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
     })
 }
@@ -940,6 +943,7 @@ impl ServerState {
                 0,
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
+            projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
             clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
     }

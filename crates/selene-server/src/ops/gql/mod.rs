@@ -317,7 +317,9 @@ fn execute_read(
     };
     // Use cached CSR (rebuilds only when graph generation changes).
     let csr = crate::bootstrap::get_or_build_csr(&state.csr_cache, &snapshot);
-    let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins();
+    let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins_and_catalog(
+        state.projection_catalog.clone(),
+    );
     let mut qb = selene_gql::QueryBuilder::from_statement(stmt, &snapshot)
         .with_hot_tier(&state.hot_tier)
         .with_procedures(&registry)
