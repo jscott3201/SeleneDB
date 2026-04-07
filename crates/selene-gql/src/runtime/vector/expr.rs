@@ -67,7 +67,7 @@ pub fn eval_vec(
         Expr::Compare(left, op, right) => {
             let lc = eval_vec(left, chunk, gatherer, ctx)?;
             let rc = eval_vec(right, chunk, gatherer, ctx)?;
-            eval_compare_columns(&lc, *op, &rc, len)
+            eval_compare_columns(&lc, *op, &rc, len, ctx)
         }
 
         // ── Logic ───────────────────────────────────────────────
@@ -193,6 +193,7 @@ fn eval_compare_columns(
     op: CompareOp,
     right: &Column,
     len: usize,
+    ctx: &EvalContext<'_>,
 ) -> Result<Column, GqlError> {
     // Fast path: both columns are the same typed Arrow array.
     // Try typed comparison first, fall back to per-element GqlValue comparison.
@@ -212,20 +213,32 @@ fn eval_compare_columns(
         (Column::Bool(la), Column::Bool(ra)) if matches!(op, CompareOp::Eq | CompareOp::Neq) => {
             return Ok(Column::Bool(Arc::new(compare_bool(la, op, ra))));
         }
-        // Numeric promotion: Int64 vs Float64
-        (Column::Int64(la), Column::Float64(ra)) => {
-            let promoted = promote_int64_to_float64(la);
-            return Ok(Column::Bool(Arc::new(compare_float64(&promoted, op, ra))));
-        }
-        (Column::Float64(la), Column::Int64(ra)) => {
-            let promoted = promote_int64_to_float64(ra);
-            return Ok(Column::Bool(Arc::new(compare_float64(la, op, &promoted))));
+        // Numeric promotion: Int64 vs Float64 (cross-type, requires strict check)
+        (Column::Int64(_), Column::Float64(_)) | (Column::Float64(_), Column::Int64(_)) => {
+            if ctx.options.strict_coercion {
+                let (lt, rt) = match (left, right) {
+                    (Column::Int64(_), Column::Float64(_)) => ("INT64", "FLOAT64"),
+                    _ => ("FLOAT64", "INT64"),
+                };
+                return Err(crate::types::coercion::strict_type_error(lt, rt, "compare"));
+            }
+            match (left, right) {
+                (Column::Int64(la), Column::Float64(ra)) => {
+                    let promoted = promote_int64_to_float64(la);
+                    return Ok(Column::Bool(Arc::new(compare_float64(&promoted, op, ra))));
+                }
+                (Column::Float64(la), Column::Int64(ra)) => {
+                    let promoted = promote_int64_to_float64(ra);
+                    return Ok(Column::Bool(Arc::new(compare_float64(la, op, &promoted))));
+                }
+                _ => unreachable!(),
+            }
         }
         _ => {}
     }
 
     // Fallback: per-element comparison via GqlValue
-    compare_via_gql_value(left, right, op, len)
+    compare_via_gql_value(left, right, op, len, ctx)
 }
 
 fn compare_int64(left: &Int64Array, op: CompareOp, right: &Int64Array) -> BooleanArray {
@@ -352,6 +365,7 @@ fn compare_via_gql_value(
     right: &Column,
     op: CompareOp,
     len: usize,
+    ctx: &EvalContext<'_>,
 ) -> Result<Column, GqlError> {
     use crate::types::chunk::column_to_gql_value_pub;
     use crate::types::coercion::coerce_for_comparison;
@@ -365,6 +379,27 @@ fn compare_via_gql_value(
         if lv.is_null() || rv.is_null() {
             builder.append_null();
             continue;
+        }
+
+        if ctx.options.strict_coercion {
+            let needs_coercion = matches!(
+                (&lv, &rv),
+                (
+                    GqlValue::String(_),
+                    GqlValue::Int(_) | GqlValue::Float(_) | GqlValue::UInt(_)
+                ) | (
+                    GqlValue::Int(_) | GqlValue::Float(_) | GqlValue::UInt(_),
+                    GqlValue::String(_)
+                ) | (GqlValue::Bool(_), GqlValue::Int(_))
+                    | (GqlValue::Int(_), GqlValue::Bool(_))
+            );
+            if needs_coercion {
+                return Err(crate::types::coercion::strict_type_error(
+                    &lv.gql_type().to_string(),
+                    &rv.gql_type().to_string(),
+                    "compare",
+                ));
+            }
         }
 
         let (cl, cr) = coerce_for_comparison(&lv, &rv);

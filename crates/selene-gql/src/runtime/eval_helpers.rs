@@ -243,7 +243,7 @@ pub(super) fn eval_exists(
         None,
         Some(binding),
         None,
-        Some(1),
+        None,
         ctx,
     )?;
     let exists = !results.is_empty();

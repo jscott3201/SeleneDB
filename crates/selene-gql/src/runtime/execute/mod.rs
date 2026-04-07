@@ -11,6 +11,7 @@ use selene_graph::{SeleneGraph, SharedGraph};
 /// Query parameter map binding $param names to GqlValues.
 pub type ParameterMap = HashMap<IStr, GqlValue>;
 
+use crate::ast::expr::Expr;
 use crate::ast::statement::GqlStatement;
 use crate::parser::parse_statement;
 use crate::pattern::join;
@@ -789,7 +790,7 @@ fn execute_plan_inner(
                     op_idx += 1;
                     continue;
                 }
-                PipelineOp::Filter { predicate } => {
+                PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
                     // Flatten temporarily for eval_vec, apply result back.
                     // Use the main ctx (which has parameters and scope).
                     let fc = factorized.as_mut().unwrap();
@@ -1337,6 +1338,25 @@ impl<'a> MutationBuilder<'a> {
     ) -> Result<GqlResult, GqlError> {
         execute_in_transaction(self.query, txn, self.hot_tier, self.scope, self.parameters)
     }
+}
+
+/// Check whether an expression contains a subquery (EXISTS, COUNT, VALUE, COLLECT).
+/// Subquery predicates cannot be evaluated by the vectorized path and must
+/// fall through to the flat per-row evaluator.
+fn contains_subquery_expr(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.walk(&mut |e| {
+        if !found {
+            match e {
+                Expr::Exists { .. }
+                | Expr::CountSubquery(_)
+                | Expr::ValueSubquery(_)
+                | Expr::CollectSubquery(_) => found = true,
+                _ => {}
+            }
+        }
+    });
+    found
 }
 
 #[cfg(test)]
