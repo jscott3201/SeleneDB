@@ -24,6 +24,7 @@ pub mod rdf;
 pub mod reindex;
 pub mod schema_audit;
 pub mod schema_dump;
+pub mod schema_introspect;
 pub mod search;
 pub mod ts;
 pub mod ts_aggregate;
@@ -170,6 +171,10 @@ impl ProcedureRegistry {
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
         // Schema dump (LLM-friendly)
         reg.register(Arc::new(schema_dump::SchemaDump));
+        // Schema introspection
+        reg.register(Arc::new(schema_introspect::SchemaNodeLabels));
+        reg.register(Arc::new(schema_introspect::SchemaEdgeLabels));
+        reg.register(Arc::new(schema_introspect::SchemaNodeSchema));
         // GraphRAG hybrid retriever (ai feature)
         reg.register(Arc::new(graphrag::GraphRagSearch));
         // Agent memory recall (ai feature)
