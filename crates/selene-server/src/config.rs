@@ -221,14 +221,14 @@ pub struct VaultConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VectorConfig {
-    /// Embedding model to use: `"minilm"` (default) or `"embeddinggemma"`.
+    /// Embedding model name (default: `"embeddinggemma"`).
     #[serde(default = "default_model_name")]
     pub model: String,
     /// Path to model directory (safetensors + tokenizer + config).
-    /// Default: `{data_dir}/models/{model_name}/`
+    /// Default: `{data_dir}/models/embeddinggemma-300m/`
     pub model_path: Option<PathBuf>,
-    /// Output dimensions for MRL-capable models (EmbeddingGemma).
-    /// Options: 768, 512, 256, 128. Ignored for MiniLM (always 384).
+    /// Output dimensions for EmbeddingGemma (MRL truncation).
+    /// Options: 768 (default), 512, 256, 128.
     #[serde(default)]
     pub dimensions: Option<usize>,
     /// Remote embedding endpoint (alternative to local model).
@@ -304,7 +304,7 @@ fn default_embedding_property() -> String {
 }
 
 fn default_model_name() -> String {
-    "minilm".into()
+    "embeddinggemma".into()
 }
 
 // ── Runtime profiles & services ──────────────────────────────────────────

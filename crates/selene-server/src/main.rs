@@ -110,16 +110,11 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
 
     // Set embedding model config before bootstrap
     {
-        let model_name = &config.vector.model;
-        let model_dir = match model_name.as_str() {
-            "embeddinggemma" => "embeddinggemma-300m",
-            _ => "all-MiniLM-L6-v2",
-        };
         let model_path = config
             .vector
             .model_path
             .clone()
-            .unwrap_or_else(|| config.data_dir.join("models").join(model_dir));
+            .unwrap_or_else(|| config.data_dir.join("models").join("embeddinggemma-300m"));
         selene_gql::runtime::embed::set_model_config(
             config.vector.model.clone(),
             model_path,

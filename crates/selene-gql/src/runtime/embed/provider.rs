@@ -1,16 +1,17 @@
 //! Embedding provider trait and task-specific prompt selection.
 //!
 //! All embedding operations go through `EmbeddingProvider`. Implementations
-//! are `Send + Sync` for use in the static `OnceLock` cache. The `namespace`
-//! parameter on each method prepares the interface for future multi-namespace
-//! embedding support; current implementations ignore it.
+//! are `Send + Sync` for use in the static `OnceLock` cache. The default
+//! provider is EmbeddingGemma. The `namespace` parameter on each method
+//! prepares the interface for future multi-namespace embedding support;
+//! current implementations ignore it.
 
 use crate::types::error::GqlError;
 
 /// Task-specific prompt selection for embedding models that support it.
 ///
-/// Models like EmbeddingGemma use prompt prefixes to optimize embeddings
-/// for different downstream tasks. BERT-family models ignore this.
+/// EmbeddingGemma uses prompt prefixes to optimize embeddings for different
+/// downstream tasks (retrieval, clustering, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EmbeddingTask {
     /// Retrieval/search queries.
@@ -47,7 +48,7 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Output vector dimensions for the given namespace.
     fn dimensions(&self, namespace: Option<&str>) -> usize;
 
-    /// Model identifier (e.g., "all-MiniLM-L6-v2", "embeddinggemma-300m").
+    /// Model identifier (e.g., "embeddinggemma-300m").
     fn model_id(&self) -> &'static str;
 
     /// Maximum input text length in bytes.

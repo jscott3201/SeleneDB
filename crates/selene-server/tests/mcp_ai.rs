@@ -1,8 +1,8 @@
 //! MCP AI integration tests over Streamable HTTP.
 //!
 //! Full-stack tests for GraphRAG, agent memory, and Text2GQL MCP tools.
-//! Tests marked `#[ignore]` require the embedding model
-//! (all-MiniLM-L6-v2) at `data/models/all-MiniLM-L6-v2`.
+//! Tests marked `#[ignore]` require the EmbeddingGemma model
+//! at `data/models/embeddinggemma-300m`.
 //!
 //! Run: `cargo test -p selene-server --test mcp_ai`
 //! Run ignored: `cargo test -p selene-server --test mcp_ai -- --ignored`
@@ -19,7 +19,7 @@ use selene_server::config::SeleneConfig;
 
 fn has_model() -> bool {
     let path = std::env::var("SELENE_MODEL_PATH")
-        .unwrap_or_else(|_| "data/models/all-MiniLM-L6-v2".to_string());
+        .unwrap_or_else(|_| "data/models/embeddinggemma-300m".to_string());
     std::path::Path::new(&path)
         .join("model.safetensors")
         .exists()
@@ -401,7 +401,7 @@ async fn gql_examples_resource_readable() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires embedding model (all-MiniLM-L6-v2)"]
+#[ignore = "requires EmbeddingGemma model"]
 async fn remember_then_recall() {
     if !has_model() {
         eprintln!("SKIP: embedding model not available");
@@ -456,7 +456,7 @@ async fn remember_then_recall() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires embedding model (all-MiniLM-L6-v2)"]
+#[ignore = "requires EmbeddingGemma model"]
 async fn remember_then_forget() {
     if !has_model() {
         eprintln!("SKIP: embedding model not available");
