@@ -106,10 +106,10 @@ pub(in crate::http) async fn subscribe(
         Some(Ok(Event::default().data(data)))
     });
 
-    let stream = {
-        use futures::StreamExt as _;
-        futures::stream::once(async move { ack_event }).chain(change_stream)
-    };
+    let stream = futures::StreamExt::chain(
+        futures::stream::once(async move { ack_event }),
+        change_stream,
+    );
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
 }
