@@ -195,7 +195,7 @@ nulls_order   = { ^"NULLS" ~ (^"FIRST" | ^"LAST") }
 
 // ── OFFSET / LIMIT ─────────────────────────────────────────────────
 
-offset_stmt = { ^"OFFSET" ~ uint }
+offset_stmt = { (^"OFFSET" | ^"SKIP") ~ uint }
 limit_stmt  = { ^"LIMIT" ~ uint }
 
 // ── RETURN ─────────────────────────────────────────────────────────

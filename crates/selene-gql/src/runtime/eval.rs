@@ -384,7 +384,18 @@ fn resolve_var(name: IStr, binding: &Binding) -> Result<GqlValue, GqlError> {
                 elements,
             }))
         }
-        None => Err(GqlError::internal(format!("unbound variable '{name}'"))),
+        None => {
+            let hint = if name.as_str().chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !name.as_str().is_empty()
+            {
+                format!(
+                    "unbound variable '{name}'. If you meant a string literal, use single quotes: '{name}'"
+                )
+            } else {
+                format!("unbound variable '{name}'")
+            };
+            Err(GqlError::internal(hint))
+        }
     }
 }
 
@@ -647,14 +658,14 @@ fn eval_function(
                 _ => Err(GqlError::type_error("char_length requires a string")),
             }
         }
-        "upper" => match args.first() {
+        "upper" | "toupper" => match args.first() {
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::String(s)) => {
                 Ok(GqlValue::String(SmolStr::new(s.to_uppercase().as_str())))
             }
             _ => Err(GqlError::type_error("upper requires a string")),
         },
-        "lower" => match args.first() {
+        "lower" | "tolower" => match args.first() {
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::String(s)) => {
                 Ok(GqlValue::String(SmolStr::new(s.to_lowercase().as_str())))
@@ -670,7 +681,10 @@ fn eval_function(
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::List(l)) => Ok(GqlValue::Int(l.len() as i64)),
             Some(GqlValue::Path(p)) => Ok(GqlValue::Int(p.edge_count() as i64)),
-            _ => Err(GqlError::type_error("size requires a list or path")),
+            Some(GqlValue::String(s)) => Ok(GqlValue::Int(s.chars().count() as i64)),
+            _ => Err(GqlError::type_error(
+                "size requires a list, path, or string (use length() for strings)",
+            )),
         },
         "duration" => {
             // Parse duration string to GqlDuration (was incorrectly returning ZonedDateTime)

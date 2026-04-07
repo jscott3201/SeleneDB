@@ -444,7 +444,11 @@ pub(super) fn execute_mutations_write(
                                     ));
                                 }
                             }
-                            stats.properties_set += 1;
+                            if val.is_null() {
+                                stats.properties_removed += 1;
+                            } else {
+                                stats.properties_set += 1;
+                            }
                         }
                     }
                     MutationOp::SetAllProperties { target, properties } => {
