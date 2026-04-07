@@ -499,3 +499,49 @@ fn labels_function_displays_as_array() {
         "labels() should display as array, got: {val}"
     );
 }
+
+#[test]
+fn labels_as_alias_name() {
+    let g = setup_graph();
+    let result = QueryBuilder::new("MATCH (n:sensor) RETURN labels(n) AS labels", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 2);
+    let batch = &result.batches[0];
+    let col = batch
+        .column_by_name("LABELS")
+        .expect("alias 'labels' should be usable as column name");
+    let arr = col
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    let val = arr.value(0);
+    assert!(
+        val.starts_with('[') && val.ends_with(']'),
+        "labels() aliased as labels should work, got: {val}"
+    );
+}
+
+#[test]
+fn call_yield_where_filters_rows() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    // graph.labels() yields one row per distinct label; WHERE filters to just 'sensor'
+    let result = QueryBuilder::new(
+        "CALL graph.labels() YIELD label WHERE label = 'sensor' RETURN label",
+        &g,
+    )
+    .with_procedures(procs)
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let col = batch
+        .column_by_name("LABEL")
+        .expect("should have LABEL column");
+    let arr = col
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), "sensor");
+}

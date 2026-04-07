@@ -496,6 +496,8 @@ pub struct ProcedureCall {
     pub yields: Vec<YieldItem>,
     /// YIELD * -- include all procedure columns without filtering.
     pub yield_star: bool,
+    /// Optional WHERE/FILTER predicate after YIELD.
+    pub filter: Option<Expr>,
 }
 
 /// A single item in a YIELD clause.

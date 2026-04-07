@@ -232,6 +232,7 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
     let mut args = Vec::new();
     let mut yields = Vec::new();
     let mut yield_star = false;
+    let mut filter = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -255,6 +256,13 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
                     }
                 }
             }
+            Rule::yield_filter => {
+                let expr_pair = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::expr || p.as_rule() == Rule::or_expr)
+                    .ok_or_else(|| GqlError::parse_error("expected expression in YIELD filter"))?;
+                filter = Some(build_expr(expr_pair)?);
+            }
             _ => {}
         }
     }
@@ -264,6 +272,7 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
         args,
         yields,
         yield_star,
+        filter,
     })
 }
 

@@ -649,6 +649,59 @@ mod tests {
     }
 
     #[test]
+    fn ast_call_procedure_with_where_filter() {
+        let stmt =
+            parse_statement("CALL graph.labels() YIELD label WHERE label = 'sensor' RETURN label")
+                .unwrap();
+        match &stmt {
+            GqlStatement::Query(p) => {
+                let call = p
+                    .statements
+                    .iter()
+                    .find_map(|s| match s {
+                        PipelineStatement::Call(c) => Some(c),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(call.name.as_str(), "graph.labels");
+                assert_eq!(call.yields.len(), 1);
+                assert_eq!(call.yields[0].name.as_str(), "LABEL");
+                assert!(
+                    call.filter.is_some(),
+                    "WHERE after YIELD should produce a filter"
+                );
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn ast_call_procedure_with_filter_where() {
+        // FILTER WHERE variant should also work
+        let stmt = parse_statement(
+            "CALL graph.labels() YIELD label FILTER WHERE label = 'sensor' RETURN label",
+        )
+        .unwrap();
+        match &stmt {
+            GqlStatement::Query(p) => {
+                let call = p
+                    .statements
+                    .iter()
+                    .find_map(|s| match s {
+                        PipelineStatement::Call(c) => Some(c),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    call.filter.is_some(),
+                    "FILTER WHERE after YIELD should produce a filter"
+                );
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
     fn ast_transaction_start() {
         let stmt = parse_statement("START TRANSACTION").unwrap();
         assert!(matches!(stmt, GqlStatement::StartTransaction));

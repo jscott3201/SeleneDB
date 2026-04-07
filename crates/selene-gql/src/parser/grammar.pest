@@ -225,11 +225,12 @@ group_by_item   = { expr }
 
 call_stmt      = { ^"CALL" ~ (call_subquery | call_procedure) }
 call_subquery  = { "{" ~ query_pipeline ~ "}" }
-call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause }
+call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause ~ yield_filter? }
 qualified_name = { ident ~ ("." ~ ident)* }
 arg_list       = { expr ~ ("," ~ expr)* }
 yield_clause   = { ^"YIELD" ~ yield_item ~ ("," ~ yield_item)* }
 yield_item     = { ("*" | ident) ~ alias? }
+yield_filter   = { (^"WHERE" | ^"FILTER" ~ ^"WHERE"?) ~ expr }
 
 // ── Mutations ──────────────────────────────────────────────────────
 
@@ -537,7 +538,7 @@ keyword = @{
     | ^"NULL" | ^"TRUE" | ^"FALSE" | ^"UNKNOWN"
     | ^"WALK" | ^"TRAIL" | ^"ACYCLIC" | ^"SIMPLE" | ^"OPTIONAL" | ^"SHORTEST" | ^"DISTINCT" | ^"ASC" | ^"DESC"
     | ^"START" | ^"COMMIT" | ^"ROLLBACK" | ^"UNION" | ^"INTERSECT" | ^"EXCEPT" | ^"OTHERWISE" | ^"NEXT"
-    | ^"CAST" | ^"CASE" | ^"WHEN" | ^"THEN" | ^"ELSE" | ^"END" | ^"LABELS"
+    | ^"CAST" | ^"CASE" | ^"WHEN" | ^"THEN" | ^"ELSE" | ^"END"
     | ^"COUNT" | ^"SUM" | ^"AVERAGE" | ^"AVG"
     | ^"STDDEV_SAMP" | ^"STDDEV_POP"
     | ^"COLLECT_LIST" | ^"COLLECT"
