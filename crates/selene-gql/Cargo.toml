@@ -34,6 +34,10 @@ candle-nn = "0.10"
 candle-transformers = "0.10"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
+[features]
+default = []
+metal = ["candle-core/metal"]
+
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["bench"] }
 tempfile.workspace = true

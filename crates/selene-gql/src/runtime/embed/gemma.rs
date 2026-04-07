@@ -38,6 +38,7 @@ pub struct GemmaProvider {
     dense1: Linear, // 768 -> 3072
     dense2: Linear, // 3072 -> 768
     target_dims: usize,
+    device: Device,
 }
 
 impl GemmaProvider {
@@ -100,8 +101,8 @@ impl GemmaProvider {
                 message: format!("failed to load tokenizer: {e}"),
             })?;
 
-        let device = Device::Cpu;
-        // Load backbone weights (bf16 -> f32 on CPU)
+        let device = select_device();
+        // Load backbone weights (bf16 -> f32)
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device).map_err(
                 |e| GqlError::InvalidArgument {
@@ -121,11 +122,13 @@ impl GemmaProvider {
         // 3_Dense: 3072 -> 768 (weight shape: [768, 3072])
         let dense2 = Self::load_dense_layer(&dense2_path, 768, 3072, &device)?;
 
+        let device_name = if device.is_metal() { "Metal" } else { "CPU" };
         tracing::info!(
             model_dir = %model_dir.display(),
             hidden_size = config.hidden_size,
             num_layers = config.num_hidden_layers,
             target_dims = target_dims,
+            device = device_name,
             "EmbeddingGemma provider loaded"
         );
 
@@ -135,6 +138,7 @@ impl GemmaProvider {
             dense1,
             dense2,
             target_dims,
+            device,
         })
     }
 
@@ -193,7 +197,7 @@ impl GemmaProvider {
         }
 
         let prompted = Self::format_with_task(task, text);
-        let device = Device::Cpu;
+        let device = &self.device;
 
         // Tokenize
         let encoding = self
@@ -204,7 +208,7 @@ impl GemmaProvider {
             })?;
 
         let token_ids = encoding.get_ids();
-        let tokens = Tensor::new(token_ids, &device)
+        let tokens = Tensor::new(token_ids, device)
             .map_err(|e| GqlError::internal(format!("tensor creation: {e}")))?
             .unsqueeze(0)
             .map_err(|e| GqlError::internal(format!("unsqueeze: {e}")))?;
@@ -277,4 +281,26 @@ impl EmbeddingProvider for GemmaProvider {
     fn max_input_bytes(&self) -> usize {
         MAX_INPUT_BYTES
     }
+}
+
+/// Select the compute device for embedding inference.
+///
+/// Metal GPU is available when compiled with `--features metal` and enabled
+/// at runtime via `SELENE_METAL=1`. Defaults to CPU because candle 0.10's
+/// Metal backend lacks a rotary-emb kernel required by the Gemma 3 encoder.
+/// Enable when a future candle release adds the missing kernel.
+fn select_device() -> Device {
+    #[cfg(feature = "metal")]
+    if std::env::var("SELENE_METAL").is_ok_and(|v| v == "1") {
+        match Device::new_metal(0) {
+            Ok(device) => {
+                tracing::info!("EmbeddingGemma using Metal GPU acceleration");
+                return device;
+            }
+            Err(e) => {
+                tracing::warn!("Metal requested but not available, falling back to CPU: {e}");
+            }
+        }
+    }
+    Device::Cpu
 }
