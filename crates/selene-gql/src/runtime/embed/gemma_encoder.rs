@@ -69,7 +69,7 @@ fn default_sliding_window_pattern() -> usize {
 
 impl EmbeddingGemmaConfig {
     /// Whether layer `idx` uses sliding-window attention.
-    fn is_sliding_layer(&self, idx: usize) -> bool {
+    pub(super) fn is_sliding_layer(&self, idx: usize) -> bool {
         if let Some(ref types) = self.layer_types {
             types.get(idx).is_none_or(|t| t != "full_attention")
         } else if self.sliding_window_pattern > 0 {

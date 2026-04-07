@@ -17,6 +17,7 @@ use tokenizers::Tokenizer;
 
 use super::gemma_encoder::{EmbeddingGemmaConfig, EmbeddingGemmaEncoder};
 use super::provider::{EmbeddingProvider, EmbeddingTask};
+use super::quantized_gemma_encoder::QuantizedEmbeddingGemmaEncoder;
 use super::{l2_normalize, mean_pool};
 use crate::types::error::GqlError;
 
@@ -27,13 +28,31 @@ const VALID_MRL_DIMS: &[usize] = &[128, 256, 512, 768];
 /// EmbeddingGemma supports 2048 tokens, but we bound pre-tokenization input.
 const MAX_INPUT_BYTES: usize = 16384;
 
+/// Encoder backend: standard (safetensors) or quantized (GGUF).
+enum EncoderBackend {
+    Standard(EmbeddingGemmaEncoder),
+    Quantized(QuantizedEmbeddingGemmaEncoder),
+}
+
+impl EncoderBackend {
+    fn forward(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Standard(enc) => enc.forward(input_ids),
+            Self::Quantized(enc) => enc.forward(input_ids),
+        }
+    }
+}
+
 /// EmbeddingGemma embedding provider.
 ///
 /// Loads the EmbeddingGemma-300M model (Gemma 3 encoder backbone + Dense
 /// projection layers) and produces L2-normalized embeddings with optional
 /// MRL (Matryoshka Representation Learning) dimension truncation.
+///
+/// Supports both standard safetensors (bf16/f32) and quantized GGUF (Q4/Q8)
+/// backbone loading. Dense projections always load from safetensors.
 pub struct GemmaProvider {
-    encoder: EmbeddingGemmaEncoder,
+    encoder: EncoderBackend,
     tokenizer: Tokenizer,
     dense1: Linear, // 768 -> 3072
     dense2: Linear, // 3072 -> 768
@@ -44,15 +63,13 @@ pub struct GemmaProvider {
 impl GemmaProvider {
     /// Load EmbeddingGemma from a model directory.
     ///
-    /// Expected directory structure:
-    /// - `config.json` (EmbeddingGemma config)
-    /// - `tokenizer.json` (Gemma 3 tokenizer, 262K vocab)
-    /// - `model.safetensors` (backbone weights)
-    /// - `2_Dense/model.safetensors` (projection 768 -> 3072)
-    /// - `3_Dense/model.safetensors` (projection 3072 -> 768)
+    /// Supports two backend formats (auto-detected):
+    /// - **Safetensors** (default): `model.safetensors` backbone, ~1.1 GB bf16
+    /// - **GGUF** (quantized): `model.gguf` backbone, ~200-350 MB Q4/Q8
+    ///
+    /// Dense projection layers always load from safetensors (`2_Dense/`, `3_Dense/`).
     #[allow(unsafe_code)] // candle mmap requires unsafe for memory-mapped safetensors
     pub fn load(model_dir: &Path, target_dims: usize) -> Result<Self, GqlError> {
-        // Validate target dimensions
         if !VALID_MRL_DIMS.contains(&target_dims) {
             return Err(GqlError::InvalidArgument {
                 message: format!(
@@ -61,17 +78,31 @@ impl GemmaProvider {
             });
         }
 
-        // Check required files
         let config_path = model_dir.join("config.json");
         let tokenizer_path = model_dir.join("tokenizer.json");
-        let weights_path = model_dir.join("model.safetensors");
         let dense1_path = model_dir.join("2_Dense/model.safetensors");
         let dense2_path = model_dir.join("3_Dense/model.safetensors");
 
+        // Auto-detect GGUF vs safetensors backbone
+        let gguf_path = model_dir.join("model.gguf");
+        let safetensors_path = model_dir.join("model.safetensors");
+        let use_gguf = gguf_path.exists();
+
+        // Check required files
+        let backbone_desc = if use_gguf {
+            "model.gguf"
+        } else {
+            "model.safetensors"
+        };
+        let backbone_path = if use_gguf {
+            &gguf_path
+        } else {
+            &safetensors_path
+        };
         for (path, desc) in [
+            (backbone_path, backbone_desc),
             (&config_path, "config.json"),
             (&tokenizer_path, "tokenizer.json"),
-            (&weights_path, "model.safetensors"),
             (&dense1_path, "2_Dense/model.safetensors"),
             (&dense2_path, "3_Dense/model.safetensors"),
         ] {
@@ -85,7 +116,6 @@ impl GemmaProvider {
             }
         }
 
-        // Load config
         let config_str =
             std::fs::read_to_string(&config_path).map_err(|e| GqlError::InvalidArgument {
                 message: format!("failed to read config.json: {e}"),
@@ -95,31 +125,47 @@ impl GemmaProvider {
                 message: format!("failed to parse EmbeddingGemma config.json: {e}"),
             })?;
 
-        // Load tokenizer
         let tokenizer =
             Tokenizer::from_file(&tokenizer_path).map_err(|e| GqlError::InvalidArgument {
                 message: format!("failed to load tokenizer: {e}"),
             })?;
 
         let device = select_device();
-        // Load backbone weights (bf16 -> f32)
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device).map_err(
-                |e| GqlError::InvalidArgument {
-                    message: format!("failed to load backbone weights: {e}"),
-                },
-            )?
+
+        // Load encoder backbone (GGUF or safetensors)
+        let (encoder, format_label) = if use_gguf {
+            let mut file =
+                std::fs::File::open(&gguf_path).map_err(|e| GqlError::InvalidArgument {
+                    message: format!("failed to open GGUF file: {e}"),
+                })?;
+            let ct = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
+                GqlError::InvalidArgument {
+                    message: format!("failed to read GGUF content: {e}"),
+                }
+            })?;
+            let encoder =
+                QuantizedEmbeddingGemmaEncoder::from_gguf(&ct, &mut file, &config, &device)
+                    .map_err(|e| GqlError::InvalidArgument {
+                        message: format!("failed to build quantized encoder from GGUF: {e}"),
+                    })?;
+            (EncoderBackend::Quantized(encoder), "GGUF quantized")
+        } else {
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[safetensors_path], DType::F32, &device)
+                    .map_err(|e| GqlError::InvalidArgument {
+                        message: format!("failed to load backbone weights: {e}"),
+                    })?
+            };
+            let encoder = EmbeddingGemmaEncoder::load(&config, vb).map_err(|e| {
+                GqlError::InvalidArgument {
+                    message: format!("failed to build EmbeddingGemma encoder: {e}"),
+                }
+            })?;
+            (EncoderBackend::Standard(encoder), "safetensors f32")
         };
 
-        let encoder =
-            EmbeddingGemmaEncoder::load(&config, vb).map_err(|e| GqlError::InvalidArgument {
-                message: format!("failed to build EmbeddingGemma encoder: {e}"),
-            })?;
-
-        // Load Dense projection layers from separate safetensors
-        // 2_Dense: 768 -> 3072 (weight shape: [3072, 768])
+        // Dense projections always from safetensors (small: ~9.4 MB total)
         let dense1 = Self::load_dense_layer(&dense1_path, 3072, 768, &device)?;
-        // 3_Dense: 3072 -> 768 (weight shape: [768, 3072])
         let dense2 = Self::load_dense_layer(&dense2_path, 768, 3072, &device)?;
 
         let device_name = if device.is_metal() { "Metal" } else { "CPU" };
@@ -129,6 +175,7 @@ impl GemmaProvider {
             num_layers = config.num_hidden_layers,
             target_dims = target_dims,
             device = device_name,
+            format = format_label,
             "EmbeddingGemma provider loaded"
         );
 

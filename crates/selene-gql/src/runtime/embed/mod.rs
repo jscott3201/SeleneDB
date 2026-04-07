@@ -13,6 +13,7 @@
 pub mod gemma;
 pub(crate) mod gemma_encoder;
 pub mod provider;
+pub(crate) mod quantized_gemma_encoder;
 
 pub use provider::{EmbeddingProvider, EmbeddingTask};
 
