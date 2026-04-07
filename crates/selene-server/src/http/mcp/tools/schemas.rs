@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 
+use crate::http::mcp::format::{format_json, format_value};
 use crate::http::mcp::params::*;
 use crate::http::mcp::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -14,8 +15,8 @@ pub(super) async fn list_schemas_impl(tools: &SeleneTools) -> Result<CallToolRes
     let auth = mcp_auth(tools)?;
     let node_schemas = ops::schema::list_node_schemas(&tools.state, &auth).map_err(op_err)?;
     let edge_schemas = ops::schema::list_edge_schemas(&tools.state, &auth).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&serde_json::json!({
+    Ok(CallToolResult::success(vec![Content::text(format_value(
+        serde_json::json!({
             "node_schemas": node_schemas.iter().map(|s| {
                 let mut obj = serde_json::json!({
                     "label": &*s.label,
@@ -37,9 +38,9 @@ pub(super) async fn list_schemas_impl(tools: &SeleneTools) -> Result<CallToolRes
                     "description": &s.description,
                 })
             }).collect::<Vec<_>>(),
-        }))
-        .unwrap_or_default(),
-    )]))
+        }),
+        tools.compact,
+    ))]))
 }
 
 pub(super) async fn get_schema_impl(
@@ -51,24 +52,24 @@ pub(super) async fn get_schema_impl(
 
     // Try node schema first
     if let Ok(schema) = ops::schema::get_node_schema(&tools.state, &auth, label) {
-        return Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        return Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "type": "node",
                 "schema": schema,
-            }))
-            .unwrap_or_default(),
-        )]));
+            }),
+            tools.compact,
+        ))]));
     }
 
     // Fallback to edge schema
     let schema = ops::schema::get_edge_schema(&tools.state, &auth, label).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&serde_json::json!({
+    Ok(CallToolResult::success(vec![Content::text(format_value(
+        serde_json::json!({
             "type": "edge",
             "schema": schema,
-        }))
-        .unwrap_or_default(),
-    )]))
+        }),
+        tools.compact,
+    ))]))
 }
 
 pub(super) async fn create_schema_impl(
@@ -261,9 +262,10 @@ pub(super) async fn export_schemas_impl(tools: &SeleneTools) -> Result<CallToolR
         "relationships": relationships,
     });
 
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&export).unwrap_or_default(),
-    )]))
+    Ok(CallToolResult::success(vec![Content::text(format_json(
+        &export,
+        tools.compact,
+    ))]))
 }
 
 pub(super) async fn create_edge_schema_impl(

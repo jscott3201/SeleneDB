@@ -14,6 +14,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
+use super::format::{format_json, format_value};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -125,9 +126,10 @@ impl SeleneTools {
     async fn get_node(&self, params: Parameters<NodeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let node = ops::nodes::get_node(&self.state, &auth, params.0.id).map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&node).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &node,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -153,9 +155,10 @@ impl SeleneTools {
         let node = self
             .submit_mut(move || ops::nodes::create_node(&st, &auth, labels, props, parent_id))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&node).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &node,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -204,9 +207,10 @@ impl SeleneTools {
                 )
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&node).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &node,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -242,13 +246,13 @@ impl SeleneTools {
             params.0.offset.unwrap_or(0) as usize,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "nodes": result.nodes,
                 "total": result.total,
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -276,15 +280,15 @@ impl SeleneTools {
             limit,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "node_id": p.id,
                 "outgoing": result.outgoing,
                 "incoming": result.incoming,
                 "total": result.total,
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     // ── Edge CRUD ────────────────────────────────────────────────────
@@ -296,9 +300,10 @@ impl SeleneTools {
     async fn get_edge(&self, params: Parameters<EdgeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let edge = ops::edges::get_edge(&self.state, &auth, params.0.id).map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&edge).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &edge,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -321,9 +326,10 @@ impl SeleneTools {
         let edge = self
             .submit_mut(move || ops::edges::create_edge(&st, &auth, source, target, label, props))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&edge).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &edge,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -358,9 +364,10 @@ impl SeleneTools {
                 ops::edges::modify_edge(&st, &auth, edge_id, set_props, remove_props)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&edge).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &edge,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -396,13 +403,13 @@ impl SeleneTools {
             params.0.offset.unwrap_or(0) as usize,
         )
         .map_err(op_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "edges": result.edges,
                 "total": result.total,
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     // ── Time-Series ──────────────────────────────────────────────────
@@ -481,9 +488,10 @@ impl SeleneTools {
                 Some(p.limit.unwrap_or(1000) as usize),
             )
             .map_err(op_err)?;
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&samples).unwrap_or_default(),
-            )]));
+            return Ok(CallToolResult::success(vec![Content::text(format_json(
+                &samples,
+                self.compact,
+            ))]));
         }
 
         // Route to ts.window via GQL for aggregated results
@@ -580,9 +588,10 @@ impl SeleneTools {
             );
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&resp).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &resp,
+            self.compact,
+        ))]))
     }
 
     // ── Health ────────────────────────────────────────────────────────
@@ -593,9 +602,10 @@ impl SeleneTools {
     )]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         let resp = ops::health::health(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&resp).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &resp,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -604,9 +614,10 @@ impl SeleneTools {
     )]
     async fn info(&self) -> Result<CallToolResult, McpError> {
         let info = crate::ops::info::server_info(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&info).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &info,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -616,15 +627,15 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "node_count": stats.node_count,
                 "edge_count": stats.edge_count,
                 "node_labels": stats.node_labels,
                 "edge_labels": stats.edge_labels,
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     // ── React Flow ────────────────────────────────────────────────────
@@ -639,9 +650,10 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let graph = ops::reactflow::export_reactflow(&self.state, &auth, params.0.label.as_deref());
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&graph).unwrap_or_default(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(format_json(
+            &graph,
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -921,7 +933,7 @@ impl SeleneTools {
             "Semantic search for '{}': {} results\n{}",
             p.query_text,
             enriched.len(),
-            serde_json::to_string_pretty(&enriched).unwrap_or_default()
+            format_json(&enriched, self.compact)
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -998,9 +1010,7 @@ impl SeleneTools {
             if include_path && let Some(path) = self.containment_path(&auth, node.id) {
                 val["containment_path"] = serde_json::Value::String(path);
             }
-            CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&val).unwrap_or_default(),
-            )])
+            CallToolResult::success(vec![Content::text(format_json(&val, self.compact))])
         };
 
         // Strategy 1: Parse as numeric ID
@@ -1105,23 +1115,23 @@ impl SeleneTools {
             .collect();
 
         if !suggestions.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&serde_json::json!({
+            return Ok(CallToolResult::success(vec![Content::text(format_value(
+                serde_json::json!({
                     "error": "no_exact_match",
                     "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
                     "suggestions": suggestions,
-                }))
-                .unwrap_or_default(),
-            )]));
+                }),
+                self.compact,
+            ))]));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "error": "not_found",
                 "message": format!("Could not resolve '{}'", p.identifier),
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     #[tool(
@@ -1151,15 +1161,15 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
+        Ok(CallToolResult::success(vec![Content::text(format_value(
+            serde_json::json!({
                 "node": node,
                 "outgoing": edge_result.outgoing,
                 "incoming": edge_result.incoming,
                 "total_edges": edge_result.total,
-            }))
-            .unwrap_or_default(),
-        )]))
+            }),
+            self.compact,
+        ))]))
     }
 
     // ── RDF/SPARQL ────────────────────────────────────────────────────
@@ -1249,9 +1259,10 @@ impl SeleneTools {
                     "valid": true,
                     "query": query,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap_or_default(),
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(format_json(
+                    &result,
+                    self.compact,
+                ))]))
             }
             Err(e) => {
                 let message = e.to_string();
@@ -1276,9 +1287,10 @@ impl SeleneTools {
                     result["repairs"] = serde_json::json!(repairs);
                 }
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap_or_default(),
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(format_json(
+                    &result,
+                    self.compact,
+                ))]))
             }
         }
     }
