@@ -365,3 +365,28 @@ fn e2e_type_inference_empty_result_fallback() {
         arrow::datatypes::DataType::Utf8
     );
 }
+
+// ── YIELD * wildcard tests ──
+
+#[test]
+fn yield_star_returns_all_columns() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    // Use YIELD * to get all columns, then project specific column
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD * RETURN NAME", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(result.row_count() > 0);
+}
+
+#[test]
+fn yield_explicit_column_still_works() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD name RETURN name", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(result.row_count() > 0);
+}

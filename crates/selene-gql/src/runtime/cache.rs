@@ -235,6 +235,7 @@ fn try_fast_parse_call(gql: &str) -> Option<GqlStatement> {
         name: IStr::new(name_str),
         args,
         yields,
+        yield_star: false,
     };
 
     Some(GqlStatement::Query(QueryPipeline {

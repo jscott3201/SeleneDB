@@ -229,7 +229,7 @@ call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause }
 qualified_name = { ident ~ ("." ~ ident)* }
 arg_list       = { expr ~ ("," ~ expr)* }
 yield_clause   = { ^"YIELD" ~ yield_item ~ ("," ~ yield_item)* }
-yield_item     = { ident ~ alias? }
+yield_item     = { ("*" | ident) ~ alias? }
 
 // ── Mutations ──────────────────────────────────────────────────────
 

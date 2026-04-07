@@ -494,6 +494,8 @@ pub struct ProcedureCall {
     pub args: Vec<Expr>,
     /// YIELD clause -- which columns to project from procedure results.
     pub yields: Vec<YieldItem>,
+    /// YIELD * -- include all procedure columns without filtering.
+    pub yield_star: bool,
 }
 
 /// A single item in a YIELD clause.

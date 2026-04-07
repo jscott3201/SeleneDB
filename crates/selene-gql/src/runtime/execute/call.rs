@@ -69,12 +69,14 @@ pub(super) fn execute_call(
                 // case-insensitively against parsed YIELD names (which are
                 // uppercased by the parser's intern_var).
                 let upper_name = IStr::new(&name.as_str().to_uppercase());
-                let alias = call
-                    .yields
-                    .iter()
-                    .find(|y| y.name == upper_name)
-                    .map_or(upper_name, |y| y.alias.unwrap_or(y.name));
-                extended.bind(alias, BoundValue::Scalar(value.clone()));
+                // YIELD * or no explicit yields: include all columns
+                if call.yield_star || call.yields.is_empty() {
+                    extended.bind(upper_name, BoundValue::Scalar(value.clone()));
+                } else if let Some(yi) = call.yields.iter().find(|y| y.name == upper_name) {
+                    let alias = yi.alias.unwrap_or(yi.name);
+                    extended.bind(alias, BoundValue::Scalar(value.clone()));
+                }
+                // else: column not in YIELD list, skip it
             }
             output.push(extended);
         }

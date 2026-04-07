@@ -239,6 +239,7 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
     let mut name = None;
     let mut args = Vec::new();
     let mut yields = Vec::new();
+    let mut yield_star = false;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -254,7 +255,11 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
             Rule::yield_clause => {
                 for yi in inner.into_inner() {
                     if yi.as_rule() == Rule::yield_item {
-                        yields.push(build_yield_item(yi)?);
+                        if yi.as_str().trim() == "*" {
+                            yield_star = true;
+                        } else {
+                            yields.push(build_yield_item(yi)?);
+                        }
                     }
                 }
             }
@@ -266,6 +271,7 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
         name: name.ok_or_else(|| GqlError::parse_error("expected procedure name"))?,
         args,
         yields,
+        yield_star,
     })
 }
 
