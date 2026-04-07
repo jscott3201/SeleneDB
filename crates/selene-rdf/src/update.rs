@@ -85,6 +85,19 @@ pub fn execute_update(
                     graph, namespace, delete, insert, using.clone(), pattern, &mut result,
                 )?;
             }
+            GraphUpdateOperation::Clear {
+                silent,
+                graph: target,
+            } => {
+                apply_clear(graph, target, *silent, &mut result)?;
+            }
+            GraphUpdateOperation::Drop {
+                silent,
+                graph: target,
+            } => {
+                // DROP has same semantics as CLEAR for a single-graph system.
+                apply_clear(graph, target, *silent, &mut result)?;
+            }
             other => {
                 return Err(UpdateError::Unsupported(format!(
                     "{} is not yet supported",
@@ -258,6 +271,54 @@ fn apply_delete_data(
 
     m.commit(0)?;
     Ok(())
+}
+
+/// Apply CLEAR or DROP on a graph target.
+///
+/// For a property graph with a single default graph:
+/// - `DefaultGraph` / `AllGraphs`: delete all nodes and edges
+/// - `NamedGraphs`: no-op (no user-defined named graphs)
+/// - `NamedNode(...)`: error unless silent
+fn apply_clear(
+    graph: &mut SeleneGraph,
+    target: &spargebra::algebra::GraphTarget,
+    silent: bool,
+    result: &mut UpdateResult,
+) -> Result<(), UpdateError> {
+    use spargebra::algebra::GraphTarget;
+    match target {
+        GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
+            let mut m = graph.mutate();
+            // Delete all edges first (edges reference nodes).
+            let edge_ids: Vec<EdgeId> = m.graph().all_edge_ids().collect();
+            for eid in &edge_ids {
+                let _ = m.delete_edge(*eid);
+            }
+            result.edges_deleted += edge_ids.len();
+            // Delete all nodes.
+            let node_ids: Vec<selene_core::NodeId> = m.graph().all_node_ids().collect();
+            for nid in &node_ids {
+                let _ = m.delete_node(*nid);
+            }
+            result.nodes_created = 0; // reset; we track deletions via edges/props
+            m.commit(0)?;
+            Ok(())
+        }
+        GraphTarget::NamedGraphs => {
+            // No user-defined named graphs in Selene. No-op.
+            Ok(())
+        }
+        GraphTarget::NamedNode(nn) => {
+            if silent {
+                Ok(())
+            } else {
+                Err(UpdateError::Unsupported(format!(
+                    "CLEAR/DROP on named graph <{}> (Selene only has a default graph)",
+                    nn.as_str()
+                )))
+            }
+        }
+    }
 }
 
 /// Apply a DELETE/INSERT WHERE operation.
@@ -488,11 +549,12 @@ mod tests {
     fn unsupported_operation_returns_error() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = "CLEAR DEFAULT";
+        // LOAD is not supported
+        let sparql = "LOAD <http://example.com/data.ttl>";
         let result = execute_update(&mut g, &ns, sparql);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("CLEAR"), "error: {err}");
+        assert!(err.contains("LOAD"), "error: {err}");
     }
 
     #[test]
@@ -581,7 +643,52 @@ mod tests {
         );
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.edges_created, 1);
-        let edges: Vec<_> = g.outgoing(NodeId(1)).iter().filter_map(|&eid| g.get_edge(eid)).collect();
+        let edges: Vec<_> = g
+            .outgoing(NodeId(1))
+            .iter()
+            .filter_map(|&eid| g.get_edge(eid))
+            .collect();
         assert!(edges.iter().any(|e| e.label == IStr::new("monitors")));
+    }
+
+    // ── Phase 3: CLEAR / DROP ──
+
+    #[test]
+    fn clear_default_deletes_everything() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        assert!(g.node_count() > 0);
+        let result = execute_update(&mut g, &ns, "CLEAR DEFAULT").unwrap();
+        assert!(result.edges_deleted > 0);
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn drop_default_same_as_clear() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        let result = execute_update(&mut g, &ns, "DROP DEFAULT").unwrap();
+        assert_eq!(g.node_count(), 0);
+        assert!(result.edges_deleted > 0);
+    }
+
+    #[test]
+    fn clear_named_graph_silent_is_noop() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        let count_before = g.node_count();
+        let result =
+            execute_update(&mut g, &ns, "CLEAR SILENT GRAPH <http://example.com/g>").unwrap();
+        assert_eq!(g.node_count(), count_before);
+        assert_eq!(result.edges_deleted, 0);
+    }
+
+    #[test]
+    fn clear_named_graph_without_silent_errors() {
+        let mut g = graph_with_sensor();
+        let ns = ns();
+        let result = execute_update(&mut g, &ns, "CLEAR GRAPH <http://example.com/g>");
+        assert!(result.is_err());
     }
 }

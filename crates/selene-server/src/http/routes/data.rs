@@ -371,6 +371,9 @@ fn resolve_sparql_format(
 }
 
 /// `GET /sparql?query=SELECT...&format=json`
+///
+/// Without a `query` parameter, returns the SPARQL Service Description (Turtle)
+/// per the W3C SPARQL 1.1 Service Description spec.
 pub(in crate::http) async fn sparql_get(
     State(state): State<Arc<ServerState>>,
     auth: HttpAuth,
@@ -378,14 +381,18 @@ pub(in crate::http) async fn sparql_get(
     Query(params): Query<SparqlQueryParams>,
 ) -> Result<axum::response::Response, HttpError> {
     let _ = auth.0;
-    let query_str = params
-        .query
-        .ok_or_else(|| HttpError::bad_request("missing required 'query' parameter"))?;
+
+    // No query parameter: return Service Description
+    if params.query.is_none() {
+        return Ok(sparql_service_description(&state));
+    }
+
+    let query_str = params.query.as_deref().unwrap();
     let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let format = resolve_sparql_format(params.format.as_deref(), accept);
-    execute_sparql_handler(&state, &query_str, format)
+    execute_sparql_handler(&state, query_str, format)
 }
 
 /// `POST /sparql`
@@ -493,6 +500,48 @@ fn execute_sparql_update_handler(
         })),
     )
         .into_response())
+}
+
+/// SPARQL 1.1 Service Description (W3C Recommendation).
+///
+/// Returned as Turtle when GET /sparql has no query parameter. Describes
+/// the endpoint's supported features, result formats, and update capabilities.
+fn sparql_service_description(state: &ServerState) -> axum::response::Response {
+    let base = format!(
+        "http://{}:{}/sparql",
+        state.config.http.listen_addr.ip(),
+        state.config.http.listen_addr.port()
+    );
+    let turtle = format!(
+        r"@prefix sd: <http://www.w3.org/ns/sparql-service-description#> .
+@prefix void: <http://rdfs.org/ns/void#> .
+
+<{base}> a sd:Service ;
+    sd:endpoint <{base}> ;
+    sd:supportedLanguage sd:SPARQL11Query, sd:SPARQL11Update ;
+    sd:resultFormat
+        <http://www.w3.org/ns/formats/SPARQL_Results_JSON> ,
+        <http://www.w3.org/ns/formats/SPARQL_Results_XML> ,
+        <http://www.w3.org/ns/formats/SPARQL_Results_CSV> ,
+        <http://www.w3.org/ns/formats/SPARQL_Results_TSV> ,
+        <http://www.w3.org/ns/formats/N-Triples> ;
+    sd:feature sd:BasicFederatedQuery ;
+    sd:defaultDataset [
+        a sd:Dataset ;
+        sd:defaultGraph [
+            a sd:Graph ;
+            void:triples {triples}
+        ]
+    ] .
+",
+        triples = state.graph.read(|g| g.node_count() + g.edge_count())
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/turtle; charset=utf-8")],
+        turtle,
+    )
+        .into_response()
 }
 
 fn execute_sparql_handler(
