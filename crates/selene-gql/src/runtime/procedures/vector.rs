@@ -443,8 +443,11 @@ impl Procedure for SemanticSearch {
         Ok(results
             .into_iter()
             .map(|s| {
-                let path_nodes =
-                    selene_graph::algorithms::containment::containment_walk_up(graph, s.node_id);
+                let path_nodes = selene_graph::algorithms::containment::walk_ancestors(
+                    graph,
+                    s.node_id,
+                    &["contains", "has_sensor", "supplies"],
+                );
                 let path_str = path_nodes
                     .iter()
                     .filter_map(|nid| {
