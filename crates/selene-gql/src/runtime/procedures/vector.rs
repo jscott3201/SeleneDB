@@ -744,6 +744,131 @@ impl Procedure for ScopedVectorSearch {
     }
 }
 
+// ── graph.scopedSemanticSearch ──────────────────────────────────────
+
+/// `CALL graph.scopedSemanticSearch(1, 3, 'find temperature anomalies', 10)`
+///
+/// Combines embed() + BFS-scoped vector search. Handles embedding
+/// internally (unlike scopedVectorSearch which requires a pre-computed vector).
+/// Steps: (1) embed query text, (2) BFS from root to collect candidates,
+/// (3) top-k cosine scan over the neighborhood.
+pub struct ScopedSemanticSearch;
+
+impl Procedure for ScopedSemanticSearch {
+    fn name(&self) -> &'static str {
+        "graph.scopedSemanticSearch"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![
+                ProcedureParam {
+                    name: "rootNodeId",
+                    typ: GqlType::UInt,
+                },
+                ProcedureParam {
+                    name: "maxHops",
+                    typ: GqlType::Int,
+                },
+                ProcedureParam {
+                    name: "queryText",
+                    typ: GqlType::String,
+                },
+                ProcedureParam {
+                    name: "k",
+                    typ: GqlType::Int,
+                },
+            ],
+            yields: vec![
+                YieldColumn {
+                    name: "node_id",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "score",
+                    typ: GqlType::Float,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        args: &[GqlValue],
+        graph: &SeleneGraph,
+        _hot_tier: Option<&HotTier>,
+        scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        if args.len() < 4 {
+            return Err(GqlError::InvalidArgument {
+                message: "graph.scopedSemanticSearch requires 4 arguments: \
+                          rootNodeId, maxHops, queryText, k"
+                    .into(),
+            });
+        }
+
+        let root_id = NodeId(match &args[0] {
+            GqlValue::Int(id) if *id >= 0 => *id as u64,
+            GqlValue::UInt(id) => *id,
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "scopedSemanticSearch: rootNodeId must be INT, got {}",
+                    other.gql_type()
+                )));
+            }
+        });
+
+        let max_hops = args[1].as_int()?;
+        if max_hops <= 0 {
+            return Err(GqlError::InvalidArgument {
+                message: "scopedSemanticSearch: maxHops must be > 0".into(),
+            });
+        }
+        let max_hops = max_hops.min(20) as u32;
+
+        let query_text = args[2].as_str()?;
+
+        let k = args[3].as_int()? as usize;
+        if k == 0 {
+            return Ok(vec![]);
+        }
+        const MAX_K: usize = 10_000;
+        if k > MAX_K {
+            return Err(GqlError::InvalidArgument {
+                message: format!("scopedSemanticSearch: k must be <= {MAX_K}"),
+            });
+        }
+
+        // 1. Embed the query text
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
+
+        // 2. BFS to collect neighborhood candidates
+        let neighbors = selene_graph::algorithms::traversal::bfs(graph, root_id, None, max_hops);
+
+        if neighbors.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 3. Top-k cosine search over the neighborhood
+        let prop_key = IStr::new("embedding");
+        let results =
+            top_k_cosine_scan(graph, neighbors.into_iter(), prop_key, &query_vec, k, scope);
+
+        Ok(results
+            .into_iter()
+            .map(|s| {
+                smallvec![
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
+                    (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
+                ]
+            })
+            .collect())
+    }
+}
+
 // ── graph.rebuildVectorIndex ────────────────────────────────────────
 
 /// `CALL graph.rebuildVectorIndex('embedding')`

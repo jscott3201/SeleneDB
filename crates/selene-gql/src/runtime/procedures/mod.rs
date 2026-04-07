@@ -148,6 +148,7 @@ impl ProcedureRegistry {
         reg.register(Arc::new(vector::VectorSearch));
         reg.register(Arc::new(vector::SimilarNodes));
         reg.register(Arc::new(vector::ScopedVectorSearch));
+        reg.register(Arc::new(vector::ScopedSemanticSearch));
         reg.register(Arc::new(vector::RebuildVectorIndex));
         reg.register(Arc::new(vector::SemanticSearch));
         // Community-enhanced RAG (vector + Louvain)
