@@ -868,9 +868,7 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
                             IStr::new(&format!("col_{i}"))
                         }
                     }
-                    Expr::Function(fc) => {
-                        IStr::new(&format!("{}()", fc.name))
-                    }
+                    Expr::Function(fc) => IStr::new(&format!("{}()", fc.name)),
                     _ => IStr::new(&format!("col_{i}")),
                 }
             });

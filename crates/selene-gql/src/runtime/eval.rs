@@ -385,7 +385,10 @@ fn resolve_var(name: IStr, binding: &Binding) -> Result<GqlValue, GqlError> {
             }))
         }
         None => {
-            let hint = if name.as_str().chars().all(|c| c.is_alphanumeric() || c == '_')
+            let hint = if name
+                .as_str()
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_')
                 && !name.as_str().is_empty()
             {
                 format!(

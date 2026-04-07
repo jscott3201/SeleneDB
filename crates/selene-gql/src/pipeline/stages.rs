@@ -872,25 +872,24 @@ fn execute_return(
 
     // Detect horizontal aggregation: all Expr::Aggregate inner expressions
     // resolve to List values per-row (from Group variables)
-    let horizontal =
-        has_aggregates && effective_group_by.is_empty() && !bindings.is_empty() && {
-            projections
-                .iter()
-                .filter(|p| p.expr.is_aggregate())
-                .all(|p| match &p.expr {
-                    Expr::Aggregate(agg) => {
-                        if let Some(inner) = &agg.expr {
-                            matches!(
-                                eval_expr_ctx(inner, &bindings[0], ctx),
-                                Ok(GqlValue::List(_))
-                            )
-                        } else {
-                            false
-                        }
+    let horizontal = has_aggregates && effective_group_by.is_empty() && !bindings.is_empty() && {
+        projections
+            .iter()
+            .filter(|p| p.expr.is_aggregate())
+            .all(|p| match &p.expr {
+                Expr::Aggregate(agg) => {
+                    if let Some(inner) = &agg.expr {
+                        matches!(
+                            eval_expr_ctx(inner, &bindings[0], ctx),
+                            Ok(GqlValue::List(_))
+                        )
+                    } else {
+                        false
                     }
-                    _ => false,
-                })
-        };
+                }
+                _ => false,
+            })
+    };
 
     let mut result = if !effective_group_by.is_empty() {
         execute_grouped_return(bindings, projections, effective_group_by, ctx)?

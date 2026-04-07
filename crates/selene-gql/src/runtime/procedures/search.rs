@@ -48,9 +48,11 @@ pub fn set_search_provider(provider: Arc<dyn SearchProvider>) {
 }
 
 fn get_search_provider() -> Result<&'static Arc<dyn SearchProvider>, GqlError> {
-    SEARCH_PROVIDER.get().ok_or_else(|| GqlError::InvalidArgument {
-        message: "full-text search not available (no searchable schemas configured)".into(),
-    })
+    SEARCH_PROVIDER
+        .get()
+        .ok_or_else(|| GqlError::InvalidArgument {
+            message: "full-text search not available (no searchable schemas configured)".into(),
+        })
 }
 
 // ── graph.textSearch ────────────────────────────────────────────────

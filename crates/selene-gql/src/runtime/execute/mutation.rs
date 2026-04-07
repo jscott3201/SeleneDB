@@ -830,10 +830,8 @@ pub(super) fn execute_mutations_write(
                 .filter_map(|(var, bv)| {
                     if let BoundValue::Node(id) = bv {
                         deleted_node_props.get(id).map(|props| {
-                            let fields: Vec<(IStr, GqlValue)> = props
-                                .iter()
-                                .map(|(k, v)| (*k, GqlValue::from(v)))
-                                .collect();
+                            let fields: Vec<(IStr, GqlValue)> =
+                                props.iter().map(|(k, v)| (*k, GqlValue::from(v))).collect();
                             (*var, GqlValue::Record(GqlRecord { fields }))
                         })
                     } else {
