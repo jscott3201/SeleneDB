@@ -350,8 +350,8 @@ fn execute_factorized_core(
 
                 // Flatten to DataChunk for eval_vec (Phase C will make this native)
                 let flat = fc.flatten();
-                let functions = crate::runtime::functions::FunctionRegistry::new();
-                let eval_ctx = crate::runtime::eval::EvalContext::new(graph, &functions);
+                let functions = crate::runtime::functions::FunctionRegistry::builtins();
+                let eval_ctx = crate::runtime::eval::EvalContext::new(graph, functions);
                 let gatherer = crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
 
                 if let Ok(crate::types::chunk::Column::Bool(arr)) =
@@ -375,8 +375,8 @@ fn execute_factorized_core(
                     let deep = fc.deepest_mut();
                     let active_indices: Vec<usize> =
                         deep.selection.active_indices(deep.len).collect();
-                    let functions = crate::runtime::functions::FunctionRegistry::new();
-                    let eval_ctx = crate::runtime::eval::EvalContext::new(graph, &functions);
+                    let functions = crate::runtime::functions::FunctionRegistry::builtins();
+                    let eval_ctx = crate::runtime::eval::EvalContext::new(graph, functions);
                     let mut new_active = Vec::with_capacity(active_indices.len());
                     for (pos, &phys_idx) in active_indices.iter().enumerate() {
                         let row = flat.row_view(pos);
@@ -951,8 +951,8 @@ fn execute_single_pattern_op_chunk(
         PatternOp::IntermediateFilter { predicate } => {
             // Batch filter via eval_vec, falling back to per-row on Unsupported
             let mut chunk = current;
-            let functions = crate::runtime::functions::FunctionRegistry::new();
-            let eval_ctx = crate::runtime::eval::EvalContext::new(graph, &functions);
+            let functions = crate::runtime::functions::FunctionRegistry::builtins();
+            let eval_ctx = crate::runtime::eval::EvalContext::new(graph, functions);
 
             let gatherer = crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
 
