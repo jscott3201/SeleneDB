@@ -941,12 +941,18 @@ fn execute_plan_inner(
 
     // Build result: direct Arrow materialization from DataChunk.
     let row_count = final_chunk.active_len();
-    let aliases: Vec<IStr> = plan
+    let mut aliases: Vec<IStr> = plan
         .output_schema
         .fields()
         .iter()
         .map(|f| IStr::new(f.name()))
         .collect();
+    // RETURN * / YIELD *: output_schema is empty at plan time because the
+    // projected columns are not known until runtime. Fall back to the
+    // chunk's own schema so that all columns are materialized.
+    if aliases.is_empty() && final_chunk.column_count() > 0 {
+        aliases = final_chunk.schema().iter().map(|(name, _)| *name).collect();
+    }
     let (schema, batches) = materialize_chunk_to_arrow(&final_chunk, &aliases)?;
 
     Ok(GqlResult {

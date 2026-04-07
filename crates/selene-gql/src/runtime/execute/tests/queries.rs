@@ -450,3 +450,52 @@ fn call_yield_with_return_still_works() {
         "CALL/YIELD followed by RETURN should still work"
     );
 }
+
+#[test]
+fn yield_star_return_star_returns_all_columns() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.labels() YIELD * RETURN *", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "YIELD * RETURN * should return rows"
+    );
+}
+
+#[test]
+fn yield_star_return_star_procedures() {
+    let g = setup_graph();
+    let procs = ProcedureRegistry::builtins();
+    let result = QueryBuilder::new("CALL graph.procedures() YIELD * RETURN *", &g)
+        .with_procedures(procs)
+        .execute()
+        .unwrap();
+    assert!(
+        result.row_count() > 0,
+        "YIELD * RETURN * on procedures should return rows"
+    );
+}
+
+#[test]
+fn labels_function_displays_as_array() {
+    let g = setup_graph();
+    let result = QueryBuilder::new("MATCH (n:sensor) RETURN labels(n) AS lbls", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 2);
+    let batch = &result.batches[0];
+    let col = batch
+        .column_by_name("LBLS")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    let val = col.value(0);
+    assert!(
+        val.starts_with('[') && val.ends_with(']'),
+        "labels() should display as array, got: {val}"
+    );
+}
