@@ -29,9 +29,11 @@ struct SearchEntry {
 ///
 /// Holds one tantivy index per searchable (label, property) pair.
 /// Writers are persistent and reused. Commits are batched via `commit_all()`.
+/// New indexes can be added at runtime via `add_searchable()` when schemas
+/// are registered via DDL.
 pub struct SearchIndex {
-    _index_dir: PathBuf,
-    entries: HashMap<(IStr, IStr), SearchEntry>,
+    index_dir: PathBuf,
+    entries: parking_lot::RwLock<HashMap<(IStr, IStr), SearchEntry>>,
 }
 
 impl SearchIndex {
@@ -95,19 +97,69 @@ impl SearchIndex {
         }
 
         Ok(Self {
-            _index_dir: index_dir.to_path_buf(),
-            entries,
+            index_dir: index_dir.to_path_buf(),
+            entries: parking_lot::RwLock::new(entries),
         })
+    }
+
+    /// Dynamically add a search index for a (label, property) pair.
+    ///
+    /// Called when a schema with `searchable` properties is registered via DDL
+    /// after the server has started. If the index already exists, this is a no-op.
+    pub fn add_searchable(&self, label: IStr, property: IStr) -> Result<(), anyhow::Error> {
+        {
+            let guard = self.entries.read();
+            if guard.contains_key(&(label, property)) {
+                return Ok(());
+            }
+        }
+
+        let dir_name = format!("{}_{}", label.as_str(), property.as_str());
+        let dir_path = self.index_dir.join(&dir_name);
+        std::fs::create_dir_all(&dir_path)?;
+
+        let mut schema_builder = Schema::builder();
+        let node_id_field = schema_builder.add_u64_field("node_id", STORED);
+        let text_field = schema_builder.add_text_field("text", TEXT | STORED);
+        let tantivy_schema = schema_builder.build();
+
+        let index = if dir_path.join("meta.json").exists() {
+            Index::open_in_dir(&dir_path)?
+        } else {
+            Index::create_in_dir(&dir_path, tantivy_schema)?
+        };
+
+        let writer = index.writer(15_000_000)?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+
+        let entry = SearchEntry {
+            index,
+            writer: Mutex::new(writer),
+            reader,
+            node_id_field,
+            text_field,
+        };
+
+        tracing::info!(
+            label = label.as_str(),
+            property = property.as_str(),
+            "search index added dynamically"
+        );
+        self.entries.write().insert((label, property), entry);
+        Ok(())
     }
 
     /// Returns true if there are any search indexes configured.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.read().is_empty()
     }
 
     /// Index a property value for a node.
     pub fn index_property(&self, node_id: NodeId, label: IStr, key: IStr, text: &str) {
-        if let Some(entry) = self.entries.get(&(label, key)) {
+        if let Some(entry) = self.entries.read().get(&(label, key)) {
             let writer = entry.writer.lock();
             // Delete old document for this node_id (idempotent)
             writer.delete_term(Term::from_field_u64(entry.node_id_field, node_id.0));
@@ -127,7 +179,7 @@ impl SearchIndex {
 
     /// Remove a node from all indexes.
     pub fn remove_node(&self, node_id: NodeId) {
-        for entry in self.entries.values() {
+        for entry in self.entries.read().values() {
             let writer = entry.writer.lock();
             writer.delete_term(Term::from_field_u64(entry.node_id_field, node_id.0));
         }
@@ -135,7 +187,7 @@ impl SearchIndex {
 
     /// Commit all pending writes across all indexes.
     pub fn commit_all(&self) {
-        for ((label, prop), entry) in &self.entries {
+        for ((label, prop), entry) in self.entries.read().iter() {
             let mut writer = entry.writer.lock();
             if let Err(e) = writer.commit() {
                 tracing::warn!(
@@ -156,8 +208,8 @@ impl SearchIndex {
         query_text: &str,
         limit: usize,
     ) -> Result<Vec<(NodeId, f32)>, anyhow::Error> {
-        let entry = self
-            .entries
+        let guard = self.entries.read();
+        let entry = guard
             .get(&(IStr::new(label), IStr::new(property)))
             .ok_or_else(|| anyhow::anyhow!("no search index for {label}.{property}"))?;
 
@@ -181,7 +233,7 @@ impl SearchIndex {
 
     /// Rebuild all indexes from current graph state. Called once on startup.
     pub fn rebuild_from_graph(&self, graph: &SeleneGraph) -> Result<(), anyhow::Error> {
-        for ((label, prop_key), entry) in &self.entries {
+        for ((label, prop_key), entry) in self.entries.read().iter() {
             let mut writer = entry.writer.lock();
             writer.delete_all_documents()?;
 
@@ -236,7 +288,7 @@ impl selene_gql::runtime::procedures::search::SearchProvider for SearchIndex {
     ) -> Result<Vec<(NodeId, f32)>, String> {
         let label_key = IStr::new(label);
         let mut all_results: Vec<(NodeId, f32)> = Vec::new();
-        for (l, prop) in self.entries.keys() {
+        for (l, prop) in self.entries.read().keys() {
             if *l == label_key
                 && let Ok(results) = SearchIndex::search(self, label, prop.as_str(), query, limit)
             {

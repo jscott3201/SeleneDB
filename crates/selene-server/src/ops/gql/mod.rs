@@ -16,7 +16,10 @@ use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 use selene_core::Value;
 
-use ddl::{execute_ddl, is_ddl_statement, is_graph_state_ddl, sync_view_state_after_ddl};
+use ddl::{
+    execute_ddl, is_ddl_statement, is_graph_state_ddl, sync_search_indexes_after_ddl,
+    sync_view_state_after_ddl,
+};
 use format::{batches_to_ipc, batches_to_json};
 use routing::{
     execute_local_graph_query, execute_remote_query, execute_vault_query, parse_use_prefix,
@@ -180,6 +183,7 @@ pub fn execute_gql_with_timeout(
         // Sync ViewStateStore after materialized view DDL succeeds.
         if result.is_ok() {
             sync_view_state_after_ddl(state, &stmt);
+            sync_search_indexes_after_ddl(state, &stmt);
         }
 
         let elapsed = start.elapsed();

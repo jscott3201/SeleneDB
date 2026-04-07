@@ -53,6 +53,61 @@ pub(super) fn sync_view_state_after_ddl(state: &ServerState, stmt: &selene_gql::
     }
 }
 
+/// Dynamically add search indexes for newly created schemas with `searchable` properties.
+pub(super) fn sync_search_indexes_after_ddl(state: &ServerState, stmt: &selene_gql::GqlStatement) {
+    use selene_gql::GqlStatement;
+
+    // Only care about CreateNodeType (searchable is a node property concept).
+    let GqlStatement::CreateNodeType {
+        label, properties, ..
+    } = stmt
+    else {
+        return;
+    };
+
+    let searchable_props: Vec<_> = properties
+        .iter()
+        .filter(|p| p.searchable)
+        .map(|p| p.name.clone())
+        .collect();
+
+    if searchable_props.is_empty() {
+        return;
+    }
+
+    let Some(svc) = state.services.get::<crate::search::SearchIndexService>() else {
+        return;
+    };
+
+    let label_istr = selene_core::IStr::new(label);
+    for prop_name in &searchable_props {
+        let prop_istr = selene_core::IStr::new(prop_name);
+        if let Err(e) = svc.index.add_searchable(label_istr, prop_istr) {
+            tracing::warn!(
+                label = label.as_str(),
+                property = prop_name.as_str(),
+                error = %e,
+                "failed to add dynamic search index"
+            );
+        }
+    }
+
+    // Backfill existing nodes that already have the property.
+    let snap = state.graph.load_snapshot();
+    for prop_name in &searchable_props {
+        let prop_istr = selene_core::IStr::new(prop_name);
+        for node_id in snap.nodes_by_label(label) {
+            if let Some(node) = snap.get_node(node_id)
+                && let Some(text) = node.properties.get(prop_istr).and_then(|v| v.as_str())
+            {
+                svc.index
+                    .index_property(node_id, label_istr, prop_istr, text);
+            }
+        }
+    }
+    svc.index.commit_all();
+}
+
 /// Check if a statement is graph-state DDL requiring SharedGraph write access (admin-only).
 pub(super) fn is_graph_state_ddl(stmt: &selene_gql::GqlStatement) -> bool {
     use selene_gql::GqlStatement;
