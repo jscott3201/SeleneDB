@@ -187,18 +187,22 @@ fn convert_compact_edge(label: &str, def: CompactEdgeType) -> Result<EdgeSchema,
 ///
 /// Grammar:
 /// ```text
-/// spec     := type_name ['!'] [' = ' default]
+/// spec     := type_name [modifiers] [' = ' default]
 /// type     := string | int | float | bool | timestamp | bytes | list | any
-/// required := '!' suffix means required
+/// modifier := '!' (required) | '~' (searchable) | '#' (dictionary)
 /// default  := quoted_string | number | true | false | null
 /// ```
 ///
+/// Modifiers can be combined in any order after the type name.
+///
 /// Examples:
-/// - `"string"` → optional String, no default
-/// - `"string!"` → required String
-/// - `"string = '°F'"` → optional String, default "°F"
-/// - `"float = 72.5"` → optional Float, default 72.5
-/// - `"bool = true"` → optional Bool, default true
+/// - `"string"` -> optional String, no default
+/// - `"string!"` -> required String
+/// - `"string~"` -> searchable String (full-text indexed)
+/// - `"string#"` -> dictionary-encoded String (interned)
+/// - `"string!~"` -> required + searchable String
+/// - `"string = '°F'"` -> optional String, default "°F"
+/// - `"float = 72.5"` -> optional Float, default 72.5
 pub fn parse_field_spec(name: &str, spec: &str) -> Result<PropertyDef, PackError> {
     let spec = spec.trim();
 
@@ -212,11 +216,25 @@ pub fn parse_field_spec(name: &str, spec: &str) -> Result<PropertyDef, PackError
 
     let type_part = type_part.trim();
 
-    let (type_name, required) = if let Some(stripped) = type_part.strip_suffix('!') {
-        (stripped, true)
-    } else {
-        (type_part, false)
-    };
+    // Strip modifier suffixes from the type name.
+    let mut required = false;
+    let mut searchable = false;
+    let mut dictionary = false;
+    let type_name = type_part.trim_end_matches(|c: char| match c {
+        '!' => {
+            required = true;
+            true
+        }
+        '~' => {
+            searchable = true;
+            true
+        }
+        '#' => {
+            dictionary = true;
+            true
+        }
+        _ => false,
+    });
 
     let value_type = parse_value_type(type_name)?;
 
@@ -239,8 +257,8 @@ pub fn parse_field_spec(name: &str, spec: &str) -> Result<PropertyDef, PackError
         allowed_values: vec![],
         pattern: None,
         immutable: false,
-        searchable: false,
-        dictionary: false,
+        searchable,
+        dictionary,
         fill: None,
         expected_interval_nanos: None,
         encoding: selene_core::ValueEncoding::Gorilla,
@@ -421,5 +439,42 @@ fields = { name = "string!", unit = "string = '°F'", value = "float" }
     #[test]
     fn parse_field_invalid_type() {
         assert!(parse_field_spec("x", "invalid_type").is_err());
+    }
+
+    #[test]
+    fn parse_field_searchable() {
+        let def = parse_field_spec("name", "string~").unwrap();
+        assert!(def.searchable);
+        assert!(!def.required);
+        assert!(!def.dictionary);
+    }
+
+    #[test]
+    fn parse_field_dictionary() {
+        let def = parse_field_spec("zone", "string#").unwrap();
+        assert!(def.dictionary);
+        assert!(!def.searchable);
+    }
+
+    #[test]
+    fn parse_field_required_searchable() {
+        let def = parse_field_spec("name", "string!~").unwrap();
+        assert!(def.required);
+        assert!(def.searchable);
+    }
+
+    #[test]
+    fn parse_field_all_modifiers() {
+        let def = parse_field_spec("desc", "string!~#").unwrap();
+        assert!(def.required);
+        assert!(def.searchable);
+        assert!(def.dictionary);
+    }
+
+    #[test]
+    fn parse_field_searchable_with_default() {
+        let def = parse_field_spec("name", "string~ = 'unnamed'").unwrap();
+        assert!(def.searchable);
+        assert_eq!(def.default, Some(Value::str("unnamed")));
     }
 }
