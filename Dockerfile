@@ -60,6 +60,6 @@ EXPOSE 8080/tcp
 ENTRYPOINT ["/selene-server"]
 
 # Default: start the server with /data as the data directory.
-# When overriding CMD (e.g., --dev), include /data explicitly:
-#   docker run selene:latest --dev /data
-CMD ["/data"]
+# When overriding CMD (e.g., --dev), include --data-dir explicitly:
+#   docker run selene:latest --dev --data-dir /data
+CMD ["--data-dir", "/data"]

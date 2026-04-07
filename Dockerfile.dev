@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+# ── Selene Dev Image with EmbeddingGemma ──────────────────────────────
+#
+# Builds a development image with the GGUF-quantized EmbeddingGemma model
+# baked in. Works on both ARM64 (Apple Silicon) and x86-64.
+#
+# Prerequisites:
+#   1. Accept the Gemma license at https://huggingface.co/google/embeddinggemma-300m
+#   2. Create a HF token at https://huggingface.co/settings/tokens
+#
+# Build:
+#   echo "hf_xxx" > .hf_token
+#   docker build -f Dockerfile.dev --secret id=hf_token,src=.hf_token -t selene:dev .
+#   rm .hf_token
+#
+# Run:
+#   docker run -p 8080:8080 -p 4510:4510/udp selene:dev --dev --seed /data
+#
+# The GGUF Q8_0 model adds ~350MB to the image (vs ~1.1GB for bf16).
+
+# ── Stage 1: Build ──────────────────────────────────────────────────────
+FROM rust:alpine AS builder
+
+RUN apk add --no-cache musl-dev pkgconfig
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p selene-server --features dev-tls \
+    && cargo build --release -p selene-cli \
+    && mkdir -p /tmp/out \
+    && cp target/release/selene-server target/release/selene /tmp/out/
+
+# ── Stage 2: Download EmbeddingGemma GGUF ───────────────────────────────
+FROM alpine:3.22 AS model
+
+RUN apk add --no-cache curl
+
+ARG MODEL_VARIANT=gguf-q8
+
+ENV MODEL_DIR=/models/embeddinggemma-300m
+RUN mkdir -p "${MODEL_DIR}/2_Dense" "${MODEL_DIR}/3_Dense"
+
+# Download model files using the HF token from Docker secrets.
+# The token is mounted at /run/secrets/hf_token and never stored in a layer.
+RUN --mount=type=secret,id=hf_token \
+    set -e; \
+    HF_TOKEN=$(cat /run/secrets/hf_token); \
+    AUTH="Authorization: Bearer ${HF_TOKEN}"; \
+    BASE_URL="https://huggingface.co/google/embeddinggemma-300m/resolve/main"; \
+    if [ "${MODEL_VARIANT}" = "gguf-q8" ]; then \
+        GGUF_URL="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"; \
+        echo "Downloading GGUF Q8_0 backbone (~329MB)..."; \
+        curl -fSL -H "${AUTH}" "${GGUF_URL}" -o "${MODEL_DIR}/model.gguf"; \
+    else \
+        echo "Downloading base safetensors (~1.1GB)..."; \
+        curl -fSL -H "${AUTH}" "${BASE_URL}/model.safetensors" -o "${MODEL_DIR}/model.safetensors"; \
+    fi; \
+    echo "Downloading config and tokenizer..."; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/config.json" -o "${MODEL_DIR}/config.json"; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/tokenizer.json" -o "${MODEL_DIR}/tokenizer.json"; \
+    echo "Downloading Dense projection layers..."; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/2_Dense/model.safetensors" -o "${MODEL_DIR}/2_Dense/model.safetensors"; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/3_Dense/model.safetensors" -o "${MODEL_DIR}/3_Dense/model.safetensors"; \
+    echo "Model downloaded: $(du -sh ${MODEL_DIR} | cut -f1)"
+
+# ── Stage 3: Runtime ────────────────────────────────────────────────────
+FROM gcr.io/distroless/static:nonroot
+
+COPY --from=builder --chown=nonroot:nonroot /tmp/out/selene-server /selene-server
+COPY --from=builder --chown=nonroot:nonroot /tmp/out/selene /selene
+COPY --from=model --chown=nonroot:nonroot /models /data/models
+
+VOLUME /data
+WORKDIR /data
+
+EXPOSE 4510/udp
+EXPOSE 8080/tcp
+
+ENTRYPOINT ["/selene-server"]
+CMD ["--data-dir", "/data"]
