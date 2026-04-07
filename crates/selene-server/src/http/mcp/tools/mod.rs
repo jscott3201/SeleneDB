@@ -31,7 +31,13 @@ impl SeleneTools {
 
     #[tool(
         name = "gql_query",
-        description = "Execute a GQL query against the property graph. Primary query interface. Examples: 'MATCH (s:sensor) RETURN s.name AS name', 'MATCH (b:building)-[:contains]->(f:floor) RETURN b.name AS building, f.name AS floor', 'INSERT (:sensor {name: \"NewSensor\", temp: 72.5})', 'MATCH (s:sensor) FILTER s.temp > 72 SET s.alert = TRUE'. Returns GQLSTATUS and JSON results."
+        description = "Execute a GQL query against the property graph. Primary query interface. Examples: 'MATCH (s:sensor) RETURN s.name AS name', 'MATCH (b:building)-[:contains]->(f:floor) RETURN b.name AS building, f.name AS floor', 'INSERT (:sensor {name: \"NewSensor\", temp: 72.5})', 'MATCH (s:sensor) FILTER s.temp > 72 SET s.alert = TRUE'. Returns GQLSTATUS and JSON results.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn gql_query(&self, params: Parameters<GqlParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -94,7 +100,13 @@ impl SeleneTools {
 
     #[tool(
         name = "gql_explain",
-        description = "Show the execution plan for a GQL query without executing it. Useful for understanding how queries are optimized. Example: 'MATCH (s:sensor) FILTER s.temp > 72 RETURN s.name AS name'"
+        description = "Show the execution plan for a GQL query without executing it. Useful for understanding how queries are optimized. Example: 'MATCH (s:sensor) FILTER s.temp > 72 RETURN s.name AS name'",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn gql_explain(
         &self,
@@ -121,7 +133,13 @@ impl SeleneTools {
 
     #[tool(
         name = "get_node",
-        description = "Get a node by its numeric ID. Returns the node's labels, properties, timestamps, and version."
+        description = "Get a node by its numeric ID. Returns the node's labels, properties, timestamps, and version.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_node(&self, params: Parameters<NodeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -133,7 +151,13 @@ impl SeleneTools {
 
     #[tool(
         name = "create_node",
-        description = "Create a new node with labels and optional properties. Properties are flat key-value pairs (nested objects are stored as JSON strings). Use parent_id to place it in the containment hierarchy (auto-creates a 'contains' edge). Schema defaults are applied automatically."
+        description = "Create a new node with labels and optional properties. Properties are flat key-value pairs (nested objects are stored as JSON strings). Use parent_id to place it in the containment hierarchy (auto-creates a 'contains' edge). Schema defaults are applied automatically.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_node(
         &self,
@@ -161,7 +185,13 @@ impl SeleneTools {
 
     #[tool(
         name = "modify_node",
-        description = "Modify a node: set/remove properties, add/remove labels. All fields are optional — only specified changes are applied."
+        description = "Modify a node: set/remove properties, add/remove labels. All fields are optional -- only specified changes are applied.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn modify_node(
         &self,
@@ -212,7 +242,13 @@ impl SeleneTools {
 
     #[tool(
         name = "delete_node",
-        description = "Delete a node and all its connected edges. This is irreversible."
+        description = "Delete a node and all its connected edges. This is irreversible.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn delete_node(
         &self,
@@ -228,7 +264,13 @@ impl SeleneTools {
 
     #[tool(
         name = "list_nodes",
-        description = "List nodes, optionally filtered by label. Use limit/offset for pagination. Returns node objects with all properties."
+        description = "List nodes, optionally filtered by label. Use limit/offset for pagination. Returns node objects with all properties.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_nodes(
         &self,
@@ -256,7 +298,13 @@ impl SeleneTools {
         description = "Get edges connected to a node with optional direction and label filtering. \
         Returns edges grouped by direction (outgoing/incoming) with neighbor node names included. \
         Filter by direction ('outgoing', 'incoming', or 'both') and/or edge labels. \
-        Supports pagination via limit/offset."
+        Supports pagination via limit/offset.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn node_edges(
         &self,
@@ -290,7 +338,13 @@ impl SeleneTools {
 
     #[tool(
         name = "get_edge",
-        description = "Get an edge by its numeric ID. Returns source, target, label, and properties."
+        description = "Get an edge by its numeric ID. Returns source, target, label, and properties.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_edge(&self, params: Parameters<EdgeIdParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -302,7 +356,13 @@ impl SeleneTools {
 
     #[tool(
         name = "create_edge",
-        description = "Create a directed edge between two nodes. Common labels: 'contains' (hierarchy), 'feeds' (distribution), 'isPointOf' (sensor->equipment), 'monitors', 'hasLocation'."
+        description = "Create a directed edge between two nodes. Common labels: 'contains' (hierarchy), 'feeds' (distribution), 'isPointOf' (sensor->equipment), 'monitors', 'hasLocation'.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_edge(
         &self,
@@ -327,7 +387,13 @@ impl SeleneTools {
 
     #[tool(
         name = "modify_edge",
-        description = "Modify an edge's properties. Set new properties or remove existing ones."
+        description = "Modify an edge's properties. Set new properties or remove existing ones.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn modify_edge(
         &self,
@@ -364,7 +430,13 @@ impl SeleneTools {
 
     #[tool(
         name = "delete_edge",
-        description = "Delete an edge by ID. This is irreversible."
+        description = "Delete an edge by ID. This is irreversible.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn delete_edge(
         &self,
@@ -380,7 +452,13 @@ impl SeleneTools {
 
     #[tool(
         name = "list_edges",
-        description = "List edges, optionally filtered by label. Use limit/offset for pagination."
+        description = "List edges, optionally filtered by label. Use limit/offset for pagination.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_edges(
         &self,
@@ -407,7 +485,13 @@ impl SeleneTools {
 
     #[tool(
         name = "ts_write",
-        description = "Write time-series samples. entity_id must reference an existing node. timestamp_nanos is nanoseconds since Unix epoch (seconds * 1_000_000_000). value is always a float. The entity must exist in the graph."
+        description = "Write time-series samples. entity_id must reference an existing node. timestamp_nanos is nanoseconds since Unix epoch (seconds * 1_000_000_000). value is always a float. The entity must exist in the graph.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn ts_write(
         &self,
@@ -441,7 +525,13 @@ impl SeleneTools {
         Supports aggregation: set aggregation to '5m', '15m', '1h', '1d', or 'auto' \
         to get bucketed results instead of raw samples. 'auto' picks the bucket size \
         based on the time range. Function options: 'avg' (default), 'min', 'max', 'sum', 'count'. \
-        Raw mode (default) returns timestamp/value pairs with optional limit."
+        Raw mode (default) returns timestamp/value pairs with optional limit.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn ts_query(
         &self,
@@ -522,7 +612,13 @@ impl SeleneTools {
         'labels' (nodes with specific labels + connecting edges), 'containment' (subtree \
         from a root node), 'traverse' (BFS from root following specified edge labels and \
         direction to max_depth). Traverse returns nodes with _depth property. \
-        Supports pagination via limit/offset."
+        Supports pagination via limit/offset.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn graph_slice(
         &self,
@@ -587,7 +683,13 @@ impl SeleneTools {
 
     #[tool(
         name = "health",
-        description = "Check server health. Returns uptime, node/edge counts, and status."
+        description = "Check server health. Returns uptime, node/edge counts, and status.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         let resp = ops::health::health(&self.state);
@@ -598,7 +700,13 @@ impl SeleneTools {
 
     #[tool(
         name = "info",
-        description = "Get server metadata: version, runtime profile, dev mode, and enabled feature flags."
+        description = "Get server metadata: version, runtime profile, dev mode, and enabled feature flags.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn info(&self) -> Result<CallToolResult, McpError> {
         let info = crate::ops::info::server_info(&self.state);
@@ -609,7 +717,13 @@ impl SeleneTools {
 
     #[tool(
         name = "graph_stats",
-        description = "Get graph statistics with per-label breakdowns of node and edge counts. More detailed than health -- shows how many nodes exist for each label."
+        description = "Get graph statistics with per-label breakdowns of node and edge counts. More detailed than health -- shows how many nodes exist for each label.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -628,7 +742,13 @@ impl SeleneTools {
 
     #[tool(
         name = "export_reactflow",
-        description = "Export the graph in React Flow format ({nodes, edges} with id, position, data, source, target, label). Compatible with https://reactflow.dev for visual graph editing. Optionally filter by label."
+        description = "Export the graph in React Flow format ({nodes, edges} with id, position, data, source, target, label). Compatible with https://reactflow.dev for visual graph editing. Optionally filter by label.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn export_reactflow(
         &self,
@@ -643,7 +763,13 @@ impl SeleneTools {
 
     #[tool(
         name = "import_reactflow",
-        description = "Import a React Flow graph ({nodes, edges}). Each node becomes a Selene node (type->label, data->properties). Each edge becomes a Selene edge (label from edge label or 'connected'). Returns a mapping from React Flow IDs to Selene IDs."
+        description = "Import a React Flow graph ({nodes, edges}). Each node becomes a Selene node (type->label, data->properties). Each edge becomes a Selene edge (label from edge label or 'connected'). Returns a mapping from React Flow IDs to Selene IDs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn import_reactflow(
         &self,
@@ -666,7 +792,13 @@ impl SeleneTools {
 
     #[tool(
         name = "list_schemas",
-        description = "List all registered node and edge schemas. Schemas define expected property types, required fields, defaults, and validation rules."
+        description = "List all registered node and edge schemas. Schemas define expected property types, required fields, defaults, and validation rules.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_schemas(&self) -> Result<CallToolResult, McpError> {
         schemas::list_schemas_impl(self).await
@@ -674,7 +806,13 @@ impl SeleneTools {
 
     #[tool(
         name = "get_schema",
-        description = "Get the full definition of a schema by label. Tries node schemas first, then edge schemas. Shows property definitions, types, required flags, defaults, and annotations."
+        description = "Get the full definition of a schema by label. Tries node schemas first, then edge schemas. Shows property definitions, types, required flags, defaults, and annotations.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_schema(
         &self,
@@ -685,7 +823,13 @@ impl SeleneTools {
 
     #[tool(
         name = "create_schema",
-        description = "Create a new node type schema using field shorthand. Fields: 'string!' (required), 'float = 72.5' (with default), 'bool' (optional). Use 'extends' to inherit from a parent type (e.g., 'equipment', 'point'). Schema validation is applied on node creation and property updates."
+        description = "Create a new node type schema using field shorthand. Fields: 'string!' (required), 'float = 72.5' (with default), 'bool' (optional). Use 'extends' to inherit from a parent type (e.g., 'equipment', 'point'). Schema validation is applied on node creation and property updates.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_schema(
         &self,
@@ -696,7 +840,13 @@ impl SeleneTools {
 
     #[tool(
         name = "update_schema",
-        description = "Update an existing node schema. Fields are replaced entirely (not merged). Use get_schema first to see the current definition, then provide the complete updated fields."
+        description = "Update an existing node schema. Fields are replaced entirely (not merged). Use get_schema first to see the current definition, then provide the complete updated fields.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn update_schema(
         &self,
@@ -707,7 +857,13 @@ impl SeleneTools {
 
     #[tool(
         name = "delete_schema",
-        description = "Delete a node schema by label. Validation for this label is removed immediately."
+        description = "Delete a node schema by label. Validation for this label is removed immediately.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn delete_schema(
         &self,
@@ -724,7 +880,13 @@ impl SeleneTools {
 
     #[tool(
         name = "create_edge_schema",
-        description = "Create a new edge type schema. Fields use shorthand: 'string!' (required), 'float = 72.5' (with default). Use source_labels/target_labels to constrain which node types can be connected."
+        description = "Create a new edge type schema. Fields use shorthand: 'string!' (required), 'float = 72.5' (with default). Use source_labels/target_labels to constrain which node types can be connected.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_edge_schema(
         &self,
@@ -735,7 +897,13 @@ impl SeleneTools {
 
     #[tool(
         name = "delete_edge_schema",
-        description = "Delete an edge schema by label. Validation for this edge type is removed immediately."
+        description = "Delete an edge schema by label. Validation for this edge type is removed immediately.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn delete_edge_schema(
         &self,
@@ -752,7 +920,13 @@ impl SeleneTools {
 
     #[tool(
         name = "export_schemas",
-        description = "Export all registered schemas as compact JSON. The output can be saved and re-imported later via import_schema_pack."
+        description = "Export all registered schemas as compact JSON. The output can be saved and re-imported later via import_schema_pack.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn export_schemas(&self) -> Result<CallToolResult, McpError> {
         schemas::export_schemas_impl(self).await
@@ -760,7 +934,13 @@ impl SeleneTools {
 
     #[tool(
         name = "import_schema_pack",
-        description = "Import a schema pack from compact JSON or TOML. Auto-detects format. Fields use shorthand: 'string!' (required), 'float = 72.5' (with default)."
+        description = "Import a schema pack from compact JSON or TOML. Auto-detects format. Fields use shorthand: 'string!' (required), 'float = 72.5' (with default).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn import_schema_pack(
         &self,
@@ -773,7 +953,13 @@ impl SeleneTools {
 
     #[tool(
         name = "csv_import",
-        description = "Import nodes or edges from CSV data. For nodes: each row becomes a node with the specified label; columns become properties. For edges: CSV must have source_id, target_id, and label columns; additional columns become edge properties. Type inference: integers, floats, and booleans are auto-detected."
+        description = "Import nodes or edges from CSV data. For nodes: each row becomes a node with the specified label; columns become properties. For edges: CSV must have source_id, target_id, and label columns; additional columns become edge properties. Type inference: integers, floats, and booleans are auto-detected.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn csv_import(
         &self,
@@ -824,7 +1010,13 @@ impl SeleneTools {
 
     #[tool(
         name = "csv_export",
-        description = "Export nodes or edges as CSV. For nodes: columns are id plus all property keys. For edges: columns are id, source, target, label, plus property keys. Optional label filter narrows the export."
+        description = "Export nodes or edges as CSV. For nodes: columns are id plus all property keys. For edges: columns are id, source, target, label, plus property keys. Optional label filter narrows the export.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn csv_export(
         &self,
@@ -844,7 +1036,13 @@ impl SeleneTools {
 
     #[tool(
         name = "semantic_search",
-        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Requires the embedding model to be loaded."
+        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Requires the embedding model to be loaded.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn semantic_search(
         &self,
@@ -925,7 +1123,13 @@ impl SeleneTools {
 
     #[tool(
         name = "similar_nodes",
-        description = "Find nodes most similar to a given node based on vector embeddings. Returns the k most similar nodes ranked by cosine similarity."
+        description = "Find nodes most similar to a given node based on vector embeddings. Returns the k most similar nodes ranked by cosine similarity.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn similar_nodes(
         &self,
@@ -976,7 +1180,13 @@ impl SeleneTools {
         description = "Resolve a human-friendly name, alias, or description to a graph node. \
         Tries exact ID match, then exact name match, then semantic search. Returns the full \
         node with all properties, labels, and optional containment path. \
-        Use this instead of writing GQL just to look up a node by name."
+        Use this instead of writing GQL just to look up a node by name.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn resolve(&self, params: Parameters<ResolveParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -1122,7 +1332,13 @@ impl SeleneTools {
         description = "Get a node and all its connections in one call. Returns the node's full \
         properties plus its edges grouped by direction, with neighbor names and key properties \
         included. Saves multiple get_node + node_edges calls. Use this for 'tell me about X \
-        and its connections'."
+        and its connections'.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn related(&self, params: Parameters<RelatedParams>) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -1158,7 +1374,13 @@ impl SeleneTools {
 
     #[tool(
         name = "export_rdf",
-        description = "Export the graph as RDF (Turtle format). Requires the 'rdf' feature to be enabled on the server. Returns serialized RDF triples."
+        description = "Export the graph as RDF (Turtle format). Requires the 'rdf' feature to be enabled on the server. Returns serialized RDF triples.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn export_rdf(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -1179,7 +1401,13 @@ impl SeleneTools {
 
     #[tool(
         name = "sparql_query",
-        description = "Execute a SPARQL query against the graph's RDF view. Requires 'rdf-sparql' feature. Returns JSON results."
+        description = "Execute a SPARQL query against the graph's RDF view. Requires 'rdf-sparql' feature. Returns JSON results.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn sparql_query(
         &self,
@@ -1207,7 +1435,13 @@ impl SeleneTools {
 
     #[tool(
         name = "schema_dump",
-        description = "Get a compact, LLM-optimized dump of the graph schema. Returns all node types, edge types, properties, constraints, and statistics in a format designed for minimal token usage. Use before writing GQL queries to understand the data model."
+        description = "Get a compact, LLM-optimized dump of the graph schema. Returns all node types, edge types, properties, constraints, and statistics in a format designed for minimal token usage. Use before writing GQL queries to understand the data model.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn schema_dump(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
@@ -1228,7 +1462,13 @@ impl SeleneTools {
 
     #[tool(
         name = "gql_parse_check",
-        description = "Parse a GQL query and return structured errors if it fails. Returns {valid: true} on success, or {valid: false, errors: [{message, suggestion}]} on failure. Use to validate GQL before execution or to get repair hints."
+        description = "Parse a GQL query and return structured errors if it fails. Returns {valid: true} on success, or {valid: false, errors: [{message, suggestion}]} on failure. Use to validate GQL before execution or to get repair hints.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn gql_parse_check(
         &self,
@@ -1279,7 +1519,13 @@ impl SeleneTools {
 
     #[tool(
         name = "build_communities",
-        description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). Use enrich_communities afterwards to add embeddings for global search mode."
+        description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). Use enrich_communities afterwards to add embeddings for global search mode.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn build_communities(
         &self,
@@ -1290,7 +1536,13 @@ impl SeleneTools {
 
     #[tool(
         name = "enrich_communities",
-        description = "Add vector embeddings to __CommunitySummary nodes by composing text from structural profiles and calling embed(). Enables global and hybrid search modes in graphrag_search. Run build_communities first."
+        description = "Add vector embeddings to __CommunitySummary nodes by composing text from structural profiles and calling embed(). Enables global and hybrid search modes in graphrag_search. Run build_communities first.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn enrich_communities(&self) -> Result<CallToolResult, McpError> {
         ai::enrich_communities_impl(self).await
@@ -1298,7 +1550,13 @@ impl SeleneTools {
 
     #[tool(
         name = "graphrag_search",
-        description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth."
+        description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn graphrag_search(
         &self,
@@ -1311,7 +1569,13 @@ impl SeleneTools {
 
     #[tool(
         name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory)."
+        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn remember(
         &self,
@@ -1322,7 +1586,13 @@ impl SeleneTools {
 
     #[tool(
         name = "recall",
-        description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction."
+        description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
         memory::recall_impl(self, params.0).await
@@ -1330,7 +1600,13 @@ impl SeleneTools {
 
     #[tool(
         name = "forget",
-        description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required."
+        description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
         memory::forget_impl(self, params.0).await
@@ -1338,7 +1614,13 @@ impl SeleneTools {
 
     #[tool(
         name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy ('clock' default, 'oldest', or 'lowest_confidence'). Settings persist in a __MemoryConfig node."
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy ('clock' default, 'oldest', or 'lowest_confidence'). Settings persist in a __MemoryConfig node.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn configure_memory(
         &self,
@@ -1353,7 +1635,13 @@ impl SeleneTools {
         name = "log_trace",
         description = "Log a tool interaction trace for training data collection. \
         Called by the agent orchestrator after each tool call, not by the agent itself. \
-        Stores as a __Trace node for later export via export_traces."
+        Stores as a __Trace node for later export via export_traces.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn log_trace(
         &self,
@@ -1366,7 +1654,13 @@ impl SeleneTools {
         name = "export_traces",
         description = "Export interaction traces as JSONL for fine-tuning. \
         Filter by session, tool name, feedback type, model, or date range. \
-        Output format compatible with TRL, Axolotl, and Unsloth pipelines."
+        Output format compatible with TRL, Axolotl, and Unsloth pipelines.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn export_traces(
         &self,
@@ -1381,7 +1675,13 @@ impl SeleneTools {
         name = "propose_action",
         description = "Propose an action for human review. Creates a __Proposal node with \
         pending status. The proposal includes a GQL query to execute if approved. \
-        Proposals auto-expire after 24 hours."
+        Proposals auto-expire after 24 hours.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn propose_action(
         &self,
@@ -1393,7 +1693,13 @@ impl SeleneTools {
     #[tool(
         name = "list_proposals",
         description = "List action proposals, optionally filtered by status \
-        (pending, approved, executed, rejected, expired)."
+        (pending, approved, executed, rejected, expired).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_proposals(
         &self,
@@ -1405,7 +1711,13 @@ impl SeleneTools {
     #[tool(
         name = "approve_proposal",
         description = "Approve a pending proposal. Only non-agent principals can approve. \
-        Changes status from pending to approved."
+        Changes status from pending to approved.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn approve_proposal(
         &self,
@@ -1416,7 +1728,13 @@ impl SeleneTools {
 
     #[tool(
         name = "reject_proposal",
-        description = "Reject a pending proposal with an optional reason."
+        description = "Reject a pending proposal with an optional reason.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn reject_proposal(
         &self,
@@ -1428,7 +1746,13 @@ impl SeleneTools {
     #[tool(
         name = "execute_proposal",
         description = "Execute an approved proposal. Runs the stored GQL query and \
-        changes status to executed."
+        changes status to executed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn execute_proposal(
         &self,

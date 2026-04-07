@@ -402,12 +402,26 @@ pub(super) fn execute_mutations_write(
                         }
                     }
                     // ── Evaluate SET/REMOVE against pre-mutation snapshot ──
+                    //
+                    // When MERGE/INSERT precedes SET without MATCH, bindings_snapshot
+                    // is empty. Build a fallback binding from the var maps so SET can
+                    // resolve variables created by MERGE/INSERT.
                     MutationOp::SetProperty {
                         target,
                         property,
                         value,
                     } => {
-                        for binding in &bindings_snapshot {
+                        let merge_fb = augment_bindings_with_merge_vars(
+                            &bindings_snapshot,
+                            &node_var_map,
+                            &edge_var_map,
+                        );
+                        let effective: &[Binding] = if merge_fb.is_empty() {
+                            &bindings_snapshot
+                        } else {
+                            &merge_fb
+                        };
+                        for binding in effective {
                             let val = eval::eval_expr_ctx(value, binding, &eval_ctx)
                                 .map_err(to_graph_err)?;
                             let storage_val = Value::try_from(&val)
@@ -452,7 +466,17 @@ pub(super) fn execute_mutations_write(
                         }
                     }
                     MutationOp::SetAllProperties { target, properties } => {
-                        for binding in &bindings_snapshot {
+                        let merge_fb = augment_bindings_with_merge_vars(
+                            &bindings_snapshot,
+                            &node_var_map,
+                            &edge_var_map,
+                        );
+                        let effective: &[Binding] = if merge_fb.is_empty() {
+                            &bindings_snapshot
+                        } else {
+                            &merge_fb
+                        };
+                        for binding in effective {
                             let node_id = binding
                                 .get_node_id(target)
                                 .map_err(to_graph_err)?;
@@ -477,7 +501,17 @@ pub(super) fn execute_mutations_write(
                         }
                     }
                     MutationOp::RemoveProperty { target, property } => {
-                        for binding in &bindings_snapshot {
+                        let merge_fb = augment_bindings_with_merge_vars(
+                            &bindings_snapshot,
+                            &node_var_map,
+                            &edge_var_map,
+                        );
+                        let effective: &[Binding] = if merge_fb.is_empty() {
+                            &bindings_snapshot
+                        } else {
+                            &merge_fb
+                        };
+                        for binding in effective {
                             match binding.get(target) {
                                 Some(BoundValue::Node(node_id)) => {
                                     if let Some(s) = scope {
@@ -509,7 +543,17 @@ pub(super) fn execute_mutations_write(
                         }
                     }
                     MutationOp::SetLabel { target, label } => {
-                        for binding in &bindings_snapshot {
+                        let merge_fb = augment_bindings_with_merge_vars(
+                            &bindings_snapshot,
+                            &node_var_map,
+                            &edge_var_map,
+                        );
+                        let effective: &[Binding] = if merge_fb.is_empty() {
+                            &bindings_snapshot
+                        } else {
+                            &merge_fb
+                        };
+                        for binding in effective {
                             let node_id = binding
                                 .get_node_id(target)
                                 .map_err(to_graph_err)?;
@@ -524,7 +568,17 @@ pub(super) fn execute_mutations_write(
                         }
                     }
                     MutationOp::RemoveLabel { target, label } => {
-                        for binding in &bindings_snapshot {
+                        let merge_fb = augment_bindings_with_merge_vars(
+                            &bindings_snapshot,
+                            &node_var_map,
+                            &edge_var_map,
+                        );
+                        let effective: &[Binding] = if merge_fb.is_empty() {
+                            &bindings_snapshot
+                        } else {
+                            &merge_fb
+                        };
+                        for binding in effective {
                             let node_id = binding
                                 .get_node_id(target)
                                 .map_err(to_graph_err)?;
@@ -994,6 +1048,51 @@ pub(super) fn count_mutation(mutation: &MutationOp, row_count: usize, stats: &mu
             stats.nodes_created += 1; // approximate
         }
     }
+}
+
+/// Augment bindings with MERGE/INSERT variable maps so SET/REMOVE can
+/// resolve variables created by preceding MERGE/INSERT operations.
+///
+/// When bindings exist (even the unit-table empty binding), MERGE variables
+/// are injected into each binding. When bindings are truly empty, a
+/// synthetic binding is created from the var maps.
+fn augment_bindings_with_merge_vars(
+    bindings_snapshot: &[Binding],
+    node_var_map: &HashMap<IStr, NodeId>,
+    edge_var_map: &HashMap<IStr, EdgeId>,
+) -> Vec<Binding> {
+    if node_var_map.is_empty() && edge_var_map.is_empty() {
+        return vec![];
+    }
+    if bindings_snapshot.is_empty() {
+        // No bindings at all: create one from the var maps
+        let mut b = Binding::empty();
+        for (var, nid) in node_var_map {
+            b.bind(*var, BoundValue::Node(*nid));
+        }
+        for (var, eid) in edge_var_map {
+            b.bind(*var, BoundValue::Edge(*eid));
+        }
+        return vec![b];
+    }
+    // Bindings exist but may lack MERGE/INSERT variables: inject them
+    bindings_snapshot
+        .iter()
+        .map(|binding| {
+            let mut augmented = binding.clone();
+            for (var, nid) in node_var_map {
+                if augmented.get(var).is_none() {
+                    augmented.bind(*var, BoundValue::Node(*nid));
+                }
+            }
+            for (var, eid) in edge_var_map {
+                if augmented.get(var).is_none() {
+                    augmented.bind(*var, BoundValue::Edge(*eid));
+                }
+            }
+            augmented
+        })
+        .collect()
 }
 
 #[cfg(test)]

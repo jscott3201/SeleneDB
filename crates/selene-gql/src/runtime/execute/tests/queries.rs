@@ -681,3 +681,87 @@ fn yield_nonexistent_column_error_message_lists_available() {
         "error should list all available columns: {err_msg}"
     );
 }
+
+// ── IntermediateFilter tests (WHERE pushdown to pattern layer) ──
+// These verify that id(), labels(), and property functions work correctly
+// when WHERE is pushed into an IntermediateFilter (before Join) rather
+// than staying as a pipeline Filter (after pattern execution).
+
+#[test]
+fn where_id_function_in_intermediate_filter() {
+    let g = setup_graph();
+    let result = QueryBuilder::new("MATCH (n) WHERE id(n) = 3 RETURN n.name AS name", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let name = batch
+        .column_by_name("NAME")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(name, "TempSensor-1");
+}
+
+#[test]
+fn where_id_with_multi_match_pushdown() {
+    let g = setup_graph();
+    // Both WHERE clauses should push down as IntermediateFilters
+    let result = QueryBuilder::new(
+        "MATCH (a) WHERE id(a) = 1 MATCH (b) WHERE id(b) = 2 RETURN a.name AS aname, b.name AS bname",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let aname = batch
+        .column_by_name("ANAME")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(aname, "HQ");
+}
+
+#[test]
+fn where_labels_function_in_intermediate_filter() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (n) WHERE labels(n) = ['sensor'] RETURN count(*) AS cnt",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let cnt = batch
+        .column_by_name("CNT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(cnt, 2, "should find 2 sensor nodes");
+}
+
+#[test]
+fn merge_then_set_creates_and_updates() {
+    let shared = selene_graph::SharedGraph::new(SeleneGraph::new());
+    let result =
+        MutationBuilder::new("MERGE (c:Config {key: 'test'}) SET c.value = 42 RETURN id(c) AS id")
+            .execute(&shared)
+            .unwrap();
+    assert_eq!(result.row_count(), 1);
+
+    // Verify the property was set
+    let snap = shared.load_snapshot();
+    let node = snap.get_node(NodeId(1)).expect("node should exist");
+    assert_eq!(
+        node.properties.get(IStr::new("value")),
+        Some(&Value::Int(42))
+    );
+}
