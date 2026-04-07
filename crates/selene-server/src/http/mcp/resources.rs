@@ -1,15 +1,22 @@
 //! MCP resources -- read-only graph data exposed to agents.
 
 use rmcp::model::{
-    Annotated, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
-    RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
-    ResourceContents,
+    Annotated, Annotations, ListResourceTemplatesResult, ListResourcesResult,
+    PaginatedRequestParams, RawResource, RawResourceTemplate, ReadResourceRequestParams,
+    ReadResourceResult, ResourceContents,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer};
 
 use super::{SeleneTools, mcp_auth, op_err};
 use crate::ops;
+
+/// Build resource annotations with priority only (0.0 = lowest, 1.0 = highest).
+fn resource_priority(priority: f32) -> Annotations {
+    let mut a = Annotations::default();
+    a.priority = Some(priority);
+    a
+}
 
 impl SeleneTools {
     /// List all available static resources.
@@ -20,31 +27,31 @@ impl SeleneTools {
     ) -> Result<ListResourcesResult, McpError> {
         let resources = vec![
             Annotated {
-                annotations: None,
+                annotations: Some(resource_priority(1.0)),
                 raw: RawResource::new("selene://health", "health")
                     .with_description("Server health: uptime, node/edge counts, status")
                     .with_mime_type("application/json"),
             },
             Annotated {
-                annotations: None,
+                annotations: Some(resource_priority(0.8)),
                 raw: RawResource::new("selene://stats", "stats")
                     .with_description("Graph statistics with per-label node and edge counts")
                     .with_mime_type("application/json"),
             },
             Annotated {
-                annotations: None,
+                annotations: Some(resource_priority(0.7)),
                 raw: RawResource::new("selene://schemas", "schemas")
                     .with_description("All registered node and edge schemas")
                     .with_mime_type("application/json"),
             },
             Annotated {
-                annotations: None,
+                annotations: Some(resource_priority(0.5)),
                 raw: RawResource::new("selene://info", "info")
                     .with_description("Server metadata: version, profile, dev mode, feature flags")
                     .with_mime_type("application/json"),
             },
             Annotated {
-                annotations: None,
+                annotations: Some(resource_priority(0.6)),
                 raw: RawResource::new("selene://gql-examples", "gql-examples")
                     .with_description(
                         "Curated GQL query examples covering MATCH, INSERT, MERGE, \
@@ -68,7 +75,7 @@ impl SeleneTools {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let templates = vec![Annotated {
-            annotations: None,
+            annotations: Some(resource_priority(0.7)),
             raw: RawResourceTemplate::new("selene://schemas/{label}", "schema")
                 .with_description("Schema definition for a specific label")
                 .with_mime_type("application/json"),
