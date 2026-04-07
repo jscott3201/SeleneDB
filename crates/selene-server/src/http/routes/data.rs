@@ -355,10 +355,10 @@ fn resolve_sparql_format(
             let media_type = media.split(';').next().unwrap_or("").trim();
             match media_type {
                 "application/sparql-results+json" | "application/json" => {
-                    return SparqlResultFormat::Json
+                    return SparqlResultFormat::Json;
                 }
                 "application/sparql-results+xml" | "application/xml" => {
-                    return SparqlResultFormat::Xml
+                    return SparqlResultFormat::Xml;
                 }
                 "text/csv" => return SparqlResultFormat::Csv,
                 "text/tab-separated-values" => return SparqlResultFormat::Tsv,
@@ -538,7 +538,10 @@ fn sparql_service_description(state: &ServerState) -> axum::response::Response {
     );
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/turtle; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/turtle; charset=utf-8",
+        )],
         turtle,
     )
         .into_response()

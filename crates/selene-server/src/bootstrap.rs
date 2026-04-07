@@ -329,13 +329,17 @@ fn recover_graph(config: &SeleneConfig) -> anyhow::Result<(SharedGraph, Vec<Vec<
             match tagged.first() {
                 Some(&0x03) => {
                     let bytes = &tagged[1..];
-                    if bytes.is_empty() { continue; }
+                    if bytes.is_empty() {
+                        continue;
+                    }
                     match selene_graph::hnsw::HnswGraph::from_bytes(bytes) {
                         Ok(hnsw_graph) => {
                             restored += hnsw_graph.len();
-                            let index = std::sync::Arc::new(
-                                selene_graph::hnsw::HnswIndex::from_graph(hnsw_graph, params.clone()),
-                            );
+                            let index =
+                                std::sync::Arc::new(selene_graph::hnsw::HnswIndex::from_graph(
+                                    hnsw_graph,
+                                    params.clone(),
+                                ));
                             graph_w.set_hnsw_index(index);
                         }
                         Err(e) => tracing::warn!("failed to deserialize HNSW index: {e}"),
@@ -343,22 +347,36 @@ fn recover_graph(config: &SeleneConfig) -> anyhow::Result<(SharedGraph, Vec<Vec<
                 }
                 Some(&0x05) => {
                     let bytes = &tagged[1..];
-                    if bytes.len() < 2 { continue; }
+                    if bytes.len() < 2 {
+                        continue;
+                    }
                     let name_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-                    if bytes.len() < 2 + name_len { continue; }
+                    if bytes.len() < 2 + name_len {
+                        continue;
+                    }
                     let ns = String::from_utf8_lossy(&bytes[2..2 + name_len]).into_owned();
                     let hnsw_bytes = &bytes[2 + name_len..];
-                    if hnsw_bytes.is_empty() { continue; }
+                    if hnsw_bytes.is_empty() {
+                        continue;
+                    }
                     match selene_graph::hnsw::HnswGraph::from_bytes(hnsw_bytes) {
                         Ok(hnsw_graph) => {
                             restored += hnsw_graph.len();
-                            let index = std::sync::Arc::new(
-                                selene_graph::hnsw::HnswIndex::from_graph(hnsw_graph, params.clone()),
-                            );
+                            let index =
+                                std::sync::Arc::new(selene_graph::hnsw::HnswIndex::from_graph(
+                                    hnsw_graph,
+                                    params.clone(),
+                                ));
                             graph_w.set_hnsw_index_for(ns.clone(), index);
-                            tracing::debug!(namespace = ns.as_str(), "restored namespaced HNSW index");
+                            tracing::debug!(
+                                namespace = ns.as_str(),
+                                "restored namespaced HNSW index"
+                            );
                         }
-                        Err(e) => tracing::warn!(namespace = ns.as_str(), "failed to deserialize HNSW index: {e}"),
+                        Err(e) => tracing::warn!(
+                            namespace = ns.as_str(),
+                            "failed to deserialize HNSW index: {e}"
+                        ),
                     }
                 }
                 _ => {}

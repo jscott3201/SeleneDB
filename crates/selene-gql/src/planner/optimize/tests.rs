@@ -659,7 +659,9 @@ fn predicate_reorder_non_contiguous_filters_untouched() {
                     negated: false,
                 },
             },
-            PipelineOp::Limit { value: crate::ast::statement::LimitValue::Literal(5) },
+            PipelineOp::Limit {
+                value: crate::ast::statement::LimitValue::Literal(5),
+            },
             PipelineOp::Filter {
                 predicate: Expr::Compare(
                     Box::new(Expr::Property(

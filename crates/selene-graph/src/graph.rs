@@ -435,12 +435,19 @@ impl SeleneGraph {
     }
 
     /// Get the HNSW vector index for a specific namespace.
-    pub fn hnsw_index_for(&self, namespace: &str) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
+    pub fn hnsw_index_for(
+        &self,
+        namespace: &str,
+    ) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
         self.hnsw_indexes.get(namespace)
     }
 
     /// Set the HNSW vector index for a namespace (empty string = default).
-    pub fn set_hnsw_index_for(&mut self, namespace: String, index: std::sync::Arc<crate::hnsw::HnswIndex>) {
+    pub fn set_hnsw_index_for(
+        &mut self,
+        namespace: String,
+        index: std::sync::Arc<crate::hnsw::HnswIndex>,
+    ) {
         self.hnsw_indexes.insert(namespace, index);
     }
 
@@ -450,7 +457,9 @@ impl SeleneGraph {
     }
 
     /// Iterate all HNSW indexes by namespace.
-    pub fn hnsw_indexes(&self) -> &rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>> {
+    pub fn hnsw_indexes(
+        &self,
+    ) -> &rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>> {
         &self.hnsw_indexes
     }
 

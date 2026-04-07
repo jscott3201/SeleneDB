@@ -12,16 +12,16 @@
 //! matched DELETE/INSERT WHERE will use spareval's PreparedDeleteInsertUpdate.
 
 use oxrdf::{NamedOrBlankNode, Quad, Term};
+use selene_core::EdgeId;
 use selene_core::interner::IStr;
 use selene_core::label_set::LabelSet;
 use selene_core::property_map::PropertyMap;
-use selene_core::EdgeId;
 use selene_graph::SeleneGraph;
 use selene_graph::csr::CsrAdjacency;
 use spareval::{DeleteInsertQuad, QueryEvaluator};
 use spargebra::{GraphUpdateOperation, SparqlParser};
 
-use crate::namespace::{ParsedUri, RdfNamespace, RDF_TYPE};
+use crate::namespace::{ParsedUri, RDF_TYPE, RdfNamespace};
 use crate::terms::literal_to_value;
 
 /// Errors from SPARQL Update execution.
@@ -82,7 +82,13 @@ pub fn execute_update(
                 pattern,
             } => {
                 apply_delete_insert(
-                    graph, namespace, delete, insert, using.clone(), pattern, &mut result,
+                    graph,
+                    namespace,
+                    delete,
+                    insert,
+                    using.clone(),
+                    pattern,
+                    &mut result,
                 )?;
             }
             GraphUpdateOperation::Clear {
@@ -164,10 +170,7 @@ fn apply_insert_data(
                 _ => continue,
             };
             if m.graph().get_node(node_id).is_none() {
-                m.create_node(
-                    LabelSet::new(),
-                    PropertyMap::from_pairs([(key, value)]),
-                )?;
+                m.create_node(LabelSet::new(), PropertyMap::from_pairs([(key, value)]))?;
                 result.nodes_created += 1;
                 result.properties_set += 1;
                 continue;
@@ -473,9 +476,7 @@ mod tests {
     fn insert_data_add_label() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "INSERT DATA {{ <{NS}node/1> a <{NS}type/TemperatureSensor> }}"
-        );
+        let sparql = format!("INSERT DATA {{ <{NS}node/1> a <{NS}type/TemperatureSensor> }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.labels_added, 1);
         let node = g.get_node(NodeId(1)).unwrap();
@@ -486,12 +487,14 @@ mod tests {
     fn insert_data_create_edge() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "INSERT DATA {{ <{NS}node/1> <{NS}rel/feeds> <{NS}node/2> }}"
-        );
+        let sparql = format!("INSERT DATA {{ <{NS}node/1> <{NS}rel/feeds> <{NS}node/2> }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.edges_created, 1);
-        let edges: Vec<_> = g.outgoing(NodeId(1)).iter().filter_map(|&eid| g.get_edge(eid)).collect();
+        let edges: Vec<_> = g
+            .outgoing(NodeId(1))
+            .iter()
+            .filter_map(|&eid| g.get_edge(eid))
+            .collect();
         assert!(edges.iter().any(|e| e.label == IStr::new("feeds")));
     }
 
@@ -499,9 +502,7 @@ mod tests {
     fn delete_data_remove_property() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "DELETE DATA {{ <{NS}node/1> <{NS}prop/unit> \"degC\" }}"
-        );
+        let sparql = format!("DELETE DATA {{ <{NS}node/1> <{NS}prop/unit> \"degC\" }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.properties_removed, 1);
         let node = g.get_node(NodeId(1)).unwrap();
@@ -512,9 +513,7 @@ mod tests {
     fn delete_data_remove_label() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "DELETE DATA {{ <{NS}node/1> a <{NS}type/Sensor> }}"
-        );
+        let sparql = format!("DELETE DATA {{ <{NS}node/1> a <{NS}type/Sensor> }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.labels_removed, 1);
         let node = g.get_node(NodeId(1)).unwrap();
@@ -525,12 +524,14 @@ mod tests {
     fn delete_data_remove_edge() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "DELETE DATA {{ <{NS}node/1> <{NS}rel/locatedIn> <{NS}node/2> }}"
-        );
+        let sparql = format!("DELETE DATA {{ <{NS}node/1> <{NS}rel/locatedIn> <{NS}node/2> }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.edges_deleted, 1);
-        let edges: Vec<_> = g.outgoing(NodeId(1)).iter().filter_map(|&eid| g.get_edge(eid)).collect();
+        let edges: Vec<_> = g
+            .outgoing(NodeId(1))
+            .iter()
+            .filter_map(|&eid| g.get_edge(eid))
+            .collect();
         assert!(!edges.iter().any(|e| e.label == IStr::new("locatedIn")));
     }
 
@@ -538,9 +539,7 @@ mod tests {
     fn delete_data_nonexistent_node_is_idempotent() {
         let mut g = graph_with_sensor();
         let ns = ns();
-        let sparql = format!(
-            "DELETE DATA {{ <{NS}node/999> <{NS}prop/x> \"y\" }}"
-        );
+        let sparql = format!("DELETE DATA {{ <{NS}node/999> <{NS}prop/x> \"y\" }}");
         let result = execute_update(&mut g, &ns, &sparql).unwrap();
         assert_eq!(result.properties_removed, 0);
     }
@@ -615,10 +614,7 @@ mod tests {
         assert_eq!(result.properties_removed, 1);
         assert_eq!(result.properties_set, 1);
         let node = g.get_node(NodeId(1)).unwrap();
-        assert_eq!(
-            node.property("unit"),
-            Some(&Value::str("degF"))
-        );
+        assert_eq!(node.property("unit"), Some(&Value::str("degF")));
     }
 
     #[test]

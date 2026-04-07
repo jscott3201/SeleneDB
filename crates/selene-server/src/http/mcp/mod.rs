@@ -187,9 +187,10 @@ impl SeleneTools {
         let token = self.progress_token.lock().await.clone();
         let Some(token) = token else { return };
         let peer_guard = self.peer.lock().await;
-        let Some(peer) = peer_guard.as_ref() else { return };
-        let mut param =
-            rmcp::model::ProgressNotificationParam::new(token, progress);
+        let Some(peer) = peer_guard.as_ref() else {
+            return;
+        };
+        let mut param = rmcp::model::ProgressNotificationParam::new(token, progress);
         if let Some(t) = total {
             param = param.with_total(t);
         }
@@ -352,10 +353,7 @@ impl rmcp::ServerHandler for SeleneTools {
             let tool_name = request.name.clone();
             let tool_args = request.arguments.clone();
             // Extract progress token from _meta before the request is consumed.
-            let progress_token = request
-                .meta
-                .as_ref()
-                .and_then(|m| m.get_progress_token());
+            let progress_token = request.meta.as_ref().and_then(|m| m.get_progress_token());
             *self.progress_token.lock().await = progress_token;
             let tool_context = ToolCallContext::new(self, request, context);
             let result = tokio::select! {
@@ -520,12 +518,7 @@ impl rmcp::ServerHandler for SeleneTools {
             let now = TaskStore::now_iso();
             let cancel = tokio_util::sync::CancellationToken::new();
 
-            let task = Task::new(
-                task_id.clone(),
-                TaskStatus::Working,
-                now.clone(),
-                now,
-            );
+            let task = Task::new(task_id.clone(), TaskStatus::Working, now.clone(), now);
 
             // Store task entry before spawning
             {
@@ -596,10 +589,7 @@ impl rmcp::ServerHandler for SeleneTools {
         async move {
             let store = self.task_store.0.lock().await;
             let entry = store.get(&request.task_id).ok_or_else(|| {
-                McpError::invalid_params(
-                    format!("task not found: {}", request.task_id),
-                    None,
-                )
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
             })?;
             Ok(GetTaskResult {
                 meta: None,
@@ -616,10 +606,7 @@ impl rmcp::ServerHandler for SeleneTools {
         async move {
             let store = self.task_store.0.lock().await;
             let entry = store.get(&request.task_id).ok_or_else(|| {
-                McpError::invalid_params(
-                    format!("task not found: {}", request.task_id),
-                    None,
-                )
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
             })?;
             let result = entry.result.as_ref().ok_or_else(|| {
                 McpError::new(
@@ -641,10 +628,7 @@ impl rmcp::ServerHandler for SeleneTools {
         async move {
             let mut store = self.task_store.0.lock().await;
             let entry = store.get_mut(&request.task_id).ok_or_else(|| {
-                McpError::invalid_params(
-                    format!("task not found: {}", request.task_id),
-                    None,
-                )
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
             })?;
             entry.cancel.cancel();
             entry.task.status = TaskStatus::Cancelled;

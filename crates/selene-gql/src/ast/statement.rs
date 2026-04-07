@@ -310,14 +310,12 @@ impl LimitValue {
         match self {
             LimitValue::Literal(n) => Ok(*n),
             LimitValue::Parameter(name) => {
-                let val = params
-                    .and_then(|p| p.get(name))
-                    .ok_or_else(|| {
-                        GqlError::type_error(format!(
-                            "LIMIT/OFFSET parameter ${} is not bound",
-                            name.as_str()
-                        ))
-                    })?;
+                let val = params.and_then(|p| p.get(name)).ok_or_else(|| {
+                    GqlError::type_error(format!(
+                        "LIMIT/OFFSET parameter ${} is not bound",
+                        name.as_str()
+                    ))
+                })?;
                 match val {
                     GqlValue::Int(n) => {
                         if *n < 0 {

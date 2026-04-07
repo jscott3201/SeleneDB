@@ -1081,7 +1081,10 @@ fn detect_scan_limit(pattern_ops: &[PatternOp], pipeline: &[PipelineOp]) -> Opti
     }
     // Find LIMIT in pipeline (only literal values usable at plan time)
     for op in pipeline {
-        if let PipelineOp::Limit { value: crate::ast::statement::LimitValue::Literal(n) } = op {
+        if let PipelineOp::Limit {
+            value: crate::ast::statement::LimitValue::Literal(n),
+        } = op
+        {
             return Some(*n as usize);
         }
     }

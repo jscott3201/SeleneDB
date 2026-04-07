@@ -673,7 +673,10 @@ fn e2e_parameterized_limit_negative_error() {
         .execute();
     assert!(result.is_err(), "negative LIMIT should error");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("non-negative"), "error should mention non-negative: {err}");
+    assert!(
+        err.contains("non-negative"),
+        "error should mention non-negative: {err}"
+    );
 }
 
 #[test]
@@ -686,7 +689,10 @@ fn e2e_parameterized_limit_type_error() {
         .execute();
     assert!(result.is_err(), "string LIMIT should error");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("integer"), "error should mention integer: {err}");
+    assert!(
+        err.contains("integer"),
+        "error should mention integer: {err}"
+    );
 }
 
 #[test]
@@ -698,5 +704,8 @@ fn e2e_parameterized_limit_unbound_error() {
         .execute();
     assert!(result.is_err(), "unbound LIMIT param should error");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("not bound"), "error should mention not bound: {err}");
+    assert!(
+        err.contains("not bound"),
+        "error should mention not bound: {err}"
+    );
 }

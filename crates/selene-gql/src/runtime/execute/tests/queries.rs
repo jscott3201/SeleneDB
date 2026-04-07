@@ -771,10 +771,12 @@ fn merge_then_set_creates_and_updates() {
 #[test]
 fn e2e_record_constructor_with_keyword() {
     let g = setup_graph();
-    let result =
-        QueryBuilder::new("MATCH (s:sensor) RETURN RECORD {name: s.name, temp: s.temp}", &g)
-            .execute()
-            .unwrap();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) RETURN RECORD {name: s.name, temp: s.temp}",
+        &g,
+    )
+    .execute()
+    .unwrap();
     assert_eq!(result.row_count(), 2);
     assert_eq!(result.column_count(), 1);
 }
@@ -796,7 +798,12 @@ fn e2e_bare_map_literal_with_alias() {
         .execute()
         .unwrap();
     assert_eq!(result.row_count(), 2);
-    let col_names: Vec<_> = result.schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let col_names: Vec<_> = result
+        .schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         col_names.iter().any(|c| c.eq_ignore_ascii_case("info")),
         "expected 'info' column, got: {col_names:?}"

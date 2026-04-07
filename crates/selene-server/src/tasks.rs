@@ -364,8 +364,7 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
                     } else {
                         // Named namespace: tag 0x05 + u16 name length + name + hnsw bytes
                         let name_bytes = ns.as_bytes();
-                        let mut tagged =
-                            Vec::with_capacity(1 + 2 + name_bytes.len() + bytes.len());
+                        let mut tagged = Vec::with_capacity(1 + 2 + name_bytes.len() + bytes.len());
                         tagged.push(0x05);
                         tagged.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
                         tagged.extend_from_slice(name_bytes);
@@ -373,7 +372,10 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
                         extra_sections.push(tagged);
                     }
                 }
-                Err(e) => tracing::warn!(namespace = ns.as_str(), "failed to serialize HNSW index: {e}"),
+                Err(e) => tracing::warn!(
+                    namespace = ns.as_str(),
+                    "failed to serialize HNSW index: {e}"
+                ),
             }
         }
     });
