@@ -23,7 +23,7 @@ cargo doc --workspace --all-features --no-deps
 cargo run -p selene-server -- --dev
 ```
 
-Use `--all-features` for consistency with CI. Only build-variant features (`dev-tls`, `bench`) remain, but the flag is harmless and ensures full coverage.
+Use `--all-features` locally on macOS. CI (Linux) uses explicit features excluding `metal` (requires Apple frameworks): `--features selene-server/dev-tls,selene-testing/bench`.
 
 ## Architecture
 
@@ -50,8 +50,8 @@ Cargo workspace with 13 crates:
 - Edition: 2024 (resolver v3)
 - MSRV: 1.94
 - `-D warnings` on clippy, zero warnings required
-- `--all-features` and `--all-targets` on all CI clippy steps (catches lint in integration test files that incremental builds miss)
-- `--all-features` on all CI test/doc steps
+- `--all-targets` on all CI clippy steps (catches lint in integration test files that incremental builds miss)
+- CI uses `--features selene-server/dev-tls,selene-testing/bench` (not `--all-features`) to exclude `metal` on Linux
 - All product features (AI, vector, search, federation, RDF, cloud-storage) are always compiled. Enable/disable at runtime via `ServicesConfig` profiles (Edge/Cloud/Standalone) or environment variables.
 - Remaining compile-time feature flags (build variants only): `dev-tls` (rcgen), `insecure` (client TLS bypass), `bench` (criterion)
 - Arrow `Array` trait must be in scope for `is_null()`/`value()`
@@ -93,7 +93,7 @@ Cargo workspace with 13 crates:
 - **Agent memory eviction:** Three policies configurable per-namespace via `__MemoryConfig`: "clock" (default, 2-bit counters 0-3), "oldest" (evict oldest created_at), "lowest_confidence" (evict least confident, tiebreak oldest). Evict-on-write in the `remember` tool. Clock counters are ephemeral (in-memory on ServerState, not persisted). Cold start falls back to oldest-first.
 - **HNSW index:** Hybrid architecture. `ArcSwap<HnswGraph>` for lock-free reads (~1ns). `RwLock<HnswGraph>` for O(log n) incremental inserts. Periodic `snapshot()` publishes mutable graph to the read path. `rebuild()` retained for bulk operations. MN-RU eager neighbor reconnection on deletion (reconnects mutual neighbors before tombstoning). `snapshot()` cleans up tombstones physically. Rebuilds from node vectors on startup (not persisted in snapshots). Dimension mismatch detection logs warning and skips mismatched inserts.
 - **Embedding layer:** Pluggable `EmbeddingProvider` trait in `selene-gql/src/runtime/embed/`. Default: `GemmaProvider` (EmbeddingGemma-300M, 768d with MRL truncation to 512/256/128). Candle-native inference, zero C/C++ deps. Two backends: safetensors (bf16, ~2.4GB RAM) and GGUF quantized (`QuantizedEmbeddingGemmaEncoder`, Q8_0 ~350MB, Q4_0 ~200MB). Auto-detected: if `model.gguf` exists in model dir, uses quantized path. Task-specific prompts routed through all embed call sites. Config via `VectorConfig.dimensions`. Model path resolves from config, `SELENE_MODEL_PATH` env var, or `data/models/embeddinggemma-300m` default. Download via `scripts/fetch-embeddinggemma.sh` (supports `--qat-q8`, `--qat-q4`, `--gguf-q8` variants). `graph.reindex()` procedure for re-embedding validation after model switch.
-- **Metal GPU:** `--features metal` on selene-gql compiles Metal support. Disabled at runtime by default (candle 0.10 lacks rotary-emb kernel for Gemma 3 encoder). Set `SELENE_METAL=1` to opt in. `--all-features` in CI enables the feature but runtime default is CPU.
+- **Metal GPU:** `--features metal` on selene-gql compiles Metal support. Disabled at runtime by default (candle 0.10 lacks rotary-emb kernel for Gemma 3 encoder). Set `SELENE_METAL=1` to opt in. Excluded from Linux CI (requires Apple frameworks / objc2). Use `--all-features` locally on macOS only.
 - **Embedding provider error caching:** The embedding provider is cached in a `OnceLock`. If the first load fails (missing model file, corrupt weights), the error is cached permanently. A server restart is required to retry. This is intentional MVP behavior; no hot-reload of ML models.
 - **Embedding health:** `/health` endpoint includes `embedding` object with `loaded`, `model_id`, `dimensions`, `model_path`, and `error` fields. Added to HTTP JSON only (not wire DTO) to avoid breaking postcard serialization.
 - **Projection catalog:** `SharedCatalog` persists on `ServerState` across HTTP requests. `graph.project()` stores projections with their config; `ensure_fresh()` lazily rebuilds stale projections (generation mismatch) from the stored config, preserving user label/edge filters. Algorithms call `get_projection_or_build()` which invokes `ensure_fresh` before execution. `graph.listProjections()` and `graph.drop()` operate on the same persistent catalog.

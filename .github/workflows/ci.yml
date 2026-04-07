@@ -33,8 +33,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Clippy (all features)
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: Clippy
+        # Use --all-features on macOS (includes Metal GPU). On Linux, exclude
+        # the 'metal' feature (requires objc2 / Apple frameworks).
+        run: >-
+          cargo clippy --workspace --all-targets -- -D warnings
+          --features selene-server/dev-tls,selene-testing/bench
 
   test:
     name: Test (all features)
@@ -51,7 +55,10 @@ jobs:
       - name: Run tests
         # Limit parallelism to avoid OOM bus errors on 7 GB runners when
         # linking selene-server (candle + tantivy + arrow all unconditional).
-        run: cargo test --workspace --all-features -j2
+        # Exclude 'metal' feature (requires macOS / objc2).
+        run: >-
+          cargo test --workspace -j2
+          --features selene-server/dev-tls,selene-testing/bench
 
   doc-audit:
     name: Docs & Audit
@@ -62,7 +69,10 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Build docs
-        run: cargo doc --workspace --all-features --no-deps
+        # Exclude 'metal' feature (requires macOS / objc2).
+        run: >-
+          cargo doc --workspace --no-deps
+          --features selene-server/dev-tls,selene-testing/bench
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Security audit
