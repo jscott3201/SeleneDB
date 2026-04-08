@@ -382,9 +382,13 @@ impl FactorizedChunk {
         let active_count = deep_level.active_len();
 
         if active_count == 0 {
-            // Build empty chunk with full schema
+            // Build empty chunk with full schema and matching empty columns
             let schema = self.build_flat_schema();
-            return DataChunk::from_columns(SmallVec::new(), schema, 0);
+            let columns: SmallVec<[Column; 8]> = schema
+                .iter()
+                .map(|_| Column::Null(0))
+                .collect();
+            return DataChunk::from_columns(columns, schema, 0);
         }
 
         // Collect active row indices from deepest level
@@ -822,6 +826,50 @@ mod tests {
 
         let flat = chunk.flatten();
         assert_eq!(flat.active_len(), 0);
+    }
+
+    /// Regression test: flatten of a multi-level factorized chunk where all
+    /// deepest rows are filtered out must produce a DataChunk whose column
+    /// count matches its schema. Before the fix, flatten() returned a chunk
+    /// with a populated schema but zero columns, causing an index-out-of-bounds
+    /// panic on any downstream `.column(slot)` access.
+    #[test]
+    fn test_flatten_empty_multi_level_columns_match_schema() {
+        let a = IStr::new("a");
+        let e1 = IStr::new("e1");
+        let b = IStr::new("b");
+
+        let root = FactorLevel::root(a, make_node_ids(&[1, 2]));
+        let mut chunk = FactorizedChunk::from_root(root);
+
+        let mut s1 = LevelSchema::new();
+        s1.push(e1, ColumnKind::EdgeId);
+        s1.push(b, ColumnKind::NodeId);
+        chunk.push_level(FactorLevel::expansion(
+            SmallVec::from_vec(vec![
+                make_edge_ids(&[50, 51, 52]),
+                make_node_ids(&[10, 11, 12]),
+            ]),
+            s1,
+            3,
+            Arc::from([0u32, 0, 1]),
+        ));
+
+        // Filter out all deepest rows
+        chunk.filter_deepest(&[false, false, false]);
+
+        let flat = chunk.flatten();
+        assert_eq!(flat.active_len(), 0);
+        // Schema should list all 3 variables
+        assert!(flat.schema().slot_of(&a).is_some());
+        assert!(flat.schema().slot_of(&e1).is_some());
+        assert!(flat.schema().slot_of(&b).is_some());
+        // Columns vec must match schema length (the bug: was 0 columns)
+        assert_eq!(flat.columns().len(), flat.schema().len());
+        // Accessing columns by slot must not panic
+        for slot in 0..flat.schema().len() {
+            let _col = flat.column(slot);
+        }
     }
 
     #[test]
