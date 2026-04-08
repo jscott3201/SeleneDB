@@ -679,6 +679,128 @@ impl PropDiscovery {
     }
 }
 
+// ── graph.diff ──────────────────────────────────────────────────────────────
+
+/// `CALL graph.diff($sinceNanos) YIELD entity_type, change_type, label, count`
+///
+/// Reports what changed since a given timestamp (nanos since epoch).
+/// Scans all nodes and edges, comparing created_at/updated_at against the
+/// threshold. Returns summary rows grouped by entity type, change type, and
+/// label. Useful for session continuity: "what happened since my last session?"
+pub struct GraphDiff;
+
+impl Procedure for GraphDiff {
+    fn name(&self) -> &'static str {
+        "graph.diff"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![ProcedureParam {
+                name: "sinceNanos",
+                typ: GqlType::Int,
+            }],
+            yields: vec![
+                YieldColumn {
+                    name: "entity_type",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "change_type",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "label",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "count",
+                    typ: GqlType::Int,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        args: &[GqlValue],
+        graph: &SeleneGraph,
+        _ht: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        use std::collections::HashMap;
+
+        if args.is_empty() {
+            return Err(GqlError::InvalidArgument {
+                message: "graph.diff requires 1 argument: sinceNanos (timestamp in nanoseconds)"
+                    .into(),
+            });
+        }
+        let since = args[0].as_int()?;
+
+        let entity_type_key = IStr::new("entity_type");
+        let change_type_key = IStr::new("change_type");
+        let label_key = IStr::new("label");
+        let count_key = IStr::new("count");
+
+        // Count node changes by (change_type, first_label)
+        let mut node_counts: HashMap<(&str, String), i64> = HashMap::new();
+        for node_id in graph.all_node_ids() {
+            if let Some(node) = graph.get_node(node_id) {
+                let first_label = node
+                    .labels
+                    .iter()
+                    .next()
+                    .map_or_else(|| "(unlabeled)".to_string(), |l| l.as_str().to_string());
+                if node.created_at >= since {
+                    *node_counts.entry(("created", first_label)).or_insert(0) += 1;
+                } else if node.updated_at >= since {
+                    *node_counts.entry(("modified", first_label)).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Count edge changes by label (edges only have created_at)
+        let mut edge_counts: HashMap<String, i64> = HashMap::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id)
+                && edge.created_at >= since
+            {
+                *edge_counts
+                    .entry(edge.label.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        // Build result rows sorted by count descending
+        let mut rows = Vec::new();
+
+        let mut node_entries: Vec<_> = node_counts.into_iter().collect();
+        node_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for ((change, label), count) in node_entries {
+            rows.push(smallvec::smallvec![
+                (entity_type_key, GqlValue::String(change.into())),
+                (change_type_key, GqlValue::String("node".into())),
+                (label_key, GqlValue::String(label.into())),
+                (count_key, GqlValue::Int(count)),
+            ]);
+        }
+
+        let mut edge_entries: Vec<_> = edge_counts.into_iter().collect();
+        edge_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (label, count) in edge_entries {
+            rows.push(smallvec::smallvec![
+                (entity_type_key, GqlValue::String("created".into())),
+                (change_type_key, GqlValue::String("edge".into())),
+                (label_key, GqlValue::String(label.into())),
+                (count_key, GqlValue::Int(count)),
+            ]);
+        }
+
+        Ok(rows)
+    }
+}
+
 // ── graph.validate ──────────────────────────────────────────────────────────
 
 /// `CALL graph.validate() YIELD check, status, count, details`
@@ -1139,5 +1261,6 @@ mod tests {
         assert_eq!(GraphConstraints.name(), "graph.constraints");
         assert_eq!(GraphDiscoverSchema.name(), "graph.discoverSchema");
         assert_eq!(GraphValidate.name(), "graph.validate");
+        assert_eq!(GraphDiff.name(), "graph.diff");
     }
 }

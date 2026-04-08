@@ -172,6 +172,8 @@ impl ProcedureRegistry {
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
         // Structural integrity validation
         reg.register(Arc::new(graph::GraphValidate));
+        // Graph diff (what changed since timestamp)
+        reg.register(Arc::new(graph::GraphDiff));
         // Schema dump (LLM-friendly)
         reg.register(Arc::new(schema_dump::SchemaDump));
         // Schema introspection
