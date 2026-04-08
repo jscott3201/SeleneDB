@@ -2,7 +2,7 @@
 
 Lightweight, in-memory property graph runtime for IoT, smart buildings, and domains requiring a living graph of connected entities with real-time state. Written in pure Rust (zero C/C++ dependencies).
 
-v0.2.0 release candidate. 13 crates, ~147K LOC, ~1,113 unit tests (0 failures) + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization) with integration tests on dev. Eight rounds of agent usability testing completed (90+ issues fixed). MCP tools annotated with read/write/destructive hints.
+v0.2.0 release candidate. 13 crates, ~141K LOC, ~2,828 unit tests + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization). Eight rounds of agent usability testing (90+ issues fixed).
 
 ## Build and test
 
@@ -20,7 +20,7 @@ cargo test --workspace --all-features
 cargo doc --workspace --all-features --no-deps
 
 # Run (dev mode: QUIC :4510 + HTTP :8080)
-cargo run -p selene-server -- --dev
+cargo run -p selene-server --features selene-server/dev-tls -- --dev
 ```
 
 Use `--all-features` locally on macOS. CI (Linux) uses explicit features excluding `metal` (requires Apple frameworks): `--features selene-server/dev-tls,selene-testing/bench`.
@@ -32,8 +32,8 @@ Cargo workspace with 13 crates:
 | Crate | Purpose |
 |-------|---------|
 | `selene-core` | Types: Node, Edge, Value, IStr, PropertyMap, LabelSet, Vector, schema types, Codec trait, Origin |
-| `selene-graph` | In-memory property graph (dense Vec), SharedGraph (ArcSwap), transactions, RoaringBitmap label indexes, TypedIndex, ViewRegistry, hybrid HNSW vector index (ArcSwap reads + RwLock mutable inserts) |
-| `selene-gql` | ISO GQL engine: pest parser, AST, planner, 13-rule optimizer, WCO joins, factorized representations, pattern executor, pipeline, mutations, plan cache, materialized views (DDL + MATCH VIEW), GraphRAG + memory procedures, pluggable embedding layer (EmbeddingProvider trait, GemmaProvider), procedure introspection (`graph.procedures()`) |
+| `selene-graph` | In-memory property graph (dense Vec), SharedGraph (ArcSwap), transactions, RoaringBitmap label indexes, TypedIndex, hybrid HNSW vector index |
+| `selene-gql` | ISO GQL engine: pest parser, AST, planner, 13-rule optimizer, WCO joins, factorized representations, pattern executor, pipeline, mutations, plan cache, materialized views, GraphRAG + memory procedures, pluggable embedding layer |
 | `selene-ts` | Multi-tier time-series: hot (Gorilla/RLE/Dictionary), warm aggregates, Parquet cold, cloud offload |
 | `selene-persist` | WAL v2 (postcard+zstd+XXH3+HLC) + binary snapshots, recovery |
 | `selene-wire` | SWP framing, codec, postcard/JSON/Arrow serialization, federation and sync DTOs |
@@ -63,50 +63,11 @@ Cargo workspace with 13 crates:
 
 - **Commit format:** conventional commits. `feat(scope):`, `fix(scope):`, `refactor(scope):`. Scope matches the crate or component.
 - **GQL is the sole query and mutation interface.** All transports (HTTP, QUIC, MCP) route through GQL. No SQL or Cypher paths.
-- **Ops layer pattern:** business logic lives in `selene-server/src/ops/`. Transports are thin adapters. All write operations route through the mutation batcher. GQL execution is in `ops/gql/{mod,ddl,routing,format}.rs`; HTTP routes in `http/routes/{mod,system,nodes,edges,gql,schemas,data}.rs`.
+- **Ops layer pattern:** business logic lives in `selene-server/src/ops/`. Transports are thin adapters. All write operations route through the mutation batcher.
 - **QueryBuilder for reads:** `QueryBuilder::new(query, &graph).with_scope(&s).execute()`
-- **MutationBuilder for writes:** `MutationBuilder::new(query).with_scope(&s).with_parameters(&params).execute(&shared)` for auto-commit, `.execute_in_transaction(&mut txn)` for explicit transactions. Target (graph/txn) passed to execute, not constructor. Supports `$param` placeholders same as QueryBuilder.
-- **API encapsulation:** ServerState fields `pub(crate)` with accessor methods. selene-gql internal modules `pub(crate)` with explicit re-exports.
-- **MCP tool dispatch:** Manual `call_tool` (not `#[tool_handler]` macro) wraps dispatch in `tokio::select!` for cancellation. Static ToolRouter handles built-in tools; `CustomToolRegistry` provides dynamic fallback for embedder tools. Tool implementations split into `http/mcp/tools/{mod,memory,ai,schemas}.rs`. The `#[tool_router]` macro requires all `#[tool]` methods in a single impl block (mod.rs); long tools use thin dispatchers that delegate to domain submodules.
-- **MCP tool queries:** All MCP tools must use parameterized GQL queries (`$param` placeholders + `HashMap<String, Value>`). No string interpolation of user input. Enforced by convention after the AI MVP review.
-- **MCP auth:** Production uses `tokio::task_local!` to scope `AuthContext` per-request between the axum middleware and rmcp factory. No shared mutable state.
-- **HTTP graceful shutdown:** `serve_router` accepts `Option<CancellationToken>`. In-flight requests drain before exit (bounded by 60s `TimeoutLayer`).
-- **Readiness vs liveness:** `/health` is the liveness probe (always returns). `/ready` returns 503 until `ServerState::is_ready()` (set after all background tasks spawn).
-- **persist_or_die:** WAL retry (3 attempts) then abort. SQLite philosophy.
+- **MutationBuilder for writes:** `MutationBuilder::new(query).with_scope(&s).with_parameters(&params).execute(&shared)` for auto-commit, `.execute_in_transaction(&mut txn)` for explicit transactions. Supports `$param` placeholders same as QueryBuilder.
+- **MCP tool queries:** All MCP tools must use parameterized GQL queries (`$param` placeholders + `HashMap<String, Value>`). No string interpolation of user input.
 - **Branch model:** `main` is releases only. Active development targets `dev`. Feature branches are created from `dev` and merged back to `dev` via PR. The release flow is: merge `dev` into `main`, then tag.
-
-## Important notes
-
-- **Node IDs start at 1** in tests, not 0. The `id()` function returns `GqlValue::Int` (not UInt) for consistent comparison with parameters.
-- **Value cross-variant equality:** `Value::String(s)` and `Value::InternedStr(i)` compare equal when content matches. Required for dictionary encoding correctness.
-- **Dictionary encoding:** `DICTIONARY` DDL keyword auto-promotes string values to `Value::InternedStr(IStr)` on write across all paths (GQL, HTTP CRUD, MCP CRUD, CSV import). All write paths must handle this.
-- **Optimizer rules must handle correlated subquery context.** OptimizeContext carries a graph reference for rules needing runtime data.
-- **Benchmarks run sequentially**, one crate at a time. Never `cargo bench --workspace`. Stress profile needs `SELENE_MAX_BINDINGS=500000`.
-- **Node limit:** RoaringBitmap label indexes store node IDs as `u32`. Graphs exceeding ~4 billion nodes would silently truncate. Practical ceiling for in-memory use is well below this.
-- **Transaction keywords (START TRANSACTION, COMMIT, ROLLBACK) return errors over the wire.** Multi-statement transactions only work through the Rust API (`SharedGraph::begin_transaction`). Each GQL mutation auto-commits.
-- **MERGE uses label bitmap intersection** for O(label_count) existence checks, not full graph scan. Checks the live graph inside the write lock (not the pre-lock snapshot).
-- **Materialized views:** `CREATE MATERIALIZED VIEW name AS MATCH ... RETURN agg(...)`. Maintained incrementally via changelog subscriber. Definitions persist in snapshots (tag 0x04). State rebuilds on startup. Query via `MATCH VIEW name YIELD col1, col2`.
-- **MCP server:** 54 tools (all annotated with `read_only_hint`/`destructive_hint`/`idempotent_hint`/`open_world_hint`), 6 resources, 4 prompts, logging, completions, resource subscriptions, cancellation. All responses use minified JSON (`format_json`/`format_value` in `http/mcp/format.rs`). Data tools (get_node, list_nodes, etc.) return `structured_content` alongside text for programmatic access. Custom tools via `CustomMcpTool` trait + `CustomToolRegistry`. OAuth 2.1 (PKCE + client credentials) + API key auth. 11 integration tests.
-- **AI tools:** GraphRAG hybrid retriever (`graphrag_search`: local/global/hybrid modes), agent memory (`remember`/`recall`/`forget`/`configure_memory` with configurable eviction), community detection (`build_communities`/`enrich_communities`), Text2GQL toolkit (`schema_dump`, `gql_parse_check` with fuzzy repair, `text2gql` prompt, `gql-examples` resource).
-- **Agent tools:** Entity resolver (`resolve`: ID/name/semantic layered lookup), composite neighborhood (`related`), training data (`log_trace`/`export_traces`), action proposals (`propose_action`/`list_proposals`/`approve_proposal`/`reject_proposal`/`execute_proposal`).
-- **System node labels:** Double-underscore prefix (`__Memory`, `__Entity`, `__Episode`, `__MemoryConfig`, `__CommunitySummary`, `__Trace`, `__Proposal`) are reserved for internal/AI features. Excluded from `graph.schemaDump()` by default.
-- **Agent memory eviction:** Three policies configurable per-namespace via `__MemoryConfig`: "clock" (default, 2-bit counters 0-3), "oldest" (evict oldest created_at), "lowest_confidence" (evict least confident, tiebreak oldest). Evict-on-write in the `remember` tool. Clock counters are ephemeral (in-memory on ServerState, not persisted). Cold start falls back to oldest-first.
-- **HNSW index:** Hybrid architecture. `ArcSwap<HnswGraph>` for lock-free reads (~1ns). `RwLock<HnswGraph>` for O(log n) incremental inserts. Periodic `snapshot()` publishes mutable graph to the read path. `rebuild()` retained for bulk operations. MN-RU eager neighbor reconnection on deletion (reconnects mutual neighbors before tombstoning). `snapshot()` cleans up tombstones physically. Rebuilds from node vectors on startup (not persisted in snapshots). Dimension mismatch detection logs warning and skips mismatched inserts.
-- **Embedding layer:** Pluggable `EmbeddingProvider` trait in `selene-gql/src/runtime/embed/`. Default: `GemmaProvider` (EmbeddingGemma-300M, 768d with MRL truncation to 512/256/128). Candle-native inference, zero C/C++ deps. Two backends: safetensors (bf16, ~2.4GB RAM) and GGUF quantized (`QuantizedEmbeddingGemmaEncoder`, Q8_0 ~350MB, Q4_0 ~200MB). Auto-detected: if `model.gguf` exists in model dir, uses quantized path. Task-specific prompts routed through all embed call sites. Config via `VectorConfig.dimensions`. Model path resolves from config, `SELENE_MODEL_PATH` env var, or `data/models/embeddinggemma-300m` default. Download via `scripts/fetch-embeddinggemma.sh` (supports `--qat-q8`, `--qat-q4`, `--gguf-q8` variants). `graph.reindex()` procedure for re-embedding validation after model switch.
-- **Metal GPU:** `--features metal` on selene-gql compiles Metal support. Disabled at runtime by default (candle 0.10 lacks rotary-emb kernel for Gemma 3 encoder). Set `SELENE_METAL=1` to opt in. Excluded from Linux CI (requires Apple frameworks / objc2). Use `--all-features` locally on macOS only.
-- **Embedding provider error caching:** The embedding provider is cached in a `OnceLock`. If the first load fails (missing model file, corrupt weights), the error is cached permanently. A server restart is required to retry. This is intentional MVP behavior; no hot-reload of ML models.
-- **Embedding health:** `/health` endpoint includes `embedding` object with `loaded`, `model_id`, `dimensions`, `model_path`, and `error` fields. Added to HTTP JSON only (not wire DTO) to avoid breaking postcard serialization.
-- **Projection catalog:** `SharedCatalog` persists on `ServerState` across HTTP requests. `graph.project()` stores projections with their config; `ensure_fresh()` lazily rebuilds stale projections (generation mismatch) from the stored config, preserving user label/edge filters. Algorithms call `get_projection_or_build()` which invokes `ensure_fresh` before execution. `graph.listProjections()` and `graph.drop()` operate on the same persistent catalog.
-- **Multi-MATCH mutations:** `MATCH (a) WHERE ... MATCH (b) WHERE ... INSERT (a)-[:e]->(b)` supported. Grammar allows `(match_stmt | filter_stmt)*` before mutation ops. Planner adds a Join between consecutive MATCH pattern ops. INSERT executor checks bindings for already-bound variables before creating nodes.
-- **NestedMatch pipeline op:** `WITH d MATCH (d)-[:e]->(x)` works via `PipelineOp::NestedMatch`. The planner detects MATCH-after-WITH and emits a NestedMatch instead of appending to the initial pattern_ops. The executor runs correlated pattern execution seeded by each input binding.
-- **SSE subscriptions:** `GET /subscribe` streams graph change events as Server-Sent Events. Filter by node labels, change types, property keys. Hooks into the existing changelog broadcast channel.
-- **Graph traversal:** `graph_slice` supports 4 modes: `full`, `labels`, `containment`, `traverse`. The `traverse` mode does BFS from a root node following specified edge labels and direction, with `_depth` annotation on result nodes.
-- **IntermediateFilter must use `FunctionRegistry::builtins()`**, not `::new()`. Empty registries silently break `id()`, `labels()`, and all registered functions in pattern-level WHERE pushdown.
-- **Pest literal tokens are invisible to `into_inner()`**. Detect presence via `pair.as_str()` text inspection, not by counting children (e.g., the `!` in `label_not`).
-- **MERGE+SET variable binding:** MERGE populates `node_var_map` but `bindings_snapshot` may contain unit-table rows without the variable. `augment_bindings_with_merge_vars()` injects MERGE vars into existing bindings before SET/REMOVE evaluation.
-- **rmcp non-exhaustive structs:** `Annotations`, `CallToolResult` cannot be constructed with struct literals. Use `Default::default()` or `success()` then set fields.
-- **Alias keywords:** `alias`, `yield_item`, and `qualified_name` all use `prop_ident` (not `ident`) to allow reserved words as aliases, YIELD column names, and procedure method names.
-- **Agent usability testing:** Always verify agent-reported bugs before fixing. Round 8 had 3 false positives out of 18 reports. Verify with targeted curl commands against the live server.
 
 ## Test patterns
 
@@ -116,23 +77,11 @@ SharedGraph for mutation tests: `let shared = SharedGraph::new(SeleneGraph::new(
 
 GQL edge creation between existing nodes: `MATCH (a) WHERE id(a) = 1 MATCH (b) WHERE id(b) = 2 INSERT (a)-[:edge]->(b)`. The INSERT reuses bound variables from MATCH instead of creating new nodes.
 
-Multi-label INSERT: `INSERT (n:Label1&Label2 {name: 'test'}) RETURN id(n)`. Uses the full `label_expr` grammar.
-
-MERGE with RETURN: `MERGE (n:Label {key: 'val'}) RETURN id(n) AS id`. The MERGE variable is bound to the output scope.
-
 GQL read tests: `QueryBuilder::new(query, &graph).execute().unwrap()`.
 
 Optimizer rule tests: construct `ExecutionPlan` manually, call `rule.rewrite(plan, &OptimizeContext::empty())`. Use `OptimizeContext::new(&graph)` for rules needing cardinality stats.
 
-Procedure tests: implement `Procedure` trait, call `proc.execute(args, &graph, ts)` directly.
-
-`FunctionCall` struct has `count_star: bool`, not `distinct`.
-
-**Math function domain guards:** `log()`, `log10()`, `ln()`, `sqrt()` all return `Null` for zero/negative domain inputs. This is enforced consistently. Do not use raw Rust `.ln()`/`.sqrt()` which return `-inf`/`NaN`.
-
-**Procedure conventions:** Yield column names use snake_case (`node_id`, `node_count`, `edge_count`, `community_id`, `component_id`). Procedure lookup is case-insensitive. YIELD column matching is underscore-insensitive (both `node_id` and `nodeId` work). Invalid YIELD columns produce a helpful error listing available columns. `CALL proc() YIELD col` works without RETURN. `YIELD *` returns all columns. `CALL graph.procedures() YIELD name, params, yields` introspects all registered procedures.
-
-**Subquery WHERE:** `EXISTS { MATCH (n)-[:e]->(m) WHERE m.prop > val }` and `COUNT { MATCH ... WHERE ... }` correctly apply the inner WHERE clause. The `plan_subquery_cached` function returns pattern ops only; `filter_subquery_results` applies the WHERE as a post-filter.
+**Node IDs start at 1** in tests, not 0. The `id()` function returns `GqlValue::Int` (not UInt).
 
 ## Key dependencies
 
@@ -171,8 +120,6 @@ cargo bench -p selene-rdf --all-features
 
 Stress profile: `SELENE_BENCH_PROFILE=stress SELENE_MAX_BINDINGS=500000 cargo bench -p selene-gql`
 
-Results file: `Benchmarks.md`
-
 ## Docker
 
 ```bash
@@ -182,49 +129,19 @@ docker compose up -d                           # hardened: read_only, cap_drop A
 
 ## Workflow graph (SeleneDB MCP)
 
-Project knowledge is stored as a live graph in the running SeleneDB instance, queryable via MCP tools (`gql_query`, `semantic_search`, `related`). **Query the graph before reading flat files.** The graph contains 233 nodes across 13 types:
+**All project knowledge lives in the running SeleneDB graph instance.** Query via MCP tools (`gql_query`, `graph_stats`, `related`, `semantic_search`) before reading files. The graph contains 610+ nodes across 4 projects (SeleneDB, Helios, rusty-bacnet, rusty-modbus) with 680+ edges.
 
-| Node type | Count | What it captures |
-|-----------|-------|------------------|
-| `crate` | 13 | Workspace crates with LOC, activity, `depends_on` edges |
-| `module` | 24 | Code modules within crates with `contains` hierarchy and `flows_to` data flow |
-| `dependency` | 17 | External crates (pest, axum, candle, etc.) with `used_by` edges |
-| `convention` | 15 | Pitfalls and rules agents must follow (severity: critical/important) |
-| `preference` | 15 | Learned workflow behaviors (CI, writing, architecture, strategy) |
-| `topic` | 14 | Domain hubs (AI/ML, GQL, MCP, HNSW, etc.) linking all entity types |
-| `document` | 39 | Research, plans, reviews with `informs` lineage edges |
-| `work_item` | 37 | Deferred (4 open), completed (19), roadmap (14 gated) |
-| `milestone` | 11 | Development phases with commit counts and `touches`/`produced` edges |
-| `skill` | 30 | justin-tools plugin skills with `belongs_to` categories |
-| `agent` | 10 | justin-tools agents with `preloads` skill edges |
-| `workflow_category` | 7 | Skill lifecycle phases |
-| `dev_stats` | 1 | Codebase velocity snapshot |
+Key entity types: `project`, `crate`, `module`, `dependency`, `convention`, `preference`, `design_decision`, `topic`, `document`, `work_item`, `milestone`, `deferred_work`, `upstream_proposal`, `best_practice`, `code_pitfall`, `research`, `session_summary`, `skill`, `agent`.
+
+Key edge types: `depends_on`, `relates_to`, `belongs_to_project`, `contains`, `used_by`, `flows_to`, `produced`, `touches`, `informs`, `preloads`, `applies_to`.
+
+**Start every session** by querying `graph_stats` for current state, then query conventions, open work, and recent sessions for context. Update the graph throughout the session: session summaries, work item status, notes, findings.
 
 **Common queries:**
 ```gql
--- What conventions apply to the module I'm editing?
 MATCH (c:convention) WHERE c.scope = 'selene-gql' AND c.severity = 'critical' RETURN c.name, c.description
-
--- What's the blast radius of changing a crate?
 MATCH (c:crate)-[:depends_on]->(:crate {name: 'selene-core'}) RETURN c.name
-
--- What research exists on a topic?
-MATCH (d:document)-[:relates_to]->(t:topic) WHERE t.name = 'HNSW' RETURN d.title, d.summary
-
--- How does a request flow through the code?
+MATCH (d:design_decision) WHERE d.project = 'SeleneDB' RETURN d.name, d.rationale
+MATCH (w:work_item) WHERE w.status = 'open' OR w.status = 'gated' RETURN w.title, w.status
 MATCH (a:module)-[:flows_to]->(b:module) RETURN a.name, b.name
-
--- What's still open?
-MATCH (w:work_item) WHERE w.status = 'open' OR w.status = 'gated' RETURN w.title, w.status, w.gate
 ```
-
-**Execution flow** (encoded as `flows_to` edges):
-```
-HTTP:  routes -> ops -> parser -> ast -> planner -> optimizer -> pattern -> pipeline -> types
-MCP:   mcp_tools -> ops -> (same pipeline)
-Mutations:                                          optimizer -> execute -> mutation -> changelog
-```
-
-## Deferred work
-
-Tracked in the workflow graph (`MATCH (w:work_item) WHERE w.status = 'open'`) and legacy files `_agentskills/DEFERRED.md` (4 actionable) and `_agentskills/FUTURE_ROADMAP.md` (14 gated/v2+).
