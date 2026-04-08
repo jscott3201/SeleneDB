@@ -2,6 +2,7 @@
 
 mod ai;
 mod memory;
+mod principals;
 mod proposals;
 mod schemas;
 mod traces;
@@ -1853,6 +1854,120 @@ impl SeleneTools {
         params: Parameters<ProposalIdParams>,
     ) -> Result<CallToolResult, McpError> {
         proposals::execute_proposal_impl(self, params.0).await
+    }
+
+    // ── Principal Management ────────────────────────────────────────
+
+    #[tool(
+        name = "list_principals",
+        description = "List all principals in the secure vault. \
+        Returns identity, role, enabled status, and whether a credential is set. \
+        Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_principals(&self) -> Result<CallToolResult, McpError> {
+        principals::list_principals_impl(self).await
+    }
+
+    #[tool(
+        name = "get_principal",
+        description = "Get a single principal by identity. \
+        Returns identity, role, enabled status, and whether a credential is set. \
+        Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_principal(
+        &self,
+        params: Parameters<GetPrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::get_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "create_principal",
+        description = "Create a new principal with the given identity, role, and optional password. \
+        Roles: admin, service, operator, reader, device. \
+        If no password is provided, the principal can only authenticate via OAuth. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_principal(
+        &self,
+        params: Parameters<CreatePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::create_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "update_principal",
+        description = "Update a principal's role and/or enabled status. \
+        Only specified fields are changed; omitted fields keep their current value. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_principal(
+        &self,
+        params: Parameters<UpdatePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::update_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "disable_principal",
+        description = "Disable a principal (set enabled = false). \
+        The principal's node and credentials are preserved but authentication will fail. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn disable_principal(
+        &self,
+        params: Parameters<DisablePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::disable_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "rotate_credential",
+        description = "Rotate a principal's credential (set a new password). \
+        The old credential is immediately invalidated. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rotate_credential(
+        &self,
+        params: Parameters<RotateCredentialParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::rotate_credential_impl(self, params.0).await
     }
 }
 

@@ -14,6 +14,7 @@ pub mod graph_stats;
 pub mod health;
 pub mod info;
 pub mod nodes;
+pub mod principals;
 pub mod reactflow;
 pub mod schema;
 pub mod ts;

@@ -657,7 +657,7 @@ mod tests {
         // Create a vault with dev key
         let master = crate::vault::crypto::MasterKey::dev_key();
         let vault_path = dir.path().join("secure.vault");
-        let handle = crate::vault::VaultHandle::open_or_create(
+        let (handle, _) = crate::vault::VaultHandle::open_or_create(
             vault_path,
             &master,
             crate::vault::KeySource::Raw,

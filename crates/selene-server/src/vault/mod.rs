@@ -51,42 +51,52 @@ struct VaultPersist {
 
 impl VaultHandle {
     /// Open an existing vault or create a new one with default admin principal.
+    ///
+    /// Returns `(handle, None)` when opening an existing vault, or
+    /// `(handle, Some(password))` when a new vault was created with a
+    /// bootstrap admin credential.
     pub fn open_or_create(
         path: PathBuf,
         master: &MasterKey,
         key_source: KeySource,
         argon2_salt: [u8; 16],
-    ) -> Result<Self, VaultError> {
+    ) -> Result<(Self, Option<String>), VaultError> {
         if path.exists() {
             let (graph, dek, ks, salt) = storage::read_vault(&path, master)?;
             tracing::info!(nodes = graph.node_count(), "secure vault opened");
-            Ok(Self {
-                graph: SharedGraph::new(graph),
-                persist: parking_lot::Mutex::new(VaultPersist {
-                    path,
-                    dek,
-                    key_source: ks,
-                    argon2_salt: salt,
-                }),
-            })
+            Ok((
+                Self {
+                    graph: SharedGraph::new(graph),
+                    persist: parking_lot::Mutex::new(VaultPersist {
+                        path,
+                        dek,
+                        key_source: ks,
+                        argon2_salt: salt,
+                    }),
+                },
+                None,
+            ))
         } else {
             let dek = DataKey::generate();
             let mut graph = SeleneGraph::new();
-            seed_default_admin(&mut graph);
+            let admin_password = seed_default_admin(&mut graph);
             tracing::info!("secure vault created with default admin principal");
 
             // Flush immediately to create the file
             storage::write_vault(&path, &graph, &dek, master, key_source, &argon2_salt)?;
 
-            Ok(Self {
-                graph: SharedGraph::new(graph),
-                persist: parking_lot::Mutex::new(VaultPersist {
-                    path,
-                    dek,
-                    key_source,
-                    argon2_salt,
-                }),
-            })
+            Ok((
+                Self {
+                    graph: SharedGraph::new(graph),
+                    persist: parking_lot::Mutex::new(VaultPersist {
+                        path,
+                        dek,
+                        key_source,
+                        argon2_salt,
+                    }),
+                },
+                Some(admin_password),
+            ))
         }
     }
 
@@ -138,20 +148,86 @@ impl VaultHandle {
     pub fn node_count(&self) -> usize {
         self.graph.load_snapshot().node_count()
     }
+
+    /// Resolve the OAuth signing key from the vault graph.
+    ///
+    /// Looks for a `vault_config` node with `key = "oauth_signing_key"`. If found,
+    /// decodes the base64 `value` property. If not found, generates a random 32-byte
+    /// key, persists it as a new node, and flushes the vault.
+    pub fn resolve_signing_key(&self, master: &MasterKey) -> Result<Vec<u8>, VaultError> {
+        // Try to read an existing key
+        let existing: Option<String> = self.graph.read(|g| {
+            g.nodes_by_label("vault_config")
+                .find(|&nid| {
+                    g.get_node(nid).is_some_and(|n| {
+                        n.property("key")
+                            .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
+                    })
+                })
+                .and_then(|nid| g.get_node(nid))
+                .and_then(|n| n.property("value").and_then(|v| v.as_str()).map(str::to_owned))
+        });
+
+        if let Some(b64_str) = existing {
+            let decoded = decode_base64(&b64_str)?;
+            tracing::info!("OAuth signing key loaded from vault");
+            return Ok(decoded.to_vec());
+        }
+
+        // Generate a new key and persist it
+        use rand::RngExt;
+        let mut key = [0u8; 32];
+        rand::rng().fill(&mut key[..]);
+
+        let b64 = encode_base64(&key);
+        self.graph
+            .write(|m| {
+                m.create_node(
+                    LabelSet::from_strs(&["vault_config"]),
+                    PropertyMap::from_pairs(vec![
+                        (IStr::new("key"), Value::str("oauth_signing_key")),
+                        (IStr::new("value"), Value::str(&b64)),
+                    ]),
+                )
+            })
+            .map_err(|e| VaultError::InvalidFormat(format!("vault graph write failed: {e}")))?;
+        self.flush(master)?;
+        tracing::info!("OAuth signing key generated and persisted to vault");
+
+        Ok(key.to_vec())
+    }
 }
 
 /// Seed the default admin principal in a fresh vault.
-fn seed_default_admin(graph: &mut SeleneGraph) {
+///
+/// Generates a random 24-character alphanumeric password, hashes it with
+/// argon2id, and stores the hash on the principal node. Returns the plaintext
+/// password for one-time display to the operator.
+fn seed_default_admin(graph: &mut SeleneGraph) -> String {
+    use rand::RngExt;
+    let password: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect();
+
+    let credential_hash =
+        crate::auth::credential::hash_credential(&password).expect("argon2id hash failed");
+
     let mut m = graph.mutate();
     m.create_node(
         LabelSet::from_strs(&["principal"]),
         PropertyMap::from_pairs(vec![
             (IStr::new("identity"), Value::str("admin")),
             (IStr::new("role"), Value::str("admin")),
+            (IStr::new("enabled"), Value::Bool(true)),
+            (IStr::new("credential_hash"), Value::str(&credential_hash)),
         ]),
     )
     .unwrap();
     m.commit(0).unwrap();
+
+    password
 }
 
 /// Resolve the master key from config sources.
@@ -339,10 +415,12 @@ mod tests {
         let vault_path = dir.path().join("secure.vault");
         let master = MasterKey::dev_key();
 
-        // Create
-        let handle =
+        // Create — returns bootstrap password on first run
+        let (handle, admin_pw) =
             VaultHandle::open_or_create(vault_path.clone(), &master, KeySource::Raw, [0u8; 16])
                 .unwrap();
+        assert!(admin_pw.is_some());
+        assert_eq!(admin_pw.as_ref().unwrap().len(), 24);
         assert_eq!(handle.node_count(), 1); // default admin
 
         // Mutate
@@ -354,9 +432,10 @@ mod tests {
 
         drop(handle);
 
-        // Reopen
-        let handle2 =
+        // Reopen — no bootstrap password
+        let (handle2, admin_pw2) =
             VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
+        assert!(admin_pw2.is_none());
         assert_eq!(handle2.node_count(), 2);
     }
 
@@ -367,7 +446,7 @@ mod tests {
         let old_master = MasterKey::from_bytes([1u8; 32]);
         let new_master = MasterKey::from_bytes([2u8; 32]);
 
-        let handle =
+        let (handle, _) =
             VaultHandle::open_or_create(vault_path.clone(), &old_master, KeySource::Raw, [0u8; 16])
                 .unwrap();
 
@@ -382,7 +461,7 @@ mod tests {
         assert!(result.is_err());
 
         // New key should work
-        let handle2 =
+        let (handle2, _) =
             VaultHandle::open_or_create(vault_path, &new_master, KeySource::Raw, [0u8; 16])
                 .unwrap();
         assert_eq!(handle2.node_count(), 1);
@@ -430,5 +509,60 @@ mod tests {
 
         let result = resolve_master_key(None, false, None, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn signing_key_generate_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("secure.vault");
+        let master = MasterKey::dev_key();
+
+        // Create vault and generate a signing key
+        let (handle, _) =
+            VaultHandle::open_or_create(vault_path.clone(), &master, KeySource::Raw, [0u8; 16])
+                .unwrap();
+        let key1 = handle.resolve_signing_key(&master).unwrap();
+        assert_eq!(key1.len(), 32);
+
+        // Second call returns the same key (reads from vault graph)
+        let key2 = handle.resolve_signing_key(&master).unwrap();
+        assert_eq!(key1, key2);
+
+        // Node count: admin + vault_config
+        assert_eq!(handle.node_count(), 2);
+        drop(handle);
+
+        // Reopen vault — key survives restart
+        let (handle2, _) =
+            VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
+        let key3 = handle2.resolve_signing_key(&master).unwrap();
+        assert_eq!(key1, key3);
+    }
+
+    #[test]
+    fn admin_bootstrap_credential_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("secure.vault");
+        let master = MasterKey::dev_key();
+
+        let (handle, admin_pw) =
+            VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
+        let password = admin_pw.expect("first-run must return admin password");
+
+        // Verify the credential stored in the vault graph
+        let hash = handle.graph.read(|g| {
+            let nid = g
+                .nodes_by_label("principal")
+                .next()
+                .expect("admin node must exist");
+            let node = g.get_node(nid).unwrap();
+            assert_eq!(node.property("enabled"), Some(&Value::Bool(true)));
+            node.property("credential_hash")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .expect("credential_hash must be set")
+        });
+
+        assert!(crate::auth::credential::verify_credential(&password, &hash).unwrap());
     }
 }

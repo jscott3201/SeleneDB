@@ -660,3 +660,48 @@ pub(crate) struct ConfigureMemoryParams {
     #[serde(default)]
     pub(crate) eviction_policy: Option<String>,
 }
+
+// ── Principal management params ──────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetPrincipalParams {
+    /// The identity of the principal to retrieve.
+    pub(crate) identity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreatePrincipalParams {
+    /// Unique identity string for the new principal.
+    pub(crate) identity: String,
+    /// Role: admin, service, operator, reader, or device.
+    pub(crate) role: String,
+    /// Optional password. If omitted, the principal has no credential (OAuth-only).
+    #[serde(default)]
+    pub(crate) password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UpdatePrincipalParams {
+    /// Identity of the principal to update.
+    pub(crate) identity: String,
+    /// New role (admin, service, operator, reader, device). Leave unset to keep current.
+    #[serde(default)]
+    pub(crate) role: Option<String>,
+    /// Set to true/false to enable/disable. Leave unset to keep current.
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct DisablePrincipalParams {
+    /// Identity of the principal to disable.
+    pub(crate) identity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RotateCredentialParams {
+    /// Identity of the principal whose credential to rotate.
+    pub(crate) identity: String,
+    /// The new password.
+    pub(crate) new_password: String,
+}
