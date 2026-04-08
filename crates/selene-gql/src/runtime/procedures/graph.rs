@@ -679,6 +679,164 @@ impl PropDiscovery {
     }
 }
 
+// ── graph.validate ──────────────────────────────────────────────────────────
+
+/// `CALL graph.validate() YIELD check, status, count, details`
+///
+/// Validates structural integrity of the graph. Checks:
+/// - Dangling edges: edges whose source or target node does not exist
+/// - Duplicate edges: multiple edges with same (source, target, label)
+/// - Orphaned nodes: nodes with zero edges (excluding __ system labels)
+pub struct GraphValidate;
+
+impl Procedure for GraphValidate {
+    fn name(&self) -> &'static str {
+        "graph.validate"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![],
+            yields: vec![
+                YieldColumn {
+                    name: "check",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "status",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "count",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "details",
+                    typ: GqlType::String,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        _args: &[GqlValue],
+        graph: &SeleneGraph,
+        _ht: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        use std::collections::HashMap;
+        let check_key = IStr::new("check");
+        let status_key = IStr::new("status");
+        let count_key = IStr::new("count");
+        let details_key = IStr::new("details");
+
+        let mut rows = Vec::new();
+
+        // Check 1: Dangling edges (source or target node missing)
+        let mut dangling = 0i64;
+        let mut dangling_ids = Vec::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                let src_ok = graph.get_node(edge.source).is_some();
+                let tgt_ok = graph.get_node(edge.target).is_some();
+                if !src_ok || !tgt_ok {
+                    dangling += 1;
+                    if dangling_ids.len() < 10 {
+                        dangling_ids.push(edge_id.0.to_string());
+                    }
+                }
+            }
+        }
+        let dangling_detail = if dangling_ids.is_empty() {
+            String::new()
+        } else {
+            format!("edge_ids: [{}]", dangling_ids.join(", "))
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("dangling_edges".into())),
+            (
+                status_key,
+                GqlValue::String(if dangling == 0 { "pass" } else { "fail" }.into())
+            ),
+            (count_key, GqlValue::Int(dangling)),
+            (details_key, GqlValue::String(dangling_detail.into())),
+        ]);
+
+        // Check 2: Duplicate edges (same source, target, label)
+        let mut edge_keys: HashMap<(u64, u64, IStr), i64> = HashMap::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                *edge_keys
+                    .entry((edge.source.0, edge.target.0, edge.label))
+                    .or_insert(0) += 1;
+            }
+        }
+        let duplicates: i64 = edge_keys.values().filter(|&&c| c > 1).map(|c| c - 1).sum();
+        let dup_detail = if duplicates == 0 {
+            String::new()
+        } else {
+            let examples: Vec<String> = edge_keys
+                .iter()
+                .filter(|&(_, &c)| c > 1)
+                .take(5)
+                .map(|((s, t, l), c)| format!("({s})-[:{l}]->({t}) x{c}"))
+                .collect();
+            examples.join(", ")
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("duplicate_edges".into())),
+            (
+                status_key,
+                GqlValue::String(if duplicates == 0 { "pass" } else { "warn" }.into())
+            ),
+            (count_key, GqlValue::Int(duplicates)),
+            (details_key, GqlValue::String(dup_detail.into())),
+        ]);
+
+        // Check 3: Orphaned nodes (zero edges, excluding system labels)
+        let mut orphans = 0i64;
+        let mut orphan_examples = Vec::new();
+        for node_id in graph.all_node_ids() {
+            if let Some(node) = graph.get_node(node_id) {
+                // Skip system labels (__ prefix)
+                if node.labels.iter().any(|l| l.as_str().starts_with("__")) {
+                    continue;
+                }
+                let out_count = graph.outgoing(node_id).len();
+                let in_count = graph.incoming(node_id).len();
+                if out_count == 0 && in_count == 0 {
+                    orphans += 1;
+                    if orphan_examples.len() < 10 {
+                        let name = node
+                            .properties
+                            .get(IStr::new("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        orphan_examples.push(format!("{}:{}", node_id.0, name));
+                    }
+                }
+            }
+        }
+        let orphan_detail = if orphan_examples.is_empty() {
+            String::new()
+        } else {
+            orphan_examples.join(", ")
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("orphaned_nodes".into())),
+            (
+                status_key,
+                GqlValue::String(if orphans == 0 { "pass" } else { "info" }.into())
+            ),
+            (count_key, GqlValue::Int(orphans)),
+            (details_key, GqlValue::String(orphan_detail.into())),
+        ]);
+
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,5 +1138,6 @@ mod tests {
         assert_eq!(GraphSchema.name(), "graph.schema");
         assert_eq!(GraphConstraints.name(), "graph.constraints");
         assert_eq!(GraphDiscoverSchema.name(), "graph.discoverSchema");
+        assert_eq!(GraphValidate.name(), "graph.validate");
     }
 }

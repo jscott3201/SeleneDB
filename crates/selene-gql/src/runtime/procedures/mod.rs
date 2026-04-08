@@ -170,6 +170,8 @@ impl ProcedureRegistry {
         // Schema audit
         reg.register(Arc::new(schema_audit::SchemaAudit));
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
+        // Structural integrity validation
+        reg.register(Arc::new(graph::GraphValidate));
         // Schema dump (LLM-friendly)
         reg.register(Arc::new(schema_dump::SchemaDump));
         // Schema introspection
