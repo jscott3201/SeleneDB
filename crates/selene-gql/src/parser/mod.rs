@@ -45,13 +45,22 @@ pub(crate) fn parse_raw(input: &str) -> Result<pest::iterators::Pairs<'_, Rule>,
         };
         let mut message = e.to_string();
         // Detect reserved keyword usage and add a helpful hint.
-        // pest col is a 1-based character count; convert to byte offset
-        // to avoid panicking on multi-byte UTF-8 input.
+        // pest col is 1-based and relative to the error line. Find the
+        // start of that line, then advance by (col-1) characters to get
+        // the correct byte offset (safe for multi-byte UTF-8).
         if col > 0 {
-            let byte_pos = input
+            let line_start = if line <= 1 {
+                0
+            } else {
+                input
+                    .match_indices('\n')
+                    .nth(line - 2)
+                    .map_or(0, |(i, _)| i + 1)
+            };
+            let byte_pos = input[line_start..]
                 .char_indices()
                 .nth(col.saturating_sub(1))
-                .map_or(input.len(), |(i, _)| i);
+                .map_or(input.len(), |(i, _)| line_start + i);
             let rest = &input[byte_pos..];
             let word: String = rest
                 .chars()

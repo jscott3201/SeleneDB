@@ -11,7 +11,7 @@ use std::time::Instant;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Json, Response};
 use parking_lot::Mutex;
 
 use crate::config::RateLimitConfig;
@@ -173,11 +173,11 @@ pub async fn rate_limit_middleware(
             );
             (
                 StatusCode::TOO_MANY_REQUESTS,
-                [
-                    ("retry-after", retry_after.to_string()),
-                    ("content-type", "application/json".to_string()),
-                ],
-                format!(r#"{{"error":"rate limit exceeded","retry_after":{retry_after}}}"#),
+                [("retry-after", retry_after.to_string())],
+                Json(serde_json::json!({
+                    "error": "rate limit exceeded",
+                    "retry_after": retry_after
+                })),
             )
                 .into_response()
         }
@@ -244,6 +244,19 @@ mod tests {
         for _ in 0..1000 {
             assert!(limiter.try_acquire(Tier::Read).is_ok());
         }
+    }
+
+    #[test]
+    fn token_bucket_refills_over_time() {
+        let mut bucket = TokenBucket::new(100); // 100 tokens/sec
+        // Drain all tokens.
+        for _ in 0..100 {
+            assert!(bucket.try_acquire());
+        }
+        assert!(!bucket.try_acquire());
+        // Wait 50ms: should refill ~5 tokens (100/sec * 0.05s).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(bucket.try_acquire(), "bucket should have refilled after sleep");
     }
 
     #[test]
