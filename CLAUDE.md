@@ -180,6 +180,51 @@ docker build -t selene .                       # distroless, ~14 MB compressed
 docker compose up -d                           # hardened: read_only, cap_drop ALL
 ```
 
+## Workflow graph (SeleneDB MCP)
+
+Project knowledge is stored as a live graph in the running SeleneDB instance, queryable via MCP tools (`gql_query`, `semantic_search`, `related`). **Query the graph before reading flat files.** The graph contains 233 nodes across 13 types:
+
+| Node type | Count | What it captures |
+|-----------|-------|------------------|
+| `crate` | 13 | Workspace crates with LOC, activity, `depends_on` edges |
+| `module` | 24 | Code modules within crates with `contains` hierarchy and `flows_to` data flow |
+| `dependency` | 17 | External crates (pest, axum, candle, etc.) with `used_by` edges |
+| `convention` | 15 | Pitfalls and rules agents must follow (severity: critical/important) |
+| `preference` | 15 | Learned workflow behaviors (CI, writing, architecture, strategy) |
+| `topic` | 14 | Domain hubs (AI/ML, GQL, MCP, HNSW, etc.) linking all entity types |
+| `document` | 39 | Research, plans, reviews with `informs` lineage edges |
+| `work_item` | 37 | Deferred (4 open), completed (19), roadmap (14 gated) |
+| `milestone` | 11 | Development phases with commit counts and `touches`/`produced` edges |
+| `skill` | 30 | justin-tools plugin skills with `belongs_to` categories |
+| `agent` | 10 | justin-tools agents with `preloads` skill edges |
+| `workflow_category` | 7 | Skill lifecycle phases |
+| `dev_stats` | 1 | Codebase velocity snapshot |
+
+**Common queries:**
+```gql
+-- What conventions apply to the module I'm editing?
+MATCH (c:convention) WHERE c.scope = 'selene-gql' AND c.severity = 'critical' RETURN c.name, c.description
+
+-- What's the blast radius of changing a crate?
+MATCH (c:crate)-[:depends_on]->(:crate {name: 'selene-core'}) RETURN c.name
+
+-- What research exists on a topic?
+MATCH (d:document)-[:relates_to]->(t:topic) WHERE t.name = 'HNSW' RETURN d.title, d.summary
+
+-- How does a request flow through the code?
+MATCH (a:module)-[:flows_to]->(b:module) RETURN a.name, b.name
+
+-- What's still open?
+MATCH (w:work_item) WHERE w.status = 'open' OR w.status = 'gated' RETURN w.title, w.status, w.gate
+```
+
+**Execution flow** (encoded as `flows_to` edges):
+```
+HTTP:  routes -> ops -> parser -> ast -> planner -> optimizer -> pattern -> pipeline -> types
+MCP:   mcp_tools -> ops -> (same pipeline)
+Mutations:                                          optimizer -> execute -> mutation -> changelog
+```
+
 ## Deferred work
 
-Tracked in `_agentskills/DEFERRED.md` (4 actionable, 8 done) and `_agentskills/FUTURE_ROADMAP.md` (14 gated/v2+).
+Tracked in the workflow graph (`MATCH (w:work_item) WHERE w.status = 'open'`) and legacy files `_agentskills/DEFERRED.md` (4 actionable) and `_agentskills/FUTURE_ROADMAP.md` (14 gated/v2+).
