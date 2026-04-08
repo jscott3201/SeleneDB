@@ -141,6 +141,12 @@ impl FactorLevel {
         parent_indices: Arc<[u32]>,
     ) -> Self {
         debug_assert!(
+            columns.len() == schema.len(),
+            "column count ({}) must match schema count ({})",
+            columns.len(),
+            schema.len()
+        );
+        debug_assert!(
             columns.iter().all(|c| c.len() == len),
             "all columns must have the same length"
         );

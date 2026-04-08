@@ -419,6 +419,12 @@ impl DataChunk {
     pub fn from_builders(builders: Vec<ColumnBuilder>, schema: ChunkSchema, len: usize) -> Self {
         let columns: SmallVec<[Column; 8]> = builders.into_iter().map(|b| b.finish()).collect();
         debug_assert!(
+            columns.len() == schema.len(),
+            "column count ({}) must match schema count ({})",
+            columns.len(),
+            schema.len()
+        );
+        debug_assert!(
             columns.iter().all(|c| c.len() == len),
             "all columns must have the same length"
         );
