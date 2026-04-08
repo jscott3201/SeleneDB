@@ -16,7 +16,7 @@ use super::ts::extract_timestamp;
 
 // ── ts.downsample ─────────────────────────────────────────────────
 
-/// ts.downsample(entity_id, property, start, end) -> window_start, min, max, avg, count
+/// ts.downsample(entity_id, property, start, end) -> window_start, min, max, mean, total
 ///
 /// Returns pre-computed warm tier aggregates (one row per tumbling window).
 pub struct TsDownsample;
@@ -60,11 +60,11 @@ impl Procedure for TsDownsample {
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "avg",
+                    name: "mean",
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "count",
+                    name: "total",
                     typ: GqlType::Int,
                 },
             ],
@@ -110,8 +110,8 @@ impl Procedure for TsDownsample {
                     ),
                     (IStr::new("min"), GqlValue::Float(a.min)),
                     (IStr::new("max"), GqlValue::Float(a.max)),
-                    (IStr::new("avg"), GqlValue::Float(a.avg())),
-                    (IStr::new("count"), GqlValue::Int(i64::from(a.count))),
+                    (IStr::new("mean"), GqlValue::Float(a.avg())),
+                    (IStr::new("total"), GqlValue::Int(i64::from(a.count))),
                 ]
             })
             .collect())
@@ -304,7 +304,7 @@ impl Procedure for TsFullRange {
 
 // ── ts.trends ─────────────────────────────────────────────────────
 
-/// ts.trends(entity_id, property, start, end) -> window_start, min, max, avg, count
+/// ts.trends(entity_id, property, start, end) -> window_start, min, max, mean, total
 ///
 /// Returns hourly aggregates from the hierarchical warm tier for month-scale dashboards.
 pub struct TsTrends;
@@ -348,11 +348,11 @@ impl Procedure for TsTrends {
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "avg",
+                    name: "mean",
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "count",
+                    name: "total",
                     typ: GqlType::Int,
                 },
             ],
@@ -401,8 +401,8 @@ impl Procedure for TsTrends {
                     ),
                     (IStr::new("min"), GqlValue::Float(a.min)),
                     (IStr::new("max"), GqlValue::Float(a.max)),
-                    (IStr::new("avg"), GqlValue::Float(a.avg())),
-                    (IStr::new("count"), GqlValue::Int(i64::from(a.count))),
+                    (IStr::new("mean"), GqlValue::Float(a.avg())),
+                    (IStr::new("total"), GqlValue::Int(i64::from(a.count))),
                 ]
             })
             .collect())
@@ -558,7 +558,7 @@ mod tests {
             .unwrap();
         // At least 2 windows (minute 1000 finalized + minute 1001 finalized, minute 1002 current)
         assert!(rows.len() >= 2, "expected >=2 windows, got {}", rows.len());
-        // Each row has 5 columns: window_start, min, max, avg, count
+        // Each row has 5 columns: window_start, min, max, mean, total
         assert_eq!(rows[0].len(), 5);
     }
 

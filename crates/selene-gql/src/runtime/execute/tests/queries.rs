@@ -649,12 +649,11 @@ fn yield_underscore_flexible_column_match() {
 fn yield_reserved_keyword_backtick_escaped_in_return() {
     let g = setup_graph();
     let procs = ProcedureRegistry::builtins();
-    // graph.validate yields a column named "count" which is a reserved keyword.
-    // The YIELD clause accepts it unescaped, but RETURN requires backtick
-    // escaping. The case-insensitive slot_of fallback must bridge the gap
-    // between YIELD binding (COUNT) and RETURN reference (`count` → count).
+    // graph.validate yields a column named "total" (renamed from "count" to
+    // avoid reserved-keyword collisions). Verify the renamed column works in
+    // both YIELD and RETURN.
     let result = QueryBuilder::new(
-        "CALL graph.validate() YIELD check, status, count, details RETURN check, status, `count`, details",
+        "CALL graph.validate() YIELD check, status, total, details RETURN check, status, total, details",
         &g,
     )
     .with_procedures(procs)
@@ -662,7 +661,7 @@ fn yield_reserved_keyword_backtick_escaped_in_return() {
     .unwrap();
     assert!(
         result.row_count() > 0,
-        "backtick-escaped reserved keyword in RETURN should resolve"
+        "renamed YIELD column 'total' should resolve in RETURN"
     );
 }
 

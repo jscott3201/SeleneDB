@@ -144,10 +144,10 @@ Key edge types: `depends_on`, `relates_to`, `belongs_to_project`, `contains`, `u
 MATCH (u)-[r:relates_to]->(m:milestone) WHERE m.status = 'next' RETURN m.name, u.title, r.sprint_order ORDER BY r.sprint_order
 
 -- What changed since last session
-CALL graph.diff($sinceNanos) YIELD entity_type, change_type, label, count
+CALL graph.diff($sinceNanos) YIELD entity_type, change_type, label, total
 
 -- Structural health check
-CALL graph.validate() YIELD check, status, count, details
+CALL graph.validate() YIELD check, status, total, details
 ```
 
 **Common queries:**

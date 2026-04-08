@@ -154,7 +154,7 @@ impl Procedure for GraphTriangleCount {
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "count",
+                    name: "total",
                     typ: GqlType::Int,
                 },
             ],
@@ -179,7 +179,7 @@ impl Procedure for GraphTriangleCount {
             .map(|(nid, count)| {
                 smallvec![
                     (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
-                    (IStr::new("count"), GqlValue::Int(count as i64)),
+                    (IStr::new("total"), GqlValue::Int(count as i64)),
                 ]
             })
             .collect())

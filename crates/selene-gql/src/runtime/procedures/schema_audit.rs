@@ -172,7 +172,7 @@ impl Procedure for SchemaAudit {
 
 // ── SchemaAuditDetails ────────────────────────────────────────────────────────
 
-/// `CALL graph.schemaAuditDetails('Label') YIELD property, issueType, count`
+/// `CALL graph.schemaAuditDetails('Label') YIELD property, issueType, total`
 ///
 /// Scans all nodes with the given label and validates each against the current
 /// schema. Aggregates validation issues by `(property, issue_type)` and yields
@@ -200,7 +200,7 @@ impl Procedure for SchemaAuditDetails {
                     typ: GqlType::String,
                 },
                 YieldColumn {
-                    name: "count",
+                    name: "total",
                     typ: GqlType::Int,
                 },
             ],
@@ -250,7 +250,7 @@ impl Procedure for SchemaAuditDetails {
                         IStr::new("issueType"),
                         GqlValue::String(SmolStr::new(issue_type))
                     ),
-                    (IStr::new("count"), GqlValue::Int(count)),
+                    (IStr::new("total"), GqlValue::Int(count)),
                 ]
             })
             .collect();

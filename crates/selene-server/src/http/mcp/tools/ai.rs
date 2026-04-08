@@ -120,7 +120,7 @@ pub(super) async fn enrich_communities_impl(
     // 1. MATCH all __CommunitySummary nodes
     let query = "MATCH (c:__CommunitySummary) \
                  RETURN id(c) AS node_id, c.label_distribution AS labels, \
-                 c.key_entities AS entities, c.node_count AS count";
+                 c.key_entities AS entities, c.node_count AS total";
     let result = ops::gql::execute_gql(
         &tools.state,
         &auth,
@@ -163,11 +163,11 @@ pub(super) async fn enrich_communities_impl(
 
         let labels = row.get("labels").and_then(|v| v.as_str()).unwrap_or("");
         let entities = row.get("entities").and_then(|v| v.as_str()).unwrap_or("");
-        let count = row.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total = row.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Compose text for embedding
         let text =
-            format!("Community with {count} nodes. Labels: {labels}. Key entities: {entities}.");
+            format!("Community with {total} nodes. Labels: {labels}. Key entities: {entities}.");
 
         // SET embedding via embed() function
         let mut params_map = HashMap::new();
