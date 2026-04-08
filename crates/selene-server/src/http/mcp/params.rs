@@ -340,6 +340,14 @@ pub(crate) struct CreateEdgeSchemaParams {
     /// Restrict target nodes to these labels (empty = any label allowed).
     #[serde(default)]
     pub(crate) target_labels: Vec<String>,
+    /// Minimum outgoing edges of this type per source node. When set, nodes
+    /// with matching source labels are warned at commit time if they have fewer
+    /// than this many outgoing edges of this type.
+    #[serde(default)]
+    pub(crate) min_out_degree: Option<u32>,
+    /// Minimum incoming edges of this type per target node.
+    #[serde(default)]
+    pub(crate) min_in_degree: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
