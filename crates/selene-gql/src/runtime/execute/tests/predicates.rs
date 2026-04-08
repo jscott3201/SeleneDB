@@ -503,7 +503,11 @@ fn e2e_insert_boolean_properties() {
     )
     .execute(&shared)
     .unwrap();
-    assert_eq!(result.row_count(), 1, "INSERT with booleans should create one node");
+    assert_eq!(
+        result.row_count(),
+        1,
+        "INSERT with booleans should create one node"
+    );
 
     shared.read(|graph| {
         let node = graph.get_node(selene_core::NodeId(1)).unwrap();

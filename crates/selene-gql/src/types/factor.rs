@@ -390,10 +390,7 @@ impl FactorizedChunk {
         if active_count == 0 {
             // Build empty chunk with full schema and matching empty columns
             let schema = self.build_flat_schema();
-            let columns: SmallVec<[Column; 8]> = schema
-                .iter()
-                .map(|_| Column::Null(0))
-                .collect();
+            let columns: SmallVec<[Column; 8]> = schema.iter().map(|_| Column::Null(0)).collect();
             return DataChunk::from_columns(columns, schema, 0);
         }
 

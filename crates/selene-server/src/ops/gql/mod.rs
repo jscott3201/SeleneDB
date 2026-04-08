@@ -336,14 +336,13 @@ fn execute_read(
     if let Some(p) = parameters {
         qb = qb.with_parameters(p);
     }
-    catch_unwind(AssertUnwindSafe(|| qb.execute()))
-        .unwrap_or_else(|panic| {
-            let msg = panic_message(&panic);
-            tracing::error!(message = %msg, "query execution panicked");
-            Err(selene_gql::GqlError::Internal {
-                message: format!("query execution panicked: {msg}"),
-            })
+    catch_unwind(AssertUnwindSafe(|| qb.execute())).unwrap_or_else(|panic| {
+        let msg = panic_message(&panic);
+        tracing::error!(message = %msg, "query execution panicked");
+        Err(selene_gql::GqlError::Internal {
+            message: format!("query execution panicked: {msg}"),
         })
+    })
 }
 
 /// Execute a mutation via SharedGraph, persisting changes to WAL + changelog.
@@ -372,14 +371,13 @@ fn execute_mutation(
         mb = mb.with_parameters(p);
     }
     let graph = &state.graph;
-    let result = catch_unwind(AssertUnwindSafe(|| mb.execute(graph)))
-        .unwrap_or_else(|panic| {
-            let msg = panic_message(&panic);
-            tracing::error!(message = %msg, "mutation execution panicked");
-            Err(selene_gql::GqlError::Internal {
-                message: format!("mutation execution panicked: {msg}"),
-            })
-        })?;
+    let result = catch_unwind(AssertUnwindSafe(|| mb.execute(graph))).unwrap_or_else(|panic| {
+        let msg = panic_message(&panic);
+        tracing::error!(message = %msg, "mutation execution panicked");
+        Err(selene_gql::GqlError::Internal {
+            message: format!("mutation execution panicked: {msg}"),
+        })
+    })?;
 
     // Persist changes to WAL + changelog + version archive
     if !result.changes.is_empty() {
