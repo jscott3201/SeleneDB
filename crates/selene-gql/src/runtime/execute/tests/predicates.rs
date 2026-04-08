@@ -494,3 +494,26 @@ fn e2e_different_edges_filters_duplicate() {
         r2.row_count()
     );
 }
+
+#[test]
+fn e2e_insert_boolean_properties() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new(
+        "INSERT (n:test {name: 'x', active: true, deleted: false}) RETURN id(n) AS id",
+    )
+    .execute(&shared)
+    .unwrap();
+    assert_eq!(result.row_count(), 1, "INSERT with booleans should create one node");
+
+    shared.read(|graph| {
+        let node = graph.get_node(selene_core::NodeId(1)).unwrap();
+        assert_eq!(
+            node.properties.get(IStr::new("active")),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get(IStr::new("deleted")),
+            Some(&Value::Bool(false))
+        );
+    });
+}

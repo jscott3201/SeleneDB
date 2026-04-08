@@ -1347,4 +1347,36 @@ mod tests {
     fn backtick_escaped_keyword_works() {
         parse_ok("INSERT (:`Commit` {msg: 'test'})");
     }
+
+    #[test]
+    fn insert_boolean_property_false() {
+        parse_ok("INSERT (:test {flag: false})");
+    }
+
+    #[test]
+    fn insert_boolean_property_true() {
+        parse_ok("INSERT (:test {flag: true})");
+    }
+
+    #[test]
+    fn insert_boolean_property_mixed() {
+        parse_ok("INSERT (:test {name: 'x', active: true, deleted: false})");
+    }
+
+    #[test]
+    fn insert_boolean_property_with_named_return() {
+        parse_ok("INSERT (n:test {name: 'x', active: true}) RETURN n.active AS active");
+    }
+
+    #[test]
+    fn insert_boolean_return_id_named() {
+        parse_ok("INSERT (n:test {flag: true, deleted: false}) RETURN id(n) AS id");
+    }
+
+    #[test]
+    fn id_star_is_not_valid_gql() {
+        // id(*) is not valid GQL -- * is only allowed inside aggregate functions.
+        // Use id(variable) instead: INSERT (n:label {}) RETURN id(n) AS id
+        parse_err("MATCH (n:test) RETURN id(*) AS id");
+    }
 }
