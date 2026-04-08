@@ -509,6 +509,7 @@ impl SeleneTools {
         let auth = mcp_auth(self)?;
         reject_replica(&self.state)?;
         let entries = params.0.edges;
+        let batch_upsert = params.0.upsert.unwrap_or(false);
         let st = Arc::clone(&self.state);
         let ids: Vec<u64> = self
             .submit_mut(move || {
@@ -517,7 +518,7 @@ impl SeleneTools {
                     let label = selene_core::IStr::new(&entry.label);
                     let props = ops::json_props_with_edge_schema(entry.properties, &st, label)
                         .map_err(|e| ops::OpError::Internal(e.to_string()))?;
-                    let upsert = entry.upsert.unwrap_or(false);
+                    let upsert = entry.upsert.unwrap_or(batch_upsert);
                     let edge = ops::edges::create_edge(
                         &st,
                         &auth,
@@ -815,11 +816,19 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
+        let embed = selene_gql::runtime::embed::embedding_status();
         Ok(structured_result(serde_json::json!({
             "node_count": stats.node_count,
             "edge_count": stats.edge_count,
             "node_labels": stats.node_labels,
             "edge_labels": stats.edge_labels,
+            "embedding": {
+                "loaded": embed.loaded,
+                "model_id": embed.model_id,
+                "dimensions": embed.dimensions,
+                "model_path": embed.model_path,
+                "error": embed.error,
+            },
         })))
     }
 

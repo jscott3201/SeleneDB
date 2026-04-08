@@ -184,6 +184,10 @@ pub(crate) struct BatchEdgeEntry {
 pub(crate) struct BatchCreateEdgesParams {
     /// Array of edges to create. Each entry has source, target, label, and optional properties.
     pub(crate) edges: Vec<BatchEdgeEntry>,
+    /// Batch-level upsert default. When true, all edges deduplicate on (source,
+    /// target, label) unless overridden by the per-edge `upsert` flag. Default: false.
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
