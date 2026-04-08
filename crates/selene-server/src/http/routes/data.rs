@@ -588,7 +588,11 @@ pub(in crate::http) async fn snapshot_export(
     State(state): State<Arc<ServerState>>,
     _auth: HttpAuth,
 ) -> Result<impl IntoResponse, HttpError> {
-    let tmp_path = std::env::temp_dir().join(format!("selene-export-{}.snap", std::process::id()));
+    // Use the data directory for temp file (container filesystem may be read-only).
+    let tmp_path = state
+        .config
+        .data_dir
+        .join(format!("export-{}.snap.tmp", std::process::id()));
 
     let st = Arc::clone(&state);
     let export_path = tmp_path.clone();
