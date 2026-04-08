@@ -103,6 +103,20 @@ pub(super) async fn enrich_communities_impl(
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
 
+    // Pre-flight: verify embedding model is loaded before starting work
+    let embed_status = selene_gql::runtime::embed::embedding_status();
+    if !embed_status.loaded {
+        let detail = embed_status
+            .error
+            .as_deref()
+            .unwrap_or("model not initialized");
+        return Ok(CallToolResult::success(vec![Content::text(format!(
+            "Error: Embedding model not loaded ({detail}). \
+             Set SELENE_MODEL_PATH or place model files in {} and restart the server.",
+            embed_status.model_path
+        ))]));
+    }
+
     // 1. MATCH all __CommunitySummary nodes
     let query = "MATCH (c:__CommunitySummary) \
                  RETURN id(c) AS node_id, c.label_distribution AS labels, \
@@ -222,6 +236,14 @@ pub(super) async fn graphrag_search_impl(
         ops::gql::ResultFormat::Json,
     )
     .map_err(op_err)?;
+
+    // Surface embedding errors instead of reporting "0 results"
+    if !result.status_code.starts_with("00") && !result.status_code.starts_with("02") {
+        return Ok(CallToolResult::success(vec![Content::text(format!(
+            "Error: {}",
+            result.message
+        ))]));
+    }
 
     let data = result.data_json.unwrap_or_else(|| "[]".to_string());
     let text = format!(

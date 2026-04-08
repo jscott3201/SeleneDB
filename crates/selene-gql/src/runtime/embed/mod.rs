@@ -134,9 +134,17 @@ fn get_provider() -> Result<&'static dyn EmbeddingProvider, GqlError> {
     });
     match result {
         Ok(provider) => Ok(provider.as_ref()),
-        Err(msg) => Err(GqlError::InvalidArgument {
-            message: format!("embedding engine unavailable (restart to retry): {msg}"),
-        }),
+        Err(msg) => {
+            let model_path = resolve_model_path();
+            Err(GqlError::InvalidArgument {
+                message: format!(
+                    "Embedding model not loaded: {msg}. \
+                     Set SELENE_MODEL_PATH or place model files in '{}'. \
+                     Server restart required to retry.",
+                    model_path.display()
+                ),
+            })
+        }
     }
 }
 
