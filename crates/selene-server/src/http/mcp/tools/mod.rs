@@ -372,9 +372,12 @@ impl SeleneTools {
             ops::json_props_with_edge_schema(p.properties, &self.state, label).map_err(op_err)?;
         let source = p.source;
         let target = p.target;
+        let upsert = p.upsert.unwrap_or(false);
         let st = Arc::clone(&self.state);
         let edge = self
-            .submit_mut(move || ops::edges::create_edge(&st, &auth, source, target, label, props))
+            .submit_mut(move || {
+                ops::edges::create_edge(&st, &auth, source, target, label, props, upsert)
+            })
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &edge,

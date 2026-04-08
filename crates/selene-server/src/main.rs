@@ -429,6 +429,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         5,
         selene_core::IStr::new("feeds"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -437,6 +438,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         6,
         selene_core::IStr::new("feeds"),
         selene_core::PropertyMap::new(),
+        false,
     );
 
     // Sensor-to-equipment edges
@@ -447,6 +449,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -455,6 +458,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -463,6 +467,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
 
     // Write some time-series data

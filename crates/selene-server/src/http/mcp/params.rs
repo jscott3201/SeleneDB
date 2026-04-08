@@ -21,7 +21,9 @@ where
         serde_json::Value::String(s) => s
             .parse::<u64>()
             .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
-        _ => Err(D::Error::custom(format!("expected number or string, got {v}"))),
+        _ => Err(D::Error::custom(format!(
+            "expected number or string, got {v}"
+        ))),
     }
 }
 
@@ -136,6 +138,11 @@ pub(crate) struct CreateEdgeParams {
     /// Key-value properties for the edge.
     #[serde(default)]
     pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// If true, return existing edge instead of creating a duplicate when an edge
+    /// with the same source, target, and label already exists. Properties on the
+    /// existing edge are updated with any new values provided.
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]

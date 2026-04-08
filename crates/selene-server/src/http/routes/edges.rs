@@ -50,7 +50,7 @@ pub(in crate::http) async fn create_edge(
     let st = Arc::clone(&state);
     let edge = state
         .mutation_batcher
-        .submit(move || ops::edges::create_edge(&st, &auth, source, target, label, props))
+        .submit(move || ops::edges::create_edge(&st, &auth, source, target, label, props, false))
         .await
         .map_err(HttpError::from_graph_error)??;
     Ok((StatusCode::CREATED, Json(edge_json(&edge))))
