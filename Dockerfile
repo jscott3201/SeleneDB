@@ -3,8 +3,7 @@
 # Uses the official Rust image on Alpine for musl-static builds.
 # The resulting binary has zero runtime dependencies.
 
-# TODO: pin by digest in CI (e.g., rust:alpine@sha256:<digest>)
-FROM rust:alpine AS builder
+FROM rust:alpine@sha256:7f752ee8ea5deb9f4863d8c3f228a216a6466619882f09a44b9eda9617dc7770 AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig
 
@@ -30,8 +29,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # No shell, no package manager, near-zero CVE surface.
 # The Rust binary is statically linked (musl) and runs as PID 1.
 
-# TODO: pin by digest in CI (e.g., gcr.io/distroless/static@sha256:<digest>)
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
 
 COPY --from=builder /tmp/out/selene-server /selene-server
 COPY --from=builder /tmp/out/selene /selene
