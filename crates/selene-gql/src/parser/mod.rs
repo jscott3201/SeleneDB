@@ -45,8 +45,14 @@ pub(crate) fn parse_raw(input: &str) -> Result<pest::iterators::Pairs<'_, Rule>,
         };
         let mut message = e.to_string();
         // Detect reserved keyword usage and add a helpful hint.
+        // pest col is a 1-based character count; convert to byte offset
+        // to avoid panicking on multi-byte UTF-8 input.
         if col > 0 {
-            let rest = &input[col.saturating_sub(1)..];
+            let byte_pos = input
+                .char_indices()
+                .nth(col.saturating_sub(1))
+                .map_or(input.len(), |(i, _)| i);
+            let rest = &input[byte_pos..];
             let word: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
