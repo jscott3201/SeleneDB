@@ -38,7 +38,7 @@ impl Procedure for GraphPagerank {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -69,7 +69,7 @@ impl Procedure for GraphPagerank {
             .into_iter()
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(score)),
                 ]
             })
@@ -101,7 +101,7 @@ impl Procedure for GraphBetweenness {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -125,7 +125,7 @@ impl Procedure for GraphBetweenness {
                 GqlValue::Null => None,
                 _ => v.as_int().ok(),
             })
-            .map(|n| n as usize);
+            .map(|n| n.max(1) as usize);
 
         let cat = self.catalog.read();
         let proj_ref = cat
@@ -137,7 +137,7 @@ impl Procedure for GraphBetweenness {
             .into_iter()
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(score)),
                 ]
             })

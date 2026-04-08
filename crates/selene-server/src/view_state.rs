@@ -493,7 +493,16 @@ fn build_view_state(def: &ViewDefinition, graph: &SeleneGraph) -> ViewState {
     let mut columns: Vec<(String, AggregateState)> = def
         .aggregates
         .iter()
-        .map(|agg| (agg.alias.clone(), AggregateState::new_for(agg.kind)))
+        .map(|agg| {
+            // count(variable) with no source property behaves like count(*).
+            let effective_kind =
+                if agg.kind == ViewAggregateKind::Count && agg.source_property.is_none() {
+                    ViewAggregateKind::CountStar
+                } else {
+                    agg.kind
+                };
+            (agg.alias.clone(), AggregateState::new_for(effective_kind))
+        })
         .collect();
 
     let mut member_nodes = RoaringBitmap::new();
@@ -516,8 +525,11 @@ fn build_view_state(def: &ViewDefinition, graph: &SeleneGraph) -> ViewState {
 
         for (col_idx, agg_def) in def.aggregates.iter().enumerate() {
             let (_, agg) = &mut columns[col_idx];
-            if agg_def.kind == ViewAggregateKind::CountStar {
-                agg.accumulate(&Value::Null); // CountStar ignores value
+            if agg_def.kind == ViewAggregateKind::CountStar
+                || (agg_def.kind == ViewAggregateKind::Count && agg_def.source_property.is_none())
+            {
+                // count(*) or count(node_variable): every matched node counts.
+                agg.accumulate(&Value::Null);
             } else {
                 let value = agg_def
                     .source_property
@@ -571,7 +583,9 @@ fn accumulate_node(
 
     for (col_idx, agg_def) in def.aggregates.iter().enumerate() {
         let (_, agg) = &mut state.columns[col_idx];
-        if agg_def.kind == ViewAggregateKind::CountStar {
+        if agg_def.kind == ViewAggregateKind::CountStar
+            || (agg_def.kind == ViewAggregateKind::Count && agg_def.source_property.is_none())
+        {
             agg.accumulate(&Value::Null);
         } else {
             let value = agg_def
@@ -600,7 +614,9 @@ fn subtract_node(
     let mut needs_recompute = false;
     for (col_idx, agg_def) in def.aggregates.iter().enumerate() {
         let (_, agg) = &mut state.columns[col_idx];
-        if agg_def.kind == ViewAggregateKind::CountStar {
+        if agg_def.kind == ViewAggregateKind::CountStar
+            || (agg_def.kind == ViewAggregateKind::Count && agg_def.source_property.is_none())
+        {
             agg.subtract(&Value::Null);
         } else {
             let value = agg_def
@@ -942,7 +958,7 @@ mod tests {
     fn value_comparison_helpers() {
         // value_to_f64
         assert_eq!(value_to_f64(&Value::Int(42)), Some(42.0));
-        assert_eq!(value_to_f64(&Value::Float(3.14)), Some(3.14));
+        assert_eq!(value_to_f64(&Value::Float(3.15)), Some(3.15));
         assert_eq!(value_to_f64(&Value::UInt(100)), Some(100.0));
         assert_eq!(value_to_f64(&Value::Null), None);
         assert_eq!(value_to_f64(&Value::String("hello".into())), None);

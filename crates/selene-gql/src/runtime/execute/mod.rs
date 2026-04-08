@@ -11,6 +11,7 @@ use selene_graph::{SeleneGraph, SharedGraph};
 /// Query parameter map binding $param names to GqlValues.
 pub type ParameterMap = HashMap<IStr, GqlValue>;
 
+use crate::ast::expr::Expr;
 use crate::ast::statement::GqlStatement;
 use crate::parser::parse_statement;
 use crate::pattern::join;
@@ -35,17 +36,28 @@ fn execute_mut(
     shared: &SharedGraph,
     hot_tier: Option<&selene_ts::HotTier>,
     scope: Option<&RoaringBitmap>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<GqlResult, GqlError> {
     let stmt = parse_statement(gql)?;
     let snapshot = shared.load_snapshot();
     let registry = ProcedureRegistry::builtins();
     let func_registry = FunctionRegistry::builtins();
-    let ctx = EvalContext::new(&snapshot, func_registry);
+    let mut ctx = EvalContext::new(&snapshot, func_registry);
+    if let Some(params) = parameters {
+        ctx = ctx.with_parameters(params);
+    }
 
     match &stmt {
         GqlStatement::Query(pipeline) => {
             let plan = planner::plan_query(pipeline, &snapshot)?;
-            execute_plan(&plan, &snapshot, scope, hot_tier, Some(registry), None)
+            execute_plan(
+                &plan,
+                &snapshot,
+                scope,
+                hot_tier,
+                Some(registry),
+                parameters,
+            )
         }
         GqlStatement::Chained { blocks } => {
             let mut result = None;
@@ -57,7 +69,7 @@ fn execute_mut(
                     scope,
                     hot_tier,
                     Some(registry),
-                    None,
+                    parameters,
                 )?);
             }
             result.ok_or_else(|| GqlError::internal("empty chained query"))
@@ -66,7 +78,8 @@ fn execute_mut(
             let plan = planner::plan_mutation(mp, &snapshot)?;
 
             // Execute pattern + pre-mutation pipeline against snapshot
-            let mut bindings = execute_pattern_ops(&plan.pattern_ops, &snapshot, scope)?;
+            let mut bindings =
+                execute_pattern_ops_with_eval_ctx(&plan.pattern_ops, &snapshot, scope, &ctx)?;
             for op in &plan.pipeline {
                 match op {
                     PipelineOp::Return { .. } => break,
@@ -78,6 +91,7 @@ fn execute_mut(
                             hot_tier,
                             Some(registry),
                             scope,
+                            Some(&ctx),
                         )?;
                     }
                     _ => {
@@ -96,6 +110,7 @@ fn execute_mut(
                     &mut bindings,
                     &snapshot,
                     scope,
+                    parameters,
                 )?;
                 mutation_stats = stats;
                 mutation_changes = changes;
@@ -148,11 +163,18 @@ fn execute_mut(
                 scope,
                 hot_tier,
                 Some(registry),
-                None,
+                parameters,
             )?;
             for (op, pipeline) in rest {
                 let plan = planner::plan_query(pipeline, &snapshot)?;
-                let other = execute_plan(&plan, &snapshot, scope, hot_tier, Some(registry), None)?;
+                let other = execute_plan(
+                    &plan,
+                    &snapshot,
+                    scope,
+                    hot_tier,
+                    Some(registry),
+                    parameters,
+                )?;
                 result = apply_set_op(*op, result, other);
             }
             let rows = result.row_count();
@@ -248,6 +270,7 @@ fn execute_in_transaction(
     txn: &mut selene_graph::TransactionHandle<'_>,
     hot_tier: Option<&selene_ts::HotTier>,
     scope: Option<&RoaringBitmap>,
+    parameters: Option<&ParameterMap>,
 ) -> Result<GqlResult, GqlError> {
     let stmt = parse_statement(gql)?;
     let graph = txn.graph();
@@ -256,16 +279,20 @@ fn execute_in_transaction(
     match &stmt {
         GqlStatement::Query(pipeline) => {
             let plan = planner::plan_query(pipeline, graph)?;
-            execute_plan(&plan, graph, scope, hot_tier, Some(registry), None)
+            execute_plan(&plan, graph, scope, hot_tier, Some(registry), parameters)
         }
         GqlStatement::Mutate(mp) => {
             // Plan + pattern match + pre-filter (immutable borrow of txn.graph())
             let (plan, mut bindings) = {
                 let graph = txn.graph();
                 let func_reg = FunctionRegistry::builtins();
-                let ctx = EvalContext::new(graph, func_reg).with_scope(scope);
+                let mut ctx = EvalContext::new(graph, func_reg).with_scope(scope);
+                if let Some(params) = parameters {
+                    ctx = ctx.with_parameters(params);
+                }
                 let plan = planner::plan_mutation(mp, graph)?;
-                let mut bindings = execute_pattern_ops(&plan.pattern_ops, graph, scope)?;
+                let mut bindings =
+                    execute_pattern_ops_with_eval_ctx(&plan.pattern_ops, graph, scope, &ctx)?;
                 for op in &plan.pipeline {
                     match op {
                         PipelineOp::Return { .. } => break,
@@ -277,6 +304,7 @@ fn execute_in_transaction(
                                 hot_tier,
                                 Some(registry),
                                 scope,
+                                Some(&ctx),
                             )?;
                         }
                         _ => {
@@ -297,6 +325,7 @@ fn execute_in_transaction(
                     &mut bindings,
                     scope,
                     &mut mutation_stats,
+                    parameters,
                 )?;
             }
 
@@ -389,13 +418,14 @@ fn execute_statement_with_csr(
                 }
 
                 let scan_limit = detect_scan_limit(&plan.pattern_ops, &plan.pipeline);
-                let mut bindings = execute_pattern_ops_with_csr(
+                let mut bindings = execute_pattern_ops_with_csr_and_ctx(
                     &plan.pattern_ops,
                     graph,
                     scope,
                     scan_limit,
                     None,
                     csr,
+                    &ctx,
                 )?;
 
                 // If we have results from the previous block, merge them
@@ -411,12 +441,25 @@ fn execute_statement_with_csr(
                 for op in &plan.pipeline {
                     match op {
                         PipelineOp::Call { procedure: call } => {
-                            bindings =
-                                execute_call(bindings, call, graph, hot_tier, procedures, scope)?;
+                            bindings = execute_call(
+                                bindings,
+                                call,
+                                graph,
+                                hot_tier,
+                                procedures,
+                                scope,
+                                Some(&ctx),
+                            )?;
                         }
                         PipelineOp::Subquery { plan: sub_plan } => {
                             bindings = execute_subquery(
-                                bindings, sub_plan, graph, scope, hot_tier, procedures,
+                                bindings,
+                                sub_plan,
+                                graph,
+                                scope,
+                                hot_tier,
+                                procedures,
+                                Some(&ctx),
                             )?;
                         }
                         _ => {
@@ -509,11 +552,11 @@ fn execute_count_only(
     let count = scan::count_label_scan(
         labels.as_ref(),
         inline_props,
-        ctx,
         &scan::ScanContext {
             graph,
             scope,
             property_filters,
+            eval_ctx: ctx,
         },
     )?;
     Ok(Some(count))
@@ -629,20 +672,28 @@ fn execute_plan_inner(
             Some(Ok(fc)) => (None, Some(fc)),
             Some(Err(e)) => return Err(e),
             None => {
-                let c = execute_pattern_ops_as_chunk(
+                let c = execute_pattern_ops_as_chunk_with_ctx(
                     &plan.pattern_ops,
                     graph,
                     scope,
                     scan_limit,
                     None,
                     csr,
+                    &ctx,
                 )?;
                 (Some(c), None)
             }
         }
     } else {
-        let c =
-            execute_pattern_ops_as_chunk(&plan.pattern_ops, graph, scope, scan_limit, None, csr)?;
+        let c = execute_pattern_ops_as_chunk_with_ctx(
+            &plan.pattern_ops,
+            graph,
+            scope,
+            scan_limit,
+            None,
+            csr,
+            &ctx,
+        )?;
         (Some(c), None)
     };
 
@@ -723,23 +774,25 @@ fn execute_plan_inner(
         // Factorized-native path for simple streaming ops
         if factorized.is_some() {
             match op {
-                PipelineOp::Offset { count } => {
+                PipelineOp::Offset { value } => {
+                    let n = value.resolve(ctx.parameters)? as usize;
                     let fc = factorized.as_mut().unwrap();
                     let deep = fc.deepest_mut();
                     let phys_len = deep.len;
-                    deep.selection.skip(*count as usize, phys_len);
+                    deep.selection.skip(n, phys_len);
                     op_idx += 1;
                     continue;
                 }
-                PipelineOp::Limit { count } => {
+                PipelineOp::Limit { value } => {
+                    let n = value.resolve(ctx.parameters)? as usize;
                     let fc = factorized.as_mut().unwrap();
                     let deep = fc.deepest_mut();
                     let phys_len = deep.len;
-                    deep.selection.truncate(*count as usize, phys_len);
+                    deep.selection.truncate(n, phys_len);
                     op_idx += 1;
                     continue;
                 }
-                PipelineOp::Filter { predicate } => {
+                PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
                     // Flatten temporarily for eval_vec, apply result back.
                     // Use the main ctx (which has parameters and scope).
                     let fc = factorized.as_mut().unwrap();
@@ -813,10 +866,11 @@ fn execute_plan_inner(
                 && op_idx + 1 < post_mutation_pipeline.len()
                 && matches!(post_mutation_pipeline[op_idx + 1], PipelineOp::TopK { .. }) =>
             {
-                if let PipelineOp::TopK { terms, limit } = post_mutation_pipeline[op_idx + 1] {
+                if let PipelineOp::TopK { terms, limit } = &post_mutation_pipeline[op_idx + 1] {
+                    let k = limit.resolve(ctx.parameters)?;
                     let bindings = c.to_bindings();
                     let result =
-                        stages::execute_return_topk(bindings, projections, terms, *limit, &ctx)?;
+                        stages::execute_return_topk(bindings, projections, terms, k, &ctx)?;
                     chunk = Some(join::bindings_to_chunk_generic(&result));
                     op_idx += 2;
                     continue;
@@ -826,14 +880,46 @@ fn execute_plan_inner(
             // CALL needs procedure registry and graph context
             PipelineOp::Call { procedure: call } => {
                 let bindings = c.to_bindings();
-                let result = execute_call(bindings, call, graph, hot_tier, procedures, scope)?;
+                let result = execute_call(
+                    bindings,
+                    call,
+                    graph,
+                    hot_tier,
+                    procedures,
+                    scope,
+                    Some(&ctx),
+                )?;
                 chunk = Some(join::bindings_to_chunk_generic(&result));
             }
             // Subquery needs correlated execution with graph context
             PipelineOp::Subquery { plan: sub_plan } => {
                 let bindings = c.to_bindings();
-                let result =
-                    execute_subquery(bindings, sub_plan, graph, scope, hot_tier, procedures)?;
+                let result = execute_subquery(
+                    bindings,
+                    sub_plan,
+                    graph,
+                    scope,
+                    hot_tier,
+                    procedures,
+                    Some(&ctx),
+                )?;
+                chunk = Some(join::bindings_to_chunk_generic(&result));
+            }
+            // NestedMatch: correlated MATCH after WITH -- run pattern ops seeded
+            // by each input binding and merge results.
+            PipelineOp::NestedMatch {
+                pattern_ops: nested_ops,
+                where_filter,
+            } => {
+                let bindings = c.to_bindings();
+                let result = execute_nested_match(
+                    bindings,
+                    nested_ops,
+                    where_filter.as_ref(),
+                    graph,
+                    scope,
+                    Some(&ctx),
+                )?;
                 chunk = Some(join::bindings_to_chunk_generic(&result));
             }
             // ViewScan: read materialized view state via provider
@@ -876,12 +962,18 @@ fn execute_plan_inner(
 
     // Build result: direct Arrow materialization from DataChunk.
     let row_count = final_chunk.active_len();
-    let aliases: Vec<IStr> = plan
+    let mut aliases: Vec<IStr> = plan
         .output_schema
         .fields()
         .iter()
         .map(|f| IStr::new(f.name()))
         .collect();
+    // RETURN * / YIELD *: output_schema is empty at plan time because the
+    // projected columns are not known until runtime. Fall back to the
+    // chunk's own schema so that all columns are materialized.
+    if aliases.is_empty() && final_chunk.column_count() > 0 {
+        aliases = final_chunk.schema().iter().map(|(name, _)| *name).collect();
+    }
     let (schema, batches) = materialize_chunk_to_arrow(&final_chunk, &aliases)?;
 
     Ok(GqlResult {
@@ -895,12 +987,12 @@ fn execute_plan_inner(
 }
 
 /// Maximum memory budget for a single query's bindings (in bytes).
-const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024; // 64 MB
+pub(super) const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024; // 64 MB
 /// Default maximum number of bindings.
 const DEFAULT_MAX_BINDINGS: usize = 100_000;
 
 /// Read max bindings from `SELENE_MAX_BINDINGS` env var (cached via OnceLock).
-fn max_bindings() -> usize {
+pub(super) fn max_bindings() -> usize {
     static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("SELENE_MAX_BINDINGS")
@@ -987,10 +1079,13 @@ fn detect_scan_limit(pattern_ops: &[PatternOp], pipeline: &[PipelineOp]) -> Opti
     if has_blocking_op {
         return None;
     }
-    // Find LIMIT in pipeline
+    // Find LIMIT in pipeline (only literal values usable at plan time)
     for op in pipeline {
-        if let PipelineOp::Limit { count } = op {
-            return Some(*count as usize);
+        if let PipelineOp::Limit {
+            value: crate::ast::statement::LimitValue::Literal(n),
+        } = op
+        {
+            return Some(*n as usize);
         }
     }
     None
@@ -1007,12 +1102,13 @@ mod pattern;
 use arrow_io::{
     apply_set_op, infer_schema_from_bindings, materialize_chunk_to_arrow, materialize_to_arrow,
 };
-use call::{execute_call, execute_subquery};
+use call::{execute_call, execute_nested_match, execute_subquery};
 use mutation::{count_mutation, execute_mutations_write};
 use mutation_txn::execute_single_mutation_in_txn;
-use pattern::{execute_pattern_ops, execute_pattern_ops_as_chunk, execute_pattern_ops_with_csr};
+use pattern::{execute_pattern_ops_as_chunk_with_ctx, execute_pattern_ops_with_csr_and_ctx};
 pub(crate) use pattern::{
-    execute_pattern_ops_correlated, execute_pattern_ops_public, execute_pattern_ops_with_max,
+    execute_pattern_ops_correlated_with_ctx, execute_pattern_ops_with_eval_ctx,
+    execute_pattern_ops_with_max_and_ctx,
 };
 
 /// Fused streaming on DataChunk: applies consecutive LET/FILTER/OFFSET/LIMIT
@@ -1212,6 +1308,7 @@ pub struct MutationBuilder<'a> {
     query: &'a str,
     scope: Option<&'a RoaringBitmap>,
     hot_tier: Option<&'a selene_ts::HotTier>,
+    parameters: Option<&'a ParameterMap>,
 }
 
 impl<'a> MutationBuilder<'a> {
@@ -1221,6 +1318,7 @@ impl<'a> MutationBuilder<'a> {
             query,
             scope: None,
             hot_tier: None,
+            parameters: None,
         }
     }
 
@@ -1236,9 +1334,21 @@ impl<'a> MutationBuilder<'a> {
         self
     }
 
+    /// Provide query parameters ($param bindings).
+    pub fn with_parameters(mut self, parameters: &'a ParameterMap) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
     /// Execute as an auto-commit mutation against a shared graph.
     pub fn execute(self, shared: &SharedGraph) -> Result<GqlResult, GqlError> {
-        execute_mut(self.query, shared, self.hot_tier, self.scope)
+        execute_mut(
+            self.query,
+            shared,
+            self.hot_tier,
+            self.scope,
+            self.parameters,
+        )
     }
 
     /// Execute within an existing transaction.
@@ -1249,8 +1359,27 @@ impl<'a> MutationBuilder<'a> {
         self,
         txn: &mut selene_graph::TransactionHandle<'_>,
     ) -> Result<GqlResult, GqlError> {
-        execute_in_transaction(self.query, txn, self.hot_tier, self.scope)
+        execute_in_transaction(self.query, txn, self.hot_tier, self.scope, self.parameters)
     }
+}
+
+/// Check whether an expression contains a subquery (EXISTS, COUNT, VALUE, COLLECT).
+/// Subquery predicates cannot be evaluated by the vectorized path and must
+/// fall through to the flat per-row evaluator.
+fn contains_subquery_expr(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.walk(&mut |e| {
+        if !found {
+            match e {
+                Expr::Exists { .. }
+                | Expr::CountSubquery(_)
+                | Expr::ValueSubquery(_)
+                | Expr::CollectSubquery(_) => found = true,
+                _ => {}
+            }
+        }
+    });
+    found
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ services:
       # - SELENE_TEMPORAL_ENABLED=true # enable property versioning
       # - SELENE_MCP_ENABLED=false     # MCP disabled in production by default
       # - SELENE_MEMORY_BUDGET_MB=4096 # memory budget (edge default: 4096)
+    command: ["--dev", "--seed", "--data-dir", "/data"]
     restart: unless-stopped
     # Security hardening
     read_only: true
@@ -24,7 +25,7 @@ services:
       - no-new-privileges:true
     # Health check via HTTP (no TLS required).
     healthcheck:
-      test: ["/selene", "health", "--http"]
+      test: ["CMD", "/selene", "health", "--http"]
       interval: 30s
       timeout: 5s
       start_period: 10s

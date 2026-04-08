@@ -245,7 +245,7 @@ fn eval_expr_inner(
 
         Expr::PropertyExists(expr, key) => eval_property_exists(expr, *key, binding, ctx),
 
-        Expr::Exists { pattern, negated } => eval_exists(pattern, *negated, ctx),
+        Expr::Exists { pattern, negated } => eval_exists(pattern, *negated, binding, ctx),
 
         Expr::IsLabeled {
             expr,
@@ -370,17 +370,6 @@ pub(crate) fn trilean_to_value(t: Trilean) -> GqlValue {
 
 // ── Variable resolution ────────────────────────────────────────────
 
-/// Resolve a variable to a GqlValue. Used by GROUP BY key extraction.
-/// Resolves Node/Edge properties to their values, scalars directly.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn resolve_var_as_value(
-    name: &IStr,
-    binding: &Binding,
-    _ctx: &EvalContext<'_>,
-) -> Result<GqlValue, GqlError> {
-    resolve_var(*name, binding)
-}
-
 /// Resolve a variable name from a binding.
 fn resolve_var(name: IStr, binding: &Binding) -> Result<GqlValue, GqlError> {
     match binding.get(&name) {
@@ -395,7 +384,21 @@ fn resolve_var(name: IStr, binding: &Binding) -> Result<GqlValue, GqlError> {
                 elements,
             }))
         }
-        None => Err(GqlError::internal(format!("unbound variable '{name}'"))),
+        None => {
+            let hint = if name
+                .as_str()
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_')
+                && !name.as_str().is_empty()
+            {
+                format!(
+                    "unbound variable '{name}'. If you meant a string literal, use single quotes: '{name}'"
+                )
+            } else {
+                format!("unbound variable '{name}'")
+            };
+            Err(GqlError::internal(hint))
+        }
     }
 }
 
@@ -412,7 +415,7 @@ pub(crate) fn resolve_property(
         GqlValue::Node(node_id) => {
             // Special properties
             if key.as_str() == "id" {
-                return Ok(GqlValue::UInt(node_id.0));
+                return Ok(GqlValue::Int(node_id.0 as i64));
             }
             // Look up from graph
             match graph.get_node(*node_id) {
@@ -433,7 +436,7 @@ pub(crate) fn resolve_property(
         GqlValue::Edge(edge_id) => {
             // Special properties
             if key.as_str() == "id" {
-                return Ok(GqlValue::UInt(edge_id.0));
+                return Ok(GqlValue::Int(edge_id.0 as i64));
             }
             match graph.get_edge(*edge_id) {
                 Some(edge) => match edge.properties.get(key) {
@@ -629,8 +632,9 @@ fn eval_function(
         .map(|a| eval_expr_ctx(a, binding, ctx))
         .collect::<Result<_, _>>()?;
 
-    // Try the function registry
-    if let Some(func) = ctx.functions.get(&call.name) {
+    // Try the function registry (case-insensitive lookup)
+    let lookup_name = IStr::new(&call.name.as_str().to_lowercase());
+    if let Some(func) = ctx.functions.get(&lookup_name) {
         return func.invoke(&args, ctx);
     }
 
@@ -657,14 +661,14 @@ fn eval_function(
                 _ => Err(GqlError::type_error("char_length requires a string")),
             }
         }
-        "upper" => match args.first() {
+        "upper" | "toupper" => match args.first() {
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::String(s)) => {
                 Ok(GqlValue::String(SmolStr::new(s.to_uppercase().as_str())))
             }
             _ => Err(GqlError::type_error("upper requires a string")),
         },
-        "lower" => match args.first() {
+        "lower" | "tolower" => match args.first() {
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::String(s)) => {
                 Ok(GqlValue::String(SmolStr::new(s.to_lowercase().as_str())))
@@ -680,7 +684,10 @@ fn eval_function(
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             Some(GqlValue::List(l)) => Ok(GqlValue::Int(l.len() as i64)),
             Some(GqlValue::Path(p)) => Ok(GqlValue::Int(p.edge_count() as i64)),
-            _ => Err(GqlError::type_error("size requires a list or path")),
+            Some(GqlValue::String(s)) => Ok(GqlValue::Int(s.chars().count() as i64)),
+            _ => Err(GqlError::type_error(
+                "size requires a list, path, or string (use length() for strings)",
+            )),
         },
         "duration" => {
             // Parse duration string to GqlDuration (was incorrectly returning ZonedDateTime)
@@ -850,7 +857,7 @@ mod tests {
         let g = test_graph();
         let b = binding_with_node("s", 1);
         let expr = Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("id"));
-        assert_eq!(eval_expr(&expr, &b, &g).unwrap(), GqlValue::UInt(1));
+        assert_eq!(eval_expr(&expr, &b, &g).unwrap(), GqlValue::Int(1));
     }
 
     #[test]

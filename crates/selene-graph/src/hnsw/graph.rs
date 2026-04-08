@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -63,6 +64,11 @@ impl HnswGraph {
         }
     }
 
+    /// Vector dimensionality for this graph.
+    pub fn dimensions(&self) -> u16 {
+        self.dimensions
+    }
+
     /// Number of nodes in the graph.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -103,6 +109,158 @@ impl HnswGraph {
         node.neighbors
             .get(layer as usize)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// Deep clone this graph excluding nodes whose `NodeId` appears in `tombstones`.
+    ///
+    /// Internal HNSW indices (`u32`) are remapped so the resulting graph has a
+    /// dense, contiguous node array. Neighbor lists are updated to reference
+    /// the new indices, and any neighbor references to tombstoned nodes are
+    /// dropped. The entry point is reassigned to the highest-layer surviving
+    /// node if the original entry was tombstoned.
+    pub fn clone_without(&self, tombstones: &RoaringBitmap) -> HnswGraph {
+        if tombstones.is_empty() {
+            return self.clone();
+        }
+
+        // Build a mapping from old internal index -> new internal index.
+        // Nodes whose NodeId is in the tombstone set are skipped.
+        let mut old_to_new: HashMap<u32, u32> = HashMap::new();
+        let mut new_nodes: Vec<HnswNode> = Vec::new();
+        let mut new_node_id_to_idx: HashMap<u64, u32> = HashMap::new();
+
+        for (old_idx, node) in self.nodes.iter().enumerate() {
+            if tombstones.contains(node.node_id.0 as u32) {
+                continue;
+            }
+            let new_idx = new_nodes.len() as u32;
+            old_to_new.insert(old_idx as u32, new_idx);
+            new_node_id_to_idx.insert(node.node_id.0, new_idx);
+            // Clone the node with empty neighbors (we remap below).
+            new_nodes.push(HnswNode {
+                node_id: node.node_id,
+                vector: Arc::clone(&node.vector),
+                neighbors: SmallVec::new(),
+                max_layer: node.max_layer,
+            });
+        }
+
+        // Remap neighbor lists: translate old indices to new indices, dropping
+        // any references to tombstoned nodes (which have no mapping).
+        for (old_idx, node) in self.nodes.iter().enumerate() {
+            let Some(&new_idx) = old_to_new.get(&(old_idx as u32)) else {
+                continue; // tombstoned node, skip
+            };
+            let mut remapped_neighbors: SmallVec<[Vec<u32>; 4]> = SmallVec::new();
+            for layer_neighbors in &node.neighbors {
+                let remapped: Vec<u32> = layer_neighbors
+                    .iter()
+                    .filter_map(|&old_neighbor| old_to_new.get(&old_neighbor).copied())
+                    .collect();
+                remapped_neighbors.push(remapped);
+            }
+            new_nodes[new_idx as usize].neighbors = remapped_neighbors;
+        }
+
+        // Determine the new entry point. If the old entry was tombstoned,
+        // pick the surviving node with the highest max_layer.
+        let new_entry = self
+            .entry_point
+            .and_then(|old_ep| old_to_new.get(&old_ep).copied())
+            .or_else(|| {
+                new_nodes
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, n)| n.max_layer)
+                    .map(|(idx, _)| idx as u32)
+            });
+
+        let new_max_layer = new_nodes.iter().map(|n| n.max_layer).max().unwrap_or(0);
+
+        HnswGraph {
+            nodes: new_nodes,
+            entry_point: new_entry,
+            max_layer: new_max_layer,
+            node_id_to_idx: new_node_id_to_idx,
+            dimensions: self.dimensions,
+        }
+    }
+
+    /// Reconnect neighbors of a deleted node to maintain graph connectivity.
+    ///
+    /// For each layer, removes the deleted node from its neighbors' adjacency
+    /// lists and fills empty slots with connections to the deleted node's other
+    /// neighbors, ranked by cosine similarity. This suppresses the "unreachable
+    /// points" phenomenon that degrades recall at high tombstone ratios.
+    pub(crate) fn reconnect_neighbors(
+        &mut self,
+        deleted_idx: u32,
+        params: &super::params::HnswParams,
+    ) {
+        use super::distance::cosine_similarity;
+        use std::collections::HashSet;
+
+        // Snapshot the deleted node's data before mutating the graph.
+        let deleted_neighbors = self.nodes[deleted_idx as usize].neighbors.clone();
+
+        for (layer, layer_neighbors) in deleted_neighbors.iter().enumerate() {
+            if layer_neighbors.is_empty() {
+                continue;
+            }
+            let max_m = params.max_neighbors(layer as u8);
+
+            for &neighbor_idx in layer_neighbors {
+                // Remove the deleted node from this neighbor's list.
+                self.nodes[neighbor_idx as usize].neighbors[layer]
+                    .retain(|&idx| idx != deleted_idx);
+
+                let current_len = self.nodes[neighbor_idx as usize].neighbors[layer].len();
+                if current_len >= max_m {
+                    continue; // already at capacity
+                }
+                let slots = max_m - current_len;
+
+                // Existing connections (avoid duplicates).
+                let existing: HashSet<u32> = self.nodes[neighbor_idx as usize].neighbors[layer]
+                    .iter()
+                    .copied()
+                    .collect();
+
+                // Score candidate replacements from the deleted node's other
+                // neighbors on this layer, excluding self and already-connected.
+                let neighbor_vec = Arc::clone(&self.nodes[neighbor_idx as usize].vector);
+                let mut candidates: Vec<(u32, f32)> = layer_neighbors
+                    .iter()
+                    .filter(|&&c| c != neighbor_idx && c != deleted_idx && !existing.contains(&c))
+                    .map(|&c| {
+                        let sim = cosine_similarity(&neighbor_vec, &self.nodes[c as usize].vector);
+                        (c, sim)
+                    })
+                    .collect();
+
+                // Sort by descending similarity (best first).
+                candidates.sort_unstable_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Add the top candidates up to available slots.
+                for &(c, _) in candidates.iter().take(slots) {
+                    self.nodes[neighbor_idx as usize].neighbors[layer].push(c);
+                }
+            }
+        }
+
+        // If the entry point was deleted, pick the surviving node with the
+        // highest max_layer.
+        if self.entry_point == Some(deleted_idx) {
+            self.entry_point = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i as u32 != deleted_idx)
+                .max_by_key(|(_, n)| n.max_layer)
+                .map(|(i, _)| i as u32);
+        }
     }
 
     /// Serialize this graph to postcard bytes.
@@ -191,6 +349,145 @@ mod tests {
         assert_eq!(g.neighbors(1, 0), &[0u32]);
         assert_eq!(g.neighbors(1, 1), &[] as &[u32]);
     }
+
+    // ------------------------------------------------------------------
+    // clone_without tests
+    // ------------------------------------------------------------------
+
+    /// Build a three-node graph for clone_without tests.
+    ///
+    /// Nodes:
+    ///   idx 0 -> NodeId(1), vector [1,0,0], max_layer 1
+    ///   idx 1 -> NodeId(2), vector [0,1,0], max_layer 0
+    ///   idx 2 -> NodeId(3), vector [0,0,1], max_layer 0
+    ///
+    /// Layer 0: fully connected (0-1, 0-2, 1-2).
+    /// Layer 1: only node 0 (entry point).
+    fn three_node_graph() -> HnswGraph {
+        let mut g = HnswGraph::empty(3);
+
+        let mut n0 = make_node(1, vec![1.0, 0.0, 0.0], 1);
+        n0.neighbors.push(vec![1, 2]); // layer 0
+        n0.neighbors.push(vec![]); // layer 1
+
+        let mut n1 = make_node(2, vec![0.0, 1.0, 0.0], 0);
+        n1.neighbors.push(vec![0, 2]); // layer 0
+
+        let mut n2 = make_node(3, vec![0.0, 0.0, 1.0], 0);
+        n2.neighbors.push(vec![0, 1]); // layer 0
+
+        g.nodes.push(n0);
+        g.nodes.push(n1);
+        g.nodes.push(n2);
+        g.node_id_to_idx.insert(1, 0);
+        g.node_id_to_idx.insert(2, 1);
+        g.node_id_to_idx.insert(3, 2);
+        g.entry_point = Some(0);
+        g.max_layer = 1;
+        g
+    }
+
+    #[test]
+    fn clone_without_empty_tombstones() {
+        let g = three_node_graph();
+        let tombstones = RoaringBitmap::new();
+        let cloned = g.clone_without(&tombstones);
+
+        assert_eq!(cloned.len(), 3);
+        assert_eq!(cloned.entry_point, Some(0));
+        assert_eq!(cloned.max_layer, 1);
+        assert!(cloned.get_by_node_id(NodeId(1)).is_some());
+        assert!(cloned.get_by_node_id(NodeId(2)).is_some());
+        assert!(cloned.get_by_node_id(NodeId(3)).is_some());
+    }
+
+    #[test]
+    fn clone_without_removes_node() {
+        let g = three_node_graph();
+        let mut tombstones = RoaringBitmap::new();
+        tombstones.insert(2); // Remove NodeId(2)
+
+        let cloned = g.clone_without(&tombstones);
+
+        assert_eq!(cloned.len(), 2);
+        assert!(cloned.get_by_node_id(NodeId(1)).is_some());
+        assert!(
+            cloned.get_by_node_id(NodeId(2)).is_none(),
+            "tombstoned node must be absent"
+        );
+        assert!(cloned.get_by_node_id(NodeId(3)).is_some());
+
+        // Verify neighbor lists do not reference the removed node.
+        for i in 0..cloned.len() as u32 {
+            for layer in 0..=cloned.max_layer {
+                for &neighbor in cloned.neighbors(i, layer) {
+                    let neighbor_node = cloned.get(neighbor);
+                    assert_ne!(
+                        neighbor_node.node_id,
+                        NodeId(2),
+                        "removed node must not appear in neighbor lists"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clone_without_remaps_indices() {
+        let g = three_node_graph();
+        let mut tombstones = RoaringBitmap::new();
+        tombstones.insert(1); // Remove NodeId(1) (old idx 0, the entry point)
+
+        let cloned = g.clone_without(&tombstones);
+
+        assert_eq!(cloned.len(), 2);
+        // NodeId(2) should now be at idx 0, NodeId(3) at idx 1.
+        let (idx2, _) = cloned.get_by_node_id(NodeId(2)).unwrap();
+        let (idx3, _) = cloned.get_by_node_id(NodeId(3)).unwrap();
+        assert_eq!(idx2, 0);
+        assert_eq!(idx3, 1);
+
+        // Neighbor lists should reference the new indices.
+        let neighbors_of_2 = cloned.neighbors(idx2, 0);
+        assert!(
+            neighbors_of_2.contains(&idx3),
+            "NodeId(2) should have NodeId(3) as neighbor"
+        );
+    }
+
+    #[test]
+    fn clone_without_entry_point_tombstoned() {
+        let g = three_node_graph();
+        let mut tombstones = RoaringBitmap::new();
+        tombstones.insert(1); // Remove NodeId(1) which is the entry point
+
+        let cloned = g.clone_without(&tombstones);
+
+        // Entry point must exist and reference a valid node.
+        assert!(cloned.entry_point.is_some());
+        let ep = cloned.entry_point.unwrap();
+        assert!(
+            (ep as usize) < cloned.len(),
+            "entry point must be in bounds"
+        );
+    }
+
+    #[test]
+    fn clone_without_all_nodes() {
+        let g = three_node_graph();
+        let mut tombstones = RoaringBitmap::new();
+        tombstones.insert(1);
+        tombstones.insert(2);
+        tombstones.insert(3);
+
+        let cloned = g.clone_without(&tombstones);
+        assert!(cloned.is_empty());
+        assert!(cloned.entry_point.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // serialization tests
+    // ------------------------------------------------------------------
 
     #[test]
     fn serialize_deserialize_round_trip() {

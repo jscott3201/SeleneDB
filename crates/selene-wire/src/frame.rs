@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn encode_payload_len_is_little_endian() {
-        let payload = vec![0u8; 0x0102_03];
+        let payload = vec![0u8; 0x01_02_03];
         let frame = Frame::new(
             MsgType::TsPayload,
             WireFlags::empty(),

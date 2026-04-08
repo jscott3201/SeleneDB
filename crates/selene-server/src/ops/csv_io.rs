@@ -799,7 +799,7 @@ mod tests {
     #[test]
     fn parse_csv_value_types() {
         assert!(matches!(parse_csv_value("42"), Value::Int(42)));
-        assert!(matches!(parse_csv_value("3.14"), Value::Float(f) if (f - 3.14).abs() < 0.001));
+        assert!(matches!(parse_csv_value("3.15"), Value::Float(f) if (f - 3.15).abs() < 0.001));
         assert!(matches!(parse_csv_value("true"), Value::Bool(true)));
         assert!(matches!(parse_csv_value("false"), Value::Bool(false)));
         assert!(matches!(parse_csv_value("hello"), Value::String(_)));

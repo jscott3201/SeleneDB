@@ -303,7 +303,7 @@ fn symmetry_breaking_skips_different_labels() {
 
 /// Helper: build an ExecutionPlan with a single LabelScan and
 /// a TopK in the pipeline (simulates post-TopKRule state).
-fn make_index_order_plan(sort_key: &str, descending: bool, limit: u64) -> ExecutionPlan {
+fn make_index_order_plan(sort_key: &str, descending: bool, limit_n: u64) -> ExecutionPlan {
     let scan_var = IStr::new("S");
     let key = IStr::new(sort_key);
     ExecutionPlan {
@@ -323,7 +323,7 @@ fn make_index_order_plan(sort_key: &str, descending: bool, limit: u64) -> Execut
                 descending,
                 nulls_first: None,
             }],
-            limit,
+            limit: crate::ast::statement::LimitValue::Literal(limit_n),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -400,7 +400,7 @@ fn index_order_skips_multiple_scans() {
                 descending: true,
                 nulls_first: None,
             }],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -468,7 +468,7 @@ fn index_order_skips_multi_term_topk() {
                     nulls_first: None,
                 },
             ],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -506,7 +506,7 @@ fn index_order_skips_inline_props() {
                 descending: true,
                 nulls_first: None,
             }],
-            limit: 10,
+            limit: crate::ast::statement::LimitValue::Literal(10),
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
@@ -659,7 +659,9 @@ fn predicate_reorder_non_contiguous_filters_untouched() {
                     negated: false,
                 },
             },
-            PipelineOp::Limit { count: 5 },
+            PipelineOp::Limit {
+                value: crate::ast::statement::LimitValue::Literal(5),
+            },
             PipelineOp::Filter {
                 predicate: Expr::Compare(
                     Box::new(Expr::Property(
@@ -1018,8 +1020,60 @@ fn range_index_idempotent() {
 
 // ── InListOptimizationRule tests ──────────────────────────────
 
+fn setup_indexed_graph() -> SeleneGraph {
+    use selene_core::schema::{NodeSchema, PropertyDef, ValidationMode, ValueType};
+
+    let mut g = SeleneGraph::with_config(
+        selene_graph::SchemaValidator::new(ValidationMode::Warn),
+        100,
+    );
+    let schema = NodeSchema {
+        label: std::sync::Arc::from("sensor"),
+        parent: None,
+        properties: vec![PropertyDef {
+            name: std::sync::Arc::from("unit"),
+            value_type: ValueType::String,
+            required: false,
+            default: None,
+            description: String::new(),
+            indexed: true,
+            unique: false,
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            allowed_values: vec![],
+            pattern: None,
+            immutable: false,
+            searchable: false,
+            dictionary: false,
+            fill: None,
+            expected_interval_nanos: None,
+            encoding: selene_core::ValueEncoding::Gorilla,
+        }],
+        valid_edge_labels: vec![],
+        description: String::new(),
+        annotations: std::collections::HashMap::new(),
+        version: Default::default(),
+        validation_mode: None,
+        key_properties: vec![],
+    };
+    g.schema_mut().register_node_schema(schema).unwrap();
+
+    let mut m = g.mutate();
+    m.create_node(
+        LabelSet::from_strs(&["sensor"]),
+        PropertyMap::from_pairs(vec![(selene_core::IStr::new("unit"), Value::str("F"))]),
+    )
+    .unwrap();
+    m.commit(0).unwrap();
+    g.build_property_indexes();
+    g
+}
+
 #[test]
 fn in_list_fires_on_literal_list() {
+    let g = setup_indexed_graph();
     let scan_var = IStr::new("S");
     let plan = ExecutionPlan {
         pattern_ops: vec![PatternOp::LabelScan {
@@ -1050,8 +1104,8 @@ fn in_list_fires_on_literal_list() {
         count_only: false,
     };
     let rule = InListOptimizationRule;
-    let result = rule.rewrite(plan, &OptimizeContext::empty()).unwrap();
-    assert!(result.changed, "should fire on literal IN-list");
+    let result = rule.rewrite(plan, &OptimizeContext::new(&g)).unwrap();
+    assert!(result.changed, "should fire on literal IN-list with index");
     // Filter should be removed from pipeline
     assert!(
         !result
@@ -1067,6 +1121,61 @@ fn in_list_fires_on_literal_list() {
             let hint = in_list_hint.as_ref().unwrap();
             assert_eq!(hint.key.as_str(), "unit");
             assert_eq!(hint.values.len(), 2);
+        }
+        _ => panic!("expected LabelScan"),
+    }
+}
+
+#[test]
+fn in_list_keeps_filter_without_index() {
+    // No property index on "unit"; the filter must stay in the pipeline.
+    let g = setup_graph();
+    let scan_var = IStr::new("S");
+    let plan = ExecutionPlan {
+        pattern_ops: vec![PatternOp::LabelScan {
+            var: scan_var,
+            labels: Some(LabelExpr::Name(IStr::new("sensor"))),
+            inline_props: vec![],
+            property_filters: vec![],
+            index_order: None,
+            composite_index_keys: None,
+            range_index_hint: None,
+            in_list_hint: None,
+        }],
+        pipeline: vec![PipelineOp::Filter {
+            predicate: Expr::InList {
+                expr: Box::new(Expr::Property(
+                    Box::new(Expr::Var(scan_var)),
+                    IStr::new("unit"),
+                )),
+                list: vec![
+                    Expr::Literal(GqlValue::String(SmolStr::new("F"))),
+                    Expr::Literal(GqlValue::String(SmolStr::new("C"))),
+                ],
+                negated: false,
+            },
+        }],
+        mutations: vec![],
+        output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        count_only: false,
+    };
+    let rule = InListOptimizationRule;
+    let result = rule.rewrite(plan, &OptimizeContext::new(&g)).unwrap();
+    assert!(
+        !result.changed,
+        "IN-list on non-indexed property should not fire"
+    );
+    assert!(
+        result
+            .data
+            .pipeline
+            .iter()
+            .any(|op| matches!(op, PipelineOp::Filter { .. })),
+        "filter must remain for runtime eval_in_list fallback"
+    );
+    match &result.data.pattern_ops[0] {
+        PatternOp::LabelScan { in_list_hint, .. } => {
+            assert!(in_list_hint.is_none(), "no hint without an index");
         }
         _ => panic!("expected LabelScan"),
     }
@@ -1665,23 +1774,43 @@ fn full_optimizer_range_and_pushdown_combined() {
 
 #[test]
 fn full_optimizer_in_list_via_query() {
-    let g = setup_graph();
-    let plan = plan_for(
-        "MATCH (s:sensor) FILTER s.unit IN ['°F', '°C'] RETURN s",
-        &g,
-    );
+    let g = setup_indexed_graph();
+    let plan = plan_for("MATCH (s:sensor) FILTER s.unit IN ['F', 'C'] RETURN s", &g);
     let opt = GqlOptimizer::with_default_rules();
-    let plan = opt.optimize(plan, &OptimizeContext::empty()).unwrap();
+    let plan = opt.optimize(plan, &OptimizeContext::new(&g)).unwrap();
     match &plan.pattern_ops[0] {
         PatternOp::LabelScan { in_list_hint, .. } => {
             assert!(
                 in_list_hint.is_some(),
-                "IN-list should produce in_list_hint"
+                "IN-list should produce in_list_hint when index exists"
             );
             assert_eq!(in_list_hint.as_ref().unwrap().values.len(), 2);
         }
         _ => panic!("expected LabelScan"),
     }
+}
+
+#[test]
+fn full_optimizer_in_list_skips_without_index() {
+    let g = setup_graph();
+    let plan = plan_for("MATCH (s:sensor) FILTER s.unit IN ['F', 'C'] RETURN s", &g);
+    let opt = GqlOptimizer::with_default_rules();
+    let plan = opt.optimize(plan, &OptimizeContext::new(&g)).unwrap();
+    match &plan.pattern_ops[0] {
+        PatternOp::LabelScan { in_list_hint, .. } => {
+            assert!(
+                in_list_hint.is_none(),
+                "IN-list must not produce hint without a property index"
+            );
+        }
+        _ => panic!("expected LabelScan"),
+    }
+    assert!(
+        plan.pipeline
+            .iter()
+            .any(|op| matches!(op, PipelineOp::Filter { .. })),
+        "filter must stay in pipeline for runtime eval_in_list"
+    );
 }
 
 // ── Helper function tests ─────────────────────────────────────

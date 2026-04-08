@@ -188,6 +188,15 @@ pub(crate) fn eval_arithmetic(
         _ => {} // fall through to numeric arithmetic
     }
 
+    // String concatenation: string + anything or anything + string
+    let left_is_str = matches!(left, GqlValue::String(_));
+    let right_is_str = matches!(right, GqlValue::String(_));
+    if (left_is_str || right_is_str) && op == ArithOp::Add {
+        let l = super::eval::value_to_string(left);
+        let r = super::eval::value_to_string(right);
+        return Ok(GqlValue::String(smol_str::SmolStr::new(l + &r)));
+    }
+
     // Float promotion (rule 1)
     if matches!(left, GqlValue::Float(_)) || matches!(right, GqlValue::Float(_)) {
         let l = left.as_float()?;

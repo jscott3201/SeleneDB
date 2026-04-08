@@ -33,11 +33,11 @@ impl Procedure for GraphWcc {
             }],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "componentId",
+                    name: "component_id",
                     typ: GqlType::Int,
                 },
             ],
@@ -60,8 +60,8 @@ impl Procedure for GraphWcc {
             .into_iter()
             .map(|(nid, cid)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
-                    (IStr::new("componentId"), GqlValue::Int(cid as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("component_id"), GqlValue::Int(cid as i64)),
                 ]
             })
             .collect())
@@ -86,11 +86,11 @@ impl Procedure for GraphScc {
             }],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "componentId",
+                    name: "component_id",
                     typ: GqlType::Int,
                 },
             ],
@@ -113,8 +113,8 @@ impl Procedure for GraphScc {
             .into_iter()
             .map(|(nid, cid)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
-                    (IStr::new("componentId"), GqlValue::Int(cid as i64)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
+                    (IStr::new("component_id"), GqlValue::Int(cid as i64)),
                 ]
             })
             .collect())
@@ -139,7 +139,7 @@ impl Procedure for GraphTopoSort {
             }],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -167,7 +167,7 @@ impl Procedure for GraphTopoSort {
                 .into_iter()
                 .map(|(nid, pos)| {
                     smallvec![
-                        (IStr::new("nodeId"), GqlValue::Int(nid.0 as i64)),
+                        (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                         (IStr::new("position"), GqlValue::Int(pos as i64)),
                     ]
                 })
@@ -194,7 +194,7 @@ impl Procedure for GraphArticulationPoints {
                 typ: GqlType::String,
             }],
             yields: vec![YieldColumn {
-                name: "nodeId",
+                name: "node_id",
                 typ: GqlType::Int,
             }],
         }
@@ -214,7 +214,7 @@ impl Procedure for GraphArticulationPoints {
         let result = articulation_points(proj_ref.projection());
         Ok(result
             .into_iter()
-            .map(|nid| smallvec![(IStr::new("nodeId"), GqlValue::Int(nid.0 as i64))])
+            .map(|nid| smallvec![(IStr::new("node_id"), GqlValue::Int(nid.0 as i64))])
             .collect())
     }
 }
@@ -298,7 +298,7 @@ impl Procedure for GraphValidate {
                     typ: GqlType::String,
                 },
                 YieldColumn {
-                    name: "nodeId",
+                    name: "node_id",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
@@ -334,7 +334,7 @@ impl Procedure for GraphValidate {
                         GqlValue::String(SmolStr::new(&issue.issue_type))
                     ),
                     (
-                        IStr::new("nodeId"),
+                        IStr::new("node_id"),
                         issue
                             .node_id
                             .map_or(GqlValue::Null, |n| GqlValue::Int(n.0 as i64))

@@ -17,6 +17,54 @@ use crate::types::chunk::DataChunk;
 use crate::types::error::GqlError;
 use crate::types::value::GqlValue;
 
+/// Compare two column values directly without GqlValue intermediation.
+///
+/// For typed columns (Int64, UInt64, Float64, Utf8, Bool, NodeIds, EdgeIds),
+/// compares native values. Falls back to GqlValue for Values/Null columns.
+fn compare_column_direct(
+    col: &crate::types::chunk::Column,
+    a_idx: usize,
+    b_idx: usize,
+    term: &OrderTerm,
+) -> std::cmp::Ordering {
+    use crate::types::chunk::Column;
+
+    let a_null = col.is_null(a_idx);
+    let b_null = col.is_null(b_idx);
+
+    if a_null || b_null {
+        if a_null && b_null {
+            return std::cmp::Ordering::Equal;
+        }
+        let nulls_first = term.nulls_first.unwrap_or(term.descending);
+        let ord = if a_null {
+            if nulls_first {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        } else if nulls_first {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Less
+        };
+        return ord;
+    }
+
+    let ord = match col {
+        Column::Int64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::UInt64(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Float64(arr) => arr.value(a_idx).total_cmp(&arr.value(b_idx)),
+        Column::Bool(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Utf8(arr) => arr.value(a_idx).cmp(arr.value(b_idx)),
+        Column::NodeIds(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::EdgeIds(arr) => arr.value(a_idx).cmp(&arr.value(b_idx)),
+        Column::Values(v) => v[a_idx].sort_order(&v[b_idx]),
+        Column::Null(_) => std::cmp::Ordering::Equal,
+    };
+    if term.descending { ord.reverse() } else { ord }
+}
+
 /// Compare two values with NULL handling per GQL spec (NULLS FIRST/LAST).
 ///
 /// Default: NULLS LAST for ASC, NULLS FIRST for DESC.
@@ -57,9 +105,18 @@ pub(crate) fn execute_pipeline_op(
         PipelineOp::Let { bindings: lets } => execute_let(bindings, lets, ctx),
         PipelineOp::Filter { predicate } => execute_filter(bindings, predicate, ctx),
         PipelineOp::Sort { terms } => Ok(execute_sort(bindings, terms, ctx)),
-        PipelineOp::TopK { terms, limit } => Ok(execute_topk(bindings, terms, *limit, ctx)),
-        PipelineOp::Offset { count } => Ok(execute_offset(bindings, *count)),
-        PipelineOp::Limit { count } => Ok(execute_limit(bindings, *count)),
+        PipelineOp::TopK { terms, limit } => {
+            let k = limit.resolve(ctx.parameters)?;
+            Ok(execute_topk(bindings, terms, k, ctx))
+        }
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)?;
+            Ok(execute_offset(bindings, n))
+        }
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)?;
+            Ok(execute_limit(bindings, n))
+        }
         PipelineOp::Return {
             projections,
             group_by,
@@ -112,6 +169,12 @@ pub(crate) fn execute_pipeline_op(
                 "CALL { subquery } must be handled by the executor",
             ))
         }
+        PipelineOp::NestedMatch { .. } => {
+            // NestedMatch execution is handled by the main executor (needs graph access)
+            Err(GqlError::internal(
+                "NestedMatch must be handled by the executor",
+            ))
+        }
         PipelineOp::For { var, list_expr } => {
             let mut output = Vec::new();
             for binding in &bindings {
@@ -138,18 +201,26 @@ pub(crate) fn execute_pipeline_op(
             Ok(output)
         }
         PipelineOp::ViewScan {
-            view_name, yields, ..
+            view_name,
+            yields,
+            yield_star,
         } => {
             let provider = crate::runtime::procedures::view_provider::get_view_provider()?;
             let row = provider.read_view(view_name.as_str())?;
             let mut binding = Binding::empty();
-            for (col, alias) in yields {
-                let key = alias.unwrap_or(*col);
-                let val = row
-                    .iter()
-                    .find(|(k, _)| *k == *col)
-                    .map_or(GqlValue::Null, |(_, v)| v.clone());
-                binding.bind(key, BoundValue::Scalar(val));
+            if *yield_star {
+                for (col, val) in &row {
+                    binding.bind(*col, BoundValue::Scalar(val.clone()));
+                }
+            } else {
+                for (col, alias) in yields {
+                    let key = alias.unwrap_or(*col);
+                    let val = row
+                        .iter()
+                        .find(|(k, _)| *k == *col)
+                        .map_or(GqlValue::Null, |(_, v)| v.clone());
+                    binding.bind(key, BoundValue::Scalar(val));
+                }
             }
             Ok(vec![binding])
         }
@@ -174,18 +245,47 @@ pub(crate) fn execute_pipeline_op_chunk(
 
         PipelineOp::Sort { terms } => Ok(execute_sort_chunk(chunk, terms, ctx)),
 
-        PipelineOp::Offset { count } => {
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
             let mut chunk = chunk;
             let phys_len = chunk.len();
-            chunk.selection_mut().skip(*count as usize, phys_len);
+            chunk.selection_mut().skip(n, phys_len);
             Ok(chunk)
         }
 
-        PipelineOp::Limit { count } => {
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
             let mut chunk = chunk;
             let phys_len = chunk.len();
-            chunk.selection_mut().truncate(*count as usize, phys_len);
+            chunk.selection_mut().truncate(n, phys_len);
             Ok(chunk)
+        }
+
+        // Simple RETURN: project columns without bridging through bindings.
+        // Handles the common case of RETURN expr1, expr2, ... with no
+        // GROUP BY, DISTINCT, HAVING, or RETURN *.
+        PipelineOp::Return {
+            projections,
+            group_by,
+            distinct,
+            having,
+            all,
+        } if !*all
+            && group_by.is_empty()
+            && !*distinct
+            && having.is_none()
+            && !projections.iter().any(|p| p.expr.is_aggregate()) =>
+        {
+            match try_return_chunk(&chunk, projections, ctx) {
+                Ok(projected) => Ok(projected),
+                Err(GqlError::Unsupported { .. }) => {
+                    // eval_vec unsupported for some projection; fall back
+                    let bindings = chunk.to_bindings();
+                    let result = execute_pipeline_op(op, bindings, ctx)?;
+                    Ok(bindings_to_chunk_generic(&result))
+                }
+                Err(err) => Err(err),
+            }
         }
 
         // Stages that bridge through bindings.
@@ -281,6 +381,50 @@ fn execute_let_chunk(
     Ok(chunk)
 }
 
+/// Native chunk RETURN for simple projections (no GROUP BY, DISTINCT, HAVING).
+///
+/// Evaluates each projection expression as a column via eval_vec, building
+/// a new DataChunk with only the projected columns. Avoids the
+/// chunk->binding->chunk round-trip that allocates ~5-8MB for 10K rows.
+fn try_return_chunk(
+    chunk: &DataChunk,
+    projections: &[PlannedProjection],
+    ctx: &EvalContext<'_>,
+) -> Result<DataChunk, GqlError> {
+    use crate::runtime::vector::eval_vec;
+    use crate::runtime::vector::gather::GraphPropertyGatherer;
+    use crate::types::chunk::{ChunkSchema, ColumnKind};
+
+    // Compact to dense so physical and logical indices align
+    let chunk = chunk.compact();
+    let len = chunk.len();
+
+    // Empty result: build a zero-row chunk with correct schema
+    if len == 0 {
+        let mut columns = smallvec::SmallVec::<[crate::types::chunk::Column; 8]>::new();
+        let mut schema = ChunkSchema::new();
+        for proj in projections {
+            schema.extend(proj.alias, ColumnKind::Null);
+            columns.push(crate::types::chunk::Column::Null(0));
+        }
+        return Ok(DataChunk::from_columns(columns, schema, 0));
+    }
+
+    let gatherer = GraphPropertyGatherer::new(ctx.graph);
+
+    let mut columns = smallvec::SmallVec::<[crate::types::chunk::Column; 8]>::new();
+    let mut schema = ChunkSchema::new();
+
+    for proj in projections {
+        let col = eval_vec(&proj.expr, &chunk, &gatherer, ctx)?;
+        let kind = col.kind();
+        schema.extend(proj.alias, kind);
+        columns.push(col);
+    }
+
+    Ok(DataChunk::from_columns(columns, schema, len))
+}
+
 /// Native chunk sort using eval_vec for sort key pre-evaluation.
 ///
 /// Evaluates sort keys as columns, compacts the chunk, sorts an index
@@ -288,7 +432,6 @@ fn execute_let_chunk(
 fn execute_sort_chunk(chunk: DataChunk, terms: &[OrderTerm], ctx: &EvalContext<'_>) -> DataChunk {
     use crate::runtime::vector::eval_vec;
     use crate::runtime::vector::gather::GraphPropertyGatherer;
-    use crate::types::chunk::column_to_gql_value_pub;
 
     if chunk.active_len() <= 1 {
         return chunk;
@@ -315,13 +458,11 @@ fn execute_sort_chunk(chunk: DataChunk, terms: &[OrderTerm], ctx: &EvalContext<'
         })
         .collect();
 
-    // Sort index array by comparing key column values
+    // Sort index array by comparing key column values directly (no GqlValue allocation)
     let mut indices: Vec<u32> = (0..len as u32).collect();
     indices.sort_by(|&ai, &bi| {
         for (ti, term) in terms.iter().enumerate() {
-            let a_val = column_to_gql_value_pub(&key_columns[ti], ai as usize);
-            let b_val = column_to_gql_value_pub(&key_columns[ti], bi as usize);
-            let ord = compare_with_nulls(&a_val, &b_val, term);
+            let ord = compare_column_direct(&key_columns[ti], ai as usize, bi as usize, term);
             if ord != std::cmp::Ordering::Equal {
                 return ord;
             }
@@ -712,16 +853,37 @@ fn execute_return_all(
 fn execute_return(
     bindings: Vec<Binding>,
     projections: &[PlannedProjection],
-    group_by: &[IStr],
+    group_by: &[Expr],
     distinct: bool,
     having: Option<&Expr>,
     ctx: &EvalContext<'_>,
 ) -> Result<Vec<Binding>, GqlError> {
     let has_aggregates = projections.iter().any(|p| p.expr.is_aggregate());
 
+    // Implicit GROUP BY: when projections mix aggregated and non-aggregated
+    // expressions without an explicit GROUP BY, the non-aggregated expressions
+    // become implicit group keys (standard SQL/GQL behavior).
+    let implicit_group_by: Vec<Expr>;
+    let effective_group_by = if !group_by.is_empty() {
+        group_by
+    } else if has_aggregates {
+        implicit_group_by = projections
+            .iter()
+            .filter(|p| !p.expr.is_aggregate())
+            .map(|p| p.expr.clone())
+            .collect();
+        if implicit_group_by.is_empty() {
+            group_by // all projections are aggregates, no grouping
+        } else {
+            &implicit_group_by
+        }
+    } else {
+        group_by
+    };
+
     // Detect horizontal aggregation: all Expr::Aggregate inner expressions
     // resolve to List values per-row (from Group variables)
-    let horizontal = has_aggregates && group_by.is_empty() && !bindings.is_empty() && {
+    let horizontal = has_aggregates && effective_group_by.is_empty() && !bindings.is_empty() && {
         projections
             .iter()
             .filter(|p| p.expr.is_aggregate())
@@ -740,8 +902,8 @@ fn execute_return(
             })
     };
 
-    let mut result = if !group_by.is_empty() {
-        execute_grouped_return(bindings, projections, group_by, ctx)?
+    let mut result = if !effective_group_by.is_empty() {
+        execute_grouped_return(bindings, projections, effective_group_by, ctx)?
     } else if has_aggregates && !horizontal {
         execute_aggregate_return(bindings, projections, ctx)?
     } else {
@@ -803,7 +965,7 @@ fn execute_aggregate_return(
 fn execute_grouped_return(
     bindings: Vec<Binding>,
     projections: &[PlannedProjection],
-    group_by: &[IStr],
+    group_by: &[Expr],
     ctx: &EvalContext<'_>,
 ) -> Result<Vec<Binding>, GqlError> {
     use std::hash::{Hash, Hasher};
@@ -839,7 +1001,22 @@ fn execute_grouped_return(
     for binding in bindings {
         let key_values: Vec<GqlValue> = group_by
             .iter()
-            .map(|var| eval::resolve_var_as_value(var, &binding, ctx))
+            .map(|expr| {
+                // If the GROUP BY expression is a variable name that matches a
+                // projection alias (e.g. `GROUP BY type` where `type` was
+                // defined via `s.type AS type`), evaluate the aliased expression
+                // rather than trying to look up the alias name as a binding
+                // variable, which would fail with "unbound variable".
+                let resolved_expr = if let Expr::Var(name) = expr {
+                    projections
+                        .iter()
+                        .find(|p| p.alias == *name)
+                        .map_or(expr, |p| &p.expr)
+                } else {
+                    expr
+                };
+                eval_expr_ctx(resolved_expr, &binding, ctx)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let key = GroupKey(key_values);
 
@@ -1269,7 +1446,7 @@ mod tests {
         let result = execute_return(
             bindings,
             &projections,
-            &[IStr::new("floor_name")],
+            &[Expr::Var(IStr::new("floor_name"))],
             false,
             None,
             &make_ctx(&g),
@@ -1290,6 +1467,155 @@ mod tests {
         match f1.get(&IStr::new("sensor_count")) {
             Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
             other => panic!("expected Int(2) for F1, got {other:?}"),
+        }
+    }
+
+    // ── RETURN (GROUP BY alias) ──
+
+    #[test]
+    fn return_group_by_projection_alias() {
+        // Simulates: WITH s.floor AS fl, count(s) AS cnt GROUP BY fl
+        // Before the fix, GROUP BY fl failed with "unbound variable 'fl'"
+        // because the alias name wasn't in the raw binding.
+        let g = test_graph();
+        let bindings = sensor_bindings();
+
+        let projections = vec![
+            PlannedProjection {
+                expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("floor")),
+                alias: IStr::new("fl"),
+            },
+            PlannedProjection {
+                expr: Expr::Function(FunctionCall {
+                    name: IStr::new("count"),
+                    args: vec![],
+                    count_star: true,
+                }),
+                alias: IStr::new("cnt"),
+            },
+        ];
+        // GROUP BY fl (uses the projection alias, not the raw expression)
+        let result = execute_return(
+            bindings,
+            &projections,
+            &[Expr::Var(IStr::new("fl"))],
+            false,
+            None,
+            &make_ctx(&g),
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 2); // F1 (2 sensors) and F2 (1 sensor)
+
+        let f1 = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("fl")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "F1"
+                )
+            })
+            .unwrap();
+        match f1.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
+            other => panic!("expected Int(2) for F1, got {other:?}"),
+        }
+
+        let f2 = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("fl")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "F2"
+                )
+            })
+            .unwrap();
+        match f2.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(1))) => {}
+            other => panic!("expected Int(1) for F2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn return_group_by_case_alias() {
+        // Simulates:
+        //   RETURN CASE WHEN s.temp >= 75.0 THEN 'hot' ELSE 'cool' END AS bucket,
+        //          count(*) AS cnt
+        //   GROUP BY bucket
+        //
+        // Before the fix, GROUP BY bucket failed with "unbound variable 'bucket'".
+        let g = test_graph();
+        let bindings = sensor_bindings(); // S1=72.5, S2=80.0, S3=68.0
+
+        let case_expr = Expr::Case {
+            branches: vec![(
+                Expr::Compare(
+                    Box::new(Expr::Property(
+                        Box::new(Expr::Var(IStr::new("s"))),
+                        IStr::new("temp"),
+                    )),
+                    CompareOp::Gte,
+                    Box::new(Expr::Literal(GqlValue::Float(75.0))),
+                ),
+                Expr::Literal(GqlValue::String("hot".into())),
+            )],
+            else_expr: Some(Box::new(Expr::Literal(GqlValue::String("cool".into())))),
+        };
+
+        let projections = vec![
+            PlannedProjection {
+                expr: case_expr,
+                alias: IStr::new("bucket"),
+            },
+            PlannedProjection {
+                expr: Expr::Function(FunctionCall {
+                    name: IStr::new("count"),
+                    args: vec![],
+                    count_star: true,
+                }),
+                alias: IStr::new("cnt"),
+            },
+        ];
+        // GROUP BY bucket (alias for the CASE expression)
+        let result = execute_return(
+            bindings,
+            &projections,
+            &[Expr::Var(IStr::new("bucket"))],
+            false,
+            None,
+            &make_ctx(&g),
+        )
+        .unwrap();
+
+        // S2(80.0) => 'hot', S1(72.5) + S3(68.0) => 'cool'
+        assert_eq!(result.len(), 2);
+
+        let hot = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("bucket")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "hot"
+                )
+            })
+            .unwrap();
+        match hot.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(1))) => {}
+            other => panic!("expected Int(1) for 'hot', got {other:?}"),
+        }
+
+        let cool = result
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.get(&IStr::new("bucket")),
+                    Some(BoundValue::Scalar(GqlValue::String(s))) if &**s == "cool"
+                )
+            })
+            .unwrap();
+        match cool.get(&IStr::new("cnt")) {
+            Some(BoundValue::Scalar(GqlValue::Int(2))) => {}
+            other => panic!("expected Int(2) for 'cool', got {other:?}"),
         }
     }
 

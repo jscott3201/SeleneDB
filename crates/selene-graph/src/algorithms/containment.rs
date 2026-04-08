@@ -7,12 +7,13 @@ use selene_core::NodeId;
 use super::traversal::bfs;
 use crate::graph::SeleneGraph;
 
-/// Walk "contains" edges upward from `start`.
+/// Walk edges upward from `start`, following any edge whose label
+/// appears in `edge_labels`.
 ///
-/// Returns `[start, parent, grandparent, ...]` -- the containment
-/// ancestry chain.  Stops when a node has no incoming "contains" edge
-/// or a cycle is detected.
-pub fn containment_walk_up(graph: &SeleneGraph, start: NodeId) -> Vec<NodeId> {
+/// Returns `[start, parent, grandparent, ...]` -- the ancestry chain.
+/// Stops when a node has no matching incoming edge or a cycle is
+/// detected.
+pub fn walk_ancestors(graph: &SeleneGraph, start: NodeId, edge_labels: &[&str]) -> Vec<NodeId> {
     if !graph.contains_node(start) {
         return vec![];
     }
@@ -23,11 +24,10 @@ pub fn containment_walk_up(graph: &SeleneGraph, start: NodeId) -> Vec<NodeId> {
     let mut current = start;
 
     loop {
-        // Find the parent: incoming edge with label "contains"
         let mut found_parent = None;
         for &edge_id in graph.incoming(current) {
             if let Some(edge) = graph.get_edge(edge_id)
-                && edge.label.as_str() == "contains"
+                && edge_labels.contains(&edge.label.as_str())
             {
                 found_parent = Some(edge.source);
                 break;
@@ -44,6 +44,15 @@ pub fn containment_walk_up(graph: &SeleneGraph, start: NodeId) -> Vec<NodeId> {
     }
 
     path
+}
+
+/// Walk "contains" edges upward from `start`.
+///
+/// Returns `[start, parent, grandparent, ...]` -- the containment
+/// ancestry chain.  Stops when a node has no incoming "contains" edge
+/// or a cycle is detected.
+pub fn containment_walk_up(graph: &SeleneGraph, start: NodeId) -> Vec<NodeId> {
+    walk_ancestors(graph, start, &["contains"])
 }
 
 /// All descendant nodes under `root` via "contains" edges.
@@ -134,5 +143,33 @@ mod tests {
     fn containment_children_from_leaf() {
         let g = containment_graph();
         assert!(containment_children(&g, NodeId(5), None).is_empty());
+    }
+
+    /// Building -[contains]-> Zone -[has_sensor]-> Sensor
+    fn mixed_edge_graph() -> SeleneGraph {
+        let mut g = SeleneGraph::new();
+        g.insert_node_raw(node(1, &["Building"]));
+        g.insert_node_raw(node(2, &["Zone"]));
+        g.insert_node_raw(node(3, &["Sensor"]));
+        g.insert_edge_raw(edge(1, 1, 2, "contains"));
+        g.insert_edge_raw(edge(2, 2, 3, "has_sensor"));
+        g
+    }
+
+    #[test]
+    fn walk_up_only_follows_contains() {
+        let g = mixed_edge_graph();
+        // containment_walk_up only follows "contains", so from Sensor
+        // it cannot reach Zone (the edge is "has_sensor").
+        let path = containment_walk_up(&g, NodeId(3));
+        assert_eq!(path, vec![NodeId(3)]);
+    }
+
+    #[test]
+    fn walk_ancestors_follows_multiple_labels() {
+        let g = mixed_edge_graph();
+        // walk_ancestors with both labels traverses has_sensor then contains.
+        let path = walk_ancestors(&g, NodeId(3), &["contains", "has_sensor"]);
+        assert_eq!(path, vec![NodeId(3), NodeId(2), NodeId(1)]);
     }
 }

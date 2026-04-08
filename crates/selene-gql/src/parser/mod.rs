@@ -43,16 +43,144 @@ pub(crate) fn parse_raw(input: &str) -> Result<pest::iterators::Pairs<'_, Rule>,
             pest::error::LineColLocation::Pos((l, c)) => (l, c),
             pest::error::LineColLocation::Span((l, c), _) => (l, c),
         };
+        let mut message = e.to_string();
+        // Detect reserved keyword usage and add a helpful hint.
+        // pest col is 1-based and relative to the error line. Find the
+        // start of that line, then advance by (col-1) characters to get
+        // the correct byte offset (safe for multi-byte UTF-8).
+        if col > 0 {
+            let line_start = if line <= 1 {
+                0
+            } else {
+                input
+                    .match_indices('\n')
+                    .nth(line - 2)
+                    .map_or(0, |(i, _)| i + 1)
+            };
+            let byte_pos = input[line_start..]
+                .char_indices()
+                .nth(col.saturating_sub(1))
+                .map_or(input.len(), |(i, _)| line_start + i);
+            let rest = &input[byte_pos..];
+            let word: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !word.is_empty() && is_reserved_keyword(&word) {
+                message = format!(
+                    "{message}\n\nHint: '{word}' is a reserved keyword. \
+                     Use backticks to escape it: `{word}`"
+                );
+            }
+        }
         GqlError::Parse {
-            message: e.to_string(),
+            message,
             position: Some((line, col)),
         }
     })
 }
 
+/// Check if a word is a GQL reserved keyword (case-insensitive).
+fn is_reserved_keyword(word: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "MATCH",
+        "RETURN",
+        "FILTER",
+        "WHERE",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "GROUP",
+        "LET",
+        "SET",
+        "DELETE",
+        "INSERT",
+        "REMOVE",
+        "MERGE",
+        "CALL",
+        "YIELD",
+        "AS",
+        "FINISH",
+        "DETACH",
+        "FOR",
+        "AND",
+        "OR",
+        "NOT",
+        "XOR",
+        "IN",
+        "IS",
+        "EXISTS",
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "UNKNOWN",
+        "WALK",
+        "TRAIL",
+        "ACYCLIC",
+        "SIMPLE",
+        "OPTIONAL",
+        "SHORTEST",
+        "DISTINCT",
+        "ASC",
+        "DESC",
+        "START",
+        "COMMIT",
+        "ROLLBACK",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "OTHERWISE",
+        "NEXT",
+        "CAST",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "COUNT",
+        "SUM",
+        "AVERAGE",
+        "AVG",
+        "WITH",
+        "HAVING",
+        "UNWIND",
+        "NULLS",
+        "CREATE",
+        "DROP",
+        "GRANT",
+        "REVOKE",
+        "SELECT",
+        "FROM",
+        "DIRECTED",
+        "LABELED",
+        "RECORD",
+        "NORMALIZED",
+        "DAY",
+        "HOUR",
+        "MINUTE",
+        "SECOND",
+        "MONTH",
+        "YEAR",
+        "BETWEEN",
+        "LIKE",
+        "ARRAY",
+        "BINDING",
+        "CONNECTING",
+        "DIFFERENT",
+        "KEEP",
+        "ONLY",
+        "MATERIALIZED",
+        "VIEW",
+        "VIEWS",
+    ];
+    let upper = word.to_uppercase();
+    KEYWORDS.iter().any(|k| *k == upper)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::expr::Expr;
     use crate::ast::mutation::InsertElement;
 
     /// Helper: parse and verify success.
@@ -82,7 +210,7 @@ mod tests {
 
     #[test]
     fn parse_float_literal() {
-        parse_ok("MATCH (n) RETURN 3.14");
+        parse_ok("MATCH (n) RETURN 3.15");
     }
 
     #[test]
@@ -579,7 +707,7 @@ mod tests {
                     })
                     .unwrap();
                 assert_eq!(ret.group_by.len(), 1);
-                assert_eq!(ret.group_by[0].as_str(), "NAME");
+                assert!(matches!(&ret.group_by[0], Expr::Var(n) if n.as_str() == "NAME"));
                 assert_eq!(ret.projections.len(), 2);
             }
             _ => panic!("expected Query"),
@@ -642,6 +770,59 @@ mod tests {
                 assert_eq!(call.yields.len(), 1);
                 assert_eq!(call.yields[0].name.as_str(), "VALUE");
                 assert_eq!(call.yields[0].alias.unwrap().as_str(), "TEMP");
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn ast_call_procedure_with_where_filter() {
+        let stmt =
+            parse_statement("CALL graph.labels() YIELD label WHERE label = 'sensor' RETURN label")
+                .unwrap();
+        match &stmt {
+            GqlStatement::Query(p) => {
+                let call = p
+                    .statements
+                    .iter()
+                    .find_map(|s| match s {
+                        PipelineStatement::Call(c) => Some(c),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(call.name.as_str(), "graph.labels");
+                assert_eq!(call.yields.len(), 1);
+                assert_eq!(call.yields[0].name.as_str(), "LABEL");
+                assert!(
+                    call.filter.is_some(),
+                    "WHERE after YIELD should produce a filter"
+                );
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn ast_call_procedure_with_filter_where() {
+        // FILTER WHERE variant should also work
+        let stmt = parse_statement(
+            "CALL graph.labels() YIELD label FILTER WHERE label = 'sensor' RETURN label",
+        )
+        .unwrap();
+        match &stmt {
+            GqlStatement::Query(p) => {
+                let call = p
+                    .statements
+                    .iter()
+                    .find_map(|s| match s {
+                        PipelineStatement::Call(c) => Some(c),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    call.filter.is_some(),
+                    "FILTER WHERE after YIELD should produce a filter"
+                );
             }
             _ => panic!("expected Query"),
         }
@@ -1031,7 +1212,7 @@ mod tests {
             GqlStatement::Query(pipeline) => {
                 assert!(pipeline.statements.len() >= 2);
                 match &pipeline.statements[0] {
-                    PipelineStatement::MatchView { name, yields } => {
+                    PipelineStatement::MatchView { name, yields, .. } => {
                         assert_eq!(name.as_str(), "stats");
                         assert_eq!(yields.len(), 2);
                         assert_eq!(yields[0].name.as_str(), "AVG_TEMP");
@@ -1059,5 +1240,111 @@ mod tests {
             },
             _ => panic!("expected Query"),
         }
+    }
+
+    #[test]
+    fn parse_match_view_yield_star() {
+        let stmt = parse_statement("MATCH VIEW stats YIELD *").unwrap();
+        match stmt {
+            GqlStatement::Query(pipeline) => match &pipeline.statements[0] {
+                PipelineStatement::MatchView {
+                    name,
+                    yields,
+                    yield_star,
+                } => {
+                    assert_eq!(name.as_str(), "stats");
+                    assert!(yields.is_empty());
+                    assert!(*yield_star);
+                }
+                _ => panic!("expected MatchView"),
+            },
+            _ => panic!("expected Query"),
+        }
+    }
+
+    // ── Record constructor / map literals ──
+
+    #[test]
+    fn record_constructor_with_keyword() {
+        parse_ok("MATCH (n) RETURN RECORD {name: n.name, age: n.age}");
+    }
+
+    #[test]
+    fn record_constructor_bare_map_literal() {
+        parse_ok("MATCH (n) RETURN {name: n.name, age: n.age}");
+    }
+
+    #[test]
+    fn record_constructor_both_forms_same_ast() {
+        let with_kw = parse_statement("MATCH (n) RETURN RECORD {x: n.x}").unwrap();
+        let bare = parse_statement("MATCH (n) RETURN {x: n.x}").unwrap();
+        // Both produce RecordConstruct with the same field
+        let extract = |stmt: crate::GqlStatement| -> String {
+            if let crate::GqlStatement::Query(p) = stmt {
+                format!("{:?}", p.statements.last())
+            } else {
+                panic!("expected Query")
+            }
+        };
+        assert_eq!(extract(with_kw), extract(bare));
+    }
+
+    #[test]
+    fn record_constructor_single_field() {
+        parse_ok("MATCH (n) RETURN {id: id(n)}");
+    }
+
+    #[test]
+    fn record_constructor_nested_expressions() {
+        parse_ok("MATCH (n) RETURN {full: n.first || ' ' || n.last, count: count(*)}");
+    }
+
+    // ── Parameterized LIMIT/OFFSET ──
+
+    #[test]
+    fn parameterized_limit() {
+        parse_ok("MATCH (n) RETURN n LIMIT $n");
+    }
+
+    #[test]
+    fn parameterized_offset() {
+        parse_ok("MATCH (n) RETURN n OFFSET $skip");
+    }
+
+    #[test]
+    fn parameterized_skip_alias() {
+        parse_ok("MATCH (n) RETURN n SKIP $page");
+    }
+
+    #[test]
+    fn parameterized_limit_and_offset() {
+        parse_ok("MATCH (n) RETURN n OFFSET $off LIMIT $lim");
+    }
+
+    #[test]
+    fn literal_limit_still_works() {
+        parse_ok("MATCH (n) RETURN n LIMIT 10");
+    }
+
+    // ── Reserved keyword error hints ──
+
+    #[test]
+    fn reserved_keyword_label_gives_hint() {
+        let result = parse_statement("INSERT (:Commit {msg: 'test'})");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("reserved keyword"),
+            "error should hint about reserved keyword: {err}"
+        );
+        assert!(
+            err.contains("`Commit`"),
+            "error should suggest backtick escaping: {err}"
+        );
+    }
+
+    #[test]
+    fn backtick_escaped_keyword_works() {
+        parse_ok("INSERT (:`Commit` {msg: 'test'})");
     }
 }

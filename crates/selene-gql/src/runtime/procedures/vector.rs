@@ -131,8 +131,8 @@ impl Procedure for VectorSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -186,8 +186,14 @@ impl Procedure for VectorSearch {
         }
 
         // Fast path: try HNSW index first (approximate nearest neighbor).
-        // Falls through to brute-force if the index is absent or empty.
-        if let Some(hnsw) = graph.hnsw_index() {
+        // Route to namespace based on label: system labels (__*) go to their
+        // own namespace, user labels go to the default namespace.
+        let hnsw_ns = if label.starts_with("__") {
+            label.to_lowercase()
+        } else {
+            String::new()
+        };
+        if let Some(hnsw) = graph.hnsw_index_for(&hnsw_ns) {
             // Build a combined label + scope filter bitmap.
             let label_bitmap: RoaringBitmap =
                 graph.label_bitmap(label).cloned().unwrap_or_default();
@@ -207,7 +213,7 @@ impl Procedure for VectorSearch {
                     .into_iter()
                     .map(|(node_id, score)| {
                         smallvec![
-                            (IStr::new("nodeId"), GqlValue::UInt(node_id.0)),
+                            (IStr::new("node_id"), GqlValue::Int(node_id.0 as i64)),
                             (IStr::new("score"), GqlValue::Float(f64::from(score))),
                         ]
                     })
@@ -231,7 +237,7 @@ impl Procedure for VectorSearch {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -342,10 +348,8 @@ pub(crate) fn top_k_cosine_scan(
 ///
 /// Combines embed() + vector search + containment path traversal.
 /// Requires `--features vector` for the embed() call.
-#[cfg(feature = "vector")]
 pub struct SemanticSearch;
 
-#[cfg(feature = "vector")]
 impl Procedure for SemanticSearch {
     fn name(&self) -> &'static str {
         "graph.semanticSearch"
@@ -366,8 +370,8 @@ impl Procedure for SemanticSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -420,7 +424,10 @@ impl Procedure for SemanticSearch {
         };
 
         // 1. Embed the query text
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
 
         // 2. Scan nodes with cosine similarity
         let prop_key = IStr::new("embedding");
@@ -442,8 +449,11 @@ impl Procedure for SemanticSearch {
         Ok(results
             .into_iter()
             .map(|s| {
-                let path_nodes =
-                    selene_graph::algorithms::containment::containment_walk_up(graph, s.node_id);
+                let path_nodes = selene_graph::algorithms::containment::walk_ancestors(
+                    graph,
+                    s.node_id,
+                    &["contains", "has_sensor", "supplies"],
+                );
                 let path_str = path_nodes
                     .iter()
                     .filter_map(|nid| {
@@ -461,7 +471,7 @@ impl Procedure for SemanticSearch {
                     .join(" > ");
 
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                     (
                         IStr::new("path"),
@@ -490,8 +500,8 @@ impl Procedure for SimilarNodes {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 ProcedureParam {
                     name: "property",
@@ -504,8 +514,8 @@ impl Procedure for SimilarNodes {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -556,10 +566,18 @@ impl Procedure for SimilarNodes {
         let prop_key = IStr::new(property);
         let ref_vec = match ref_node.properties.get(prop_key) {
             Some(Value::Vector(v)) => v.as_ref(),
-            _ => {
+            Some(_) => {
                 return Err(GqlError::InvalidArgument {
                     message: format!(
-                        "node {} does not have a vector property '{property}'",
+                        "node {} property '{property}' is not a vector; similarNodes requires a vector embedding property",
+                        ref_id.0
+                    ),
+                });
+            }
+            None => {
+                return Err(GqlError::InvalidArgument {
+                    message: format!(
+                        "node {} does not have property '{property}'; ensure the node has an embedding stored in this property",
                         ref_id.0
                     ),
                 });
@@ -586,7 +604,7 @@ impl Procedure for SimilarNodes {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -635,8 +653,8 @@ impl Procedure for ScopedVectorSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -662,11 +680,11 @@ impl Procedure for ScopedVectorSearch {
         }
 
         let root_id = NodeId(match &args[0] {
-            GqlValue::UInt(id) => *id,
             GqlValue::Int(id) if *id >= 0 => *id as u64,
+            GqlValue::UInt(id) => *id,
             other => {
                 return Err(GqlError::type_error(format!(
-                    "scopedVectorSearch: rootNodeId must be UINT, got {}",
+                    "scopedVectorSearch: rootNodeId must be INT, got {}",
                     other.gql_type()
                 )));
             }
@@ -718,7 +736,132 @@ impl Procedure for ScopedVectorSearch {
             .into_iter()
             .map(|s| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(s.node_id.0)),
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
+                    (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
+                ]
+            })
+            .collect())
+    }
+}
+
+// ── graph.scopedSemanticSearch ──────────────────────────────────────
+
+/// `CALL graph.scopedSemanticSearch(1, 3, 'find temperature anomalies', 10)`
+///
+/// Combines embed() + BFS-scoped vector search. Handles embedding
+/// internally (unlike scopedVectorSearch which requires a pre-computed vector).
+/// Steps: (1) embed query text, (2) BFS from root to collect candidates,
+/// (3) top-k cosine scan over the neighborhood.
+pub struct ScopedSemanticSearch;
+
+impl Procedure for ScopedSemanticSearch {
+    fn name(&self) -> &'static str {
+        "graph.scopedSemanticSearch"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![
+                ProcedureParam {
+                    name: "rootNodeId",
+                    typ: GqlType::UInt,
+                },
+                ProcedureParam {
+                    name: "maxHops",
+                    typ: GqlType::Int,
+                },
+                ProcedureParam {
+                    name: "queryText",
+                    typ: GqlType::String,
+                },
+                ProcedureParam {
+                    name: "k",
+                    typ: GqlType::Int,
+                },
+            ],
+            yields: vec![
+                YieldColumn {
+                    name: "node_id",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "score",
+                    typ: GqlType::Float,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        args: &[GqlValue],
+        graph: &SeleneGraph,
+        _hot_tier: Option<&HotTier>,
+        scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        if args.len() < 4 {
+            return Err(GqlError::InvalidArgument {
+                message: "graph.scopedSemanticSearch requires 4 arguments: \
+                          rootNodeId, maxHops, queryText, k"
+                    .into(),
+            });
+        }
+
+        let root_id = NodeId(match &args[0] {
+            GqlValue::Int(id) if *id >= 0 => *id as u64,
+            GqlValue::UInt(id) => *id,
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "scopedSemanticSearch: rootNodeId must be INT, got {}",
+                    other.gql_type()
+                )));
+            }
+        });
+
+        let max_hops = args[1].as_int()?;
+        if max_hops <= 0 {
+            return Err(GqlError::InvalidArgument {
+                message: "scopedSemanticSearch: maxHops must be > 0".into(),
+            });
+        }
+        let max_hops = max_hops.min(20) as u32;
+
+        let query_text = args[2].as_str()?;
+
+        let k = args[3].as_int()? as usize;
+        if k == 0 {
+            return Ok(vec![]);
+        }
+        const MAX_K: usize = 10_000;
+        if k > MAX_K {
+            return Err(GqlError::InvalidArgument {
+                message: format!("scopedSemanticSearch: k must be <= {MAX_K}"),
+            });
+        }
+
+        // 1. Embed the query text
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
+
+        // 2. BFS to collect neighborhood candidates
+        let neighbors = selene_graph::algorithms::traversal::bfs(graph, root_id, None, max_hops);
+
+        if neighbors.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 3. Top-k cosine search over the neighborhood
+        let prop_key = IStr::new("embedding");
+        let results =
+            top_k_cosine_scan(graph, neighbors.into_iter(), prop_key, &query_vec, k, scope);
+
+        Ok(results
+            .into_iter()
+            .map(|s| {
+                smallvec![
+                    (IStr::new("node_id"), GqlValue::Int(s.node_id.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(s.score))),
                 ]
             })
@@ -830,7 +973,7 @@ mod tests {
         let rows = VectorSearch.execute(&args, &g, None, None).unwrap();
         assert_eq!(rows.len(), 3);
         // First result should be node 1 (exact match at 0 degrees)
-        assert_eq!(rows[0][0].1, GqlValue::UInt(1));
+        assert_eq!(rows[0][0].1, GqlValue::Int(1));
         if let GqlValue::Float(score) = &rows[0][1].1 {
             assert!(*score > 0.99);
         }
@@ -906,7 +1049,7 @@ mod tests {
         ];
         let rows = VectorSearch.execute(&args, &g, None, None).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0].1, GqlValue::UInt(2));
+        assert_eq!(rows[0][0].1, GqlValue::Int(2));
     }
 
     // ── dot_product / is_unit_vector tests ────────────────────────

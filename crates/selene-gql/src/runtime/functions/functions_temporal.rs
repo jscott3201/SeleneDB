@@ -276,8 +276,16 @@ impl ScalarFunction for DateConstructorFunction {
                     days: crate::runtime::eval::ymd_to_epoch_days(y, m, d),
                 }))
             }
-            Some(GqlValue::Null) | None => Ok(GqlValue::Null),
-            _ => Err(GqlError::type_error("date() requires a string argument")),
+            Some(GqlValue::Null) => Ok(GqlValue::Null),
+            // No arguments: return current date (same as current_date()).
+            None => {
+                let nanos = selene_core::now_nanos();
+                let days = (nanos / 1_000_000_000).div_euclid(86400) as i32;
+                Ok(GqlValue::Date(crate::types::value::GqlDate { days }))
+            }
+            _ => Err(GqlError::type_error(
+                "date() requires a string argument or no arguments",
+            )),
         }
     }
 }

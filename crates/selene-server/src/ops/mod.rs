@@ -7,6 +7,7 @@
 pub mod csv_io;
 pub mod edges;
 pub mod gql;
+pub mod gql_repair;
 pub mod graph_resolver;
 pub mod graph_slice;
 pub mod graph_stats;

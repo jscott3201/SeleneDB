@@ -76,6 +76,7 @@ pub enum MutationOp {
 
     /// MERGE (pattern) ON CREATE SET ... ON MATCH SET ...
     Merge {
+        var: Option<IStr>,
         labels: Vec<IStr>,
         properties: Vec<(IStr, Expr)>,
         on_create: Vec<(IStr, IStr, Expr)>, // (target_var, prop, value)

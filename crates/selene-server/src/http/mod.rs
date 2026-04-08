@@ -2,6 +2,7 @@
 
 pub(crate) mod auth;
 pub(crate) mod error;
+pub(crate) mod rate_limit;
 pub(crate) mod routes;
 pub(crate) mod ws;
 
@@ -134,10 +135,10 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // 4 MB for CSV
         .route("/import/csv", post(routes::csv_import)
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // deprecated alias
-        .route("/export/csv", get(routes::csv_export)); // deprecated alias
+        .route("/export/csv", get(routes::csv_export)) // deprecated alias
+        .route("/subscribe", get(routes::subscribe::subscribe));
 
-    // RDF import/export (feature-gated)
-    #[cfg(feature = "rdf")]
+    // RDF import/export
     let app = app.route(
         "/graph/rdf",
         get(routes::export_rdf)
@@ -145,8 +146,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
     ); // 4 MB for RDF
 
-    // SPARQL Protocol endpoint (feature-gated on rdf-sparql)
-    #[cfg(feature = "rdf-sparql")]
+    // SPARQL Protocol endpoint
     let app = app.route(
         "/sparql",
         get(routes::sparql_get)
@@ -334,6 +334,12 @@ pub async fn serve_router(
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(rate_limit::EndpointRateLimiter::from_config(
+                &config.rate_limit,
+            )),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(tower::limit::ConcurrencyLimitLayer::new(128));
 
     // HSTS: add Strict-Transport-Security when running behind TLS (not dev, not plaintext).
@@ -346,6 +352,14 @@ pub async fn serve_router(
         app
     };
 
+    let rl = &config.rate_limit;
+    tracing::info!(
+        read = rl.read_per_sec,
+        write = rl.write_per_sec,
+        query = rl.query_per_sec,
+        data = rl.data_per_sec,
+        "per-endpoint rate limits (req/s, 0 = disabled)"
+    );
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(addr = %config.listen_addr, "HTTP listener started");
     let serve = axum::serve(listener, app);

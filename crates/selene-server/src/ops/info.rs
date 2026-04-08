@@ -10,13 +10,13 @@ pub fn server_info(state: &ServerState) -> serde_json::Value {
         "profile": state.config.profile.to_string(),
         "dev_mode": state.config.dev_mode,
         "features": {
-            "federation": cfg!(feature = "federation"),
-            "vector": cfg!(feature = "vector"),
-            "search": cfg!(feature = "search"),
+            "federation": true,
+            "vector": true,
+            "search": true,
             "temporal": true,
-            "rdf": cfg!(feature = "rdf"),
-            "rdf_sparql": cfg!(feature = "rdf-sparql"),
-            "cloud_storage": cfg!(feature = "cloud-storage"),
+            "rdf": true,
+            "rdf_sparql": true,
+            "cloud_storage": true,
         }
     })
 }

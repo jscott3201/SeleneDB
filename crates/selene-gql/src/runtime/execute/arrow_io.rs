@@ -18,6 +18,20 @@ pub(super) fn apply_set_op(
 ) -> GqlResult {
     use crate::ast::statement::SetOp;
 
+    // Validate column counts match (UNION requires same arity per SQL/GQL spec).
+    let left_cols = left.batches.first().map_or(0, |b| b.num_columns());
+    let right_cols = right.batches.first().map_or(0, |b| b.num_columns());
+    if left_cols > 0 && right_cols > 0 && left_cols != right_cols {
+        let mut err_result = GqlResult::empty();
+        err_result.status = crate::types::error::GqlStatus {
+            code: crate::types::error::GqlStatusCode::SyntaxError,
+            message: format!(
+                "set operation requires equal column counts: left has {left_cols}, right has {right_cols}"
+            ),
+        };
+        return err_result;
+    }
+
     let schema = left
         .batches
         .first()
@@ -213,7 +227,6 @@ pub(super) fn materialize_to_arrow(
         .collect();
 
     // Parallel path: build batches concurrently when above threshold
-    #[cfg(feature = "rayon")]
     if bindings.len() >= crate::parallel::parallel_threshold() {
         use rayon::prelude::*;
         let batches: Result<Vec<_>, GqlError> = bindings

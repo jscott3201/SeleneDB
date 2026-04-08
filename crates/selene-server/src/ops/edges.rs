@@ -123,48 +123,89 @@ pub fn delete_edge(state: &ServerState, auth: &AuthContext, id: u64) -> Result<(
     Ok(())
 }
 
-/// Get edges connected to a node (both incoming and outgoing) with pagination.
+/// Get edges connected to a node with optional direction and label filtering.
 ///
 /// Uses the adjacency index for O(degree) lookup instead of scanning all edges.
-/// Returns `total` as the unfiltered count, and `edges` as the paginated slice.
+/// Returns `total` as the filtered count, and `edges` as the paginated slice.
+/// When `direction` is "outgoing" or "incoming", only that direction is scanned.
+/// When `label_filter` is non-empty, only edges with matching labels are returned.
 pub fn node_edges(
     state: &ServerState,
     auth: &AuthContext,
     node_id: u64,
+    direction: Option<&str>,
+    label_filter: Option<&[String]>,
     offset: usize,
     limit: usize,
-) -> Result<EdgeListResult, OpError> {
+) -> Result<DirectedEdgeResult, OpError> {
     let auth = super::refresh_scope_if_stale(state, auth);
     require_in_scope(&auth, NodeId(node_id))?;
 
-    let (edges, total, node_exists) = state.graph.read(|g| {
+    let include_outgoing = !matches!(direction, Some("incoming"));
+    let include_incoming = !matches!(direction, Some("outgoing"));
+
+    let (outgoing, incoming, node_exists) = state.graph.read(|g| {
         if !g.contains_node(NodeId(node_id)) {
-            return (vec![], 0u64, false);
+            return (vec![], vec![], false);
         }
+
+        let label_matches = |e: &selene_graph::EdgeRef<'_>| -> bool {
+            match label_filter {
+                Some(labels) if !labels.is_empty() => labels.iter().any(|l| e.label.as_str() == l),
+                _ => true,
+            }
+        };
 
         let mut seen = std::collections::HashSet::new();
-        let mut all_edges = Vec::new();
+        let mut out_edges = Vec::new();
+        let mut in_edges = Vec::new();
 
-        for &eid in g.outgoing(NodeId(node_id)) {
-            if seen.insert(eid)
-                && let Some(e) = g.get_edge(eid)
-                && (auth.is_admin() || (auth.in_scope(e.source) && auth.in_scope(e.target)))
-            {
-                all_edges.push(edge_to_dto(e));
+        if include_outgoing {
+            for &eid in g.outgoing(NodeId(node_id)) {
+                if seen.insert(eid)
+                    && let Some(e) = g.get_edge(eid)
+                    && label_matches(&e)
+                    && (auth.is_admin() || (auth.in_scope(e.source) && auth.in_scope(e.target)))
+                {
+                    // Include target node name for agent convenience
+                    let target_name = g
+                        .get_node(e.target)
+                        .and_then(|n| n.properties.get(IStr::new("name")))
+                        .and_then(|v| match v {
+                            selene_core::Value::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                    out_edges.push(DirectedEdge {
+                        edge: edge_to_dto(e),
+                        neighbor_name: target_name,
+                    });
+                }
             }
         }
-        for &eid in g.incoming(NodeId(node_id)) {
-            if seen.insert(eid)
-                && let Some(e) = g.get_edge(eid)
-                && (auth.is_admin() || (auth.in_scope(e.source) && auth.in_scope(e.target)))
-            {
-                all_edges.push(edge_to_dto(e));
+
+        if include_incoming {
+            for &eid in g.incoming(NodeId(node_id)) {
+                if seen.insert(eid)
+                    && let Some(e) = g.get_edge(eid)
+                    && label_matches(&e)
+                    && (auth.is_admin() || (auth.in_scope(e.source) && auth.in_scope(e.target)))
+                {
+                    let source_name = g
+                        .get_node(e.source)
+                        .and_then(|n| n.properties.get(IStr::new("name")))
+                        .and_then(|v| match v {
+                            selene_core::Value::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                    in_edges.push(DirectedEdge {
+                        edge: edge_to_dto(e),
+                        neighbor_name: source_name,
+                    });
+                }
             }
         }
 
-        let total = all_edges.len() as u64;
-        let edges = all_edges.into_iter().skip(offset).take(limit).collect();
-        (edges, total, true)
+        (out_edges, in_edges, true)
     });
 
     if !node_exists {
@@ -174,7 +215,39 @@ pub fn node_edges(
         });
     }
 
-    Ok(EdgeListResult { edges, total })
+    let total = (outgoing.len() + incoming.len()) as u64;
+    let outgoing_page: Vec<_> = outgoing.into_iter().skip(offset).take(limit).collect();
+    let remaining = limit.saturating_sub(outgoing_page.len());
+    let incoming_skip =
+        offset.saturating_sub(outgoing_page.len() + offset.min(outgoing_page.len()));
+    let incoming_page: Vec<_> = incoming
+        .into_iter()
+        .skip(incoming_skip)
+        .take(remaining)
+        .collect();
+
+    Ok(DirectedEdgeResult {
+        outgoing: outgoing_page,
+        incoming: incoming_page,
+        total,
+    })
+}
+
+/// A single edge with the neighbor node's name for agent convenience.
+#[derive(serde::Serialize)]
+pub struct DirectedEdge {
+    #[serde(flatten)]
+    pub edge: EdgeDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neighbor_name: Option<String>,
+}
+
+/// Result of a directed node_edges query.
+#[derive(serde::Serialize)]
+pub struct DirectedEdgeResult {
+    pub outgoing: Vec<DirectedEdge>,
+    pub incoming: Vec<DirectedEdge>,
+    pub total: u64,
 }
 
 pub fn list_edges(

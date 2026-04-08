@@ -4,6 +4,7 @@
 //! time-series data, GQL queries, schema management, and graph algorithms.
 
 mod completions;
+pub(crate) mod format;
 pub(crate) mod oauth;
 pub(super) mod params;
 mod prompts;
@@ -16,11 +17,13 @@ use std::sync::Arc;
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::tool::{ToolCallContext, ToolRouter};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, CompleteRequestParams, CompleteResult, ErrorCode,
-    GetPromptRequestParams, GetPromptResult, Implementation, ListPromptsResult, ListToolsResult,
-    LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams,
-    ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, SetLevelRequestParams,
-    SubscribeRequestParams, UnsubscribeRequestParams,
+    CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
+    CompleteRequestParams, CompleteResult, CreateTaskResult, ErrorCode, GetPromptRequestParams,
+    GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult, GetTaskResult, GetTaskResultParams,
+    Implementation, ListPromptsResult, ListTasksResult, ListToolsResult, LoggingLevel,
+    LoggingMessageNotificationParam, PaginatedRequestParams, ResourceUpdatedNotificationParam,
+    ServerCapabilities, ServerInfo, SetLevelRequestParams, SubscribeRequestParams, Task,
+    TaskStatus, UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, Peer, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, prompt_handler};
@@ -110,6 +113,31 @@ impl crate::service_registry::Service for CustomToolRegistry {
     }
 }
 
+// ── Task Store ──────────────────────────────────────────────────────
+
+/// In-flight or completed task entry.
+struct TaskEntry {
+    task: Task,
+    result: Option<CallToolResult>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+/// Per-session store for async tasks.
+#[derive(Clone, Default)]
+struct TaskStore(Arc<tokio::sync::Mutex<std::collections::HashMap<String, TaskEntry>>>);
+
+impl TaskStore {
+    fn now_iso() -> String {
+        // Simple ISO 8601 timestamp without chrono dependency.
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = d.as_secs();
+        // Format as seconds since epoch (compliant, parseable)
+        format!("{secs}")
+    }
+}
+
 // ── MCP Tool Server ──────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -130,6 +158,11 @@ pub struct SeleneTools {
     subscribed_uris: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Embedder-registered custom tools (checked after the static router).
     custom_tools: Arc<Vec<Box<dyn CustomMcpTool>>>,
+    /// Progress token for the current in-flight tool call.
+    /// Set in `call_tool` from `request.meta`, cleared after dispatch.
+    progress_token: Arc<tokio::sync::Mutex<Option<rmcp::model::ProgressToken>>>,
+    /// Per-session async task store for task lifecycle (enqueue/list/get/cancel).
+    task_store: TaskStore,
 }
 
 /// Return the auth context for the current MCP session.
@@ -140,6 +173,32 @@ pub struct SeleneTools {
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn mcp_auth(tools: &SeleneTools) -> Result<AuthContext, McpError> {
     Ok(tools.auth.clone())
+}
+
+impl SeleneTools {
+    /// Send a progress notification for the current tool call.
+    /// No-op if the client did not send a `progressToken` in `_meta`.
+    pub(crate) async fn send_progress(
+        &self,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<&str>,
+    ) {
+        let token = self.progress_token.lock().await.clone();
+        let Some(token) = token else { return };
+        let peer_guard = self.peer.lock().await;
+        let Some(peer) = peer_guard.as_ref() else {
+            return;
+        };
+        let mut param = rmcp::model::ProgressNotificationParam::new(token, progress);
+        if let Some(t) = total {
+            param = param.with_total(t);
+        }
+        if let Some(m) = message {
+            param = param.with_message(m);
+        }
+        let _ = peer.notify_progress(param).await;
+    }
 }
 
 pub(crate) fn op_err(e: ops::OpError) -> McpError {
@@ -184,6 +243,8 @@ impl SeleneTools {
             peer: Arc::new(tokio::sync::Mutex::new(None)),
             subscribed_uris: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             custom_tools,
+            progress_token: Arc::new(tokio::sync::Mutex::new(None)),
+            task_store: TaskStore::default(),
         }
     }
 
@@ -254,6 +315,7 @@ impl rmcp::ServerHandler for SeleneTools {
             .enable_prompts()
             .enable_logging()
             .enable_completions()
+            .enable_tasks()
             .build();
 
         ServerInfo::new(capabilities)
@@ -290,8 +352,11 @@ impl rmcp::ServerHandler for SeleneTools {
             let ct = context.ct.clone();
             let tool_name = request.name.clone();
             let tool_args = request.arguments.clone();
+            // Extract progress token from _meta before the request is consumed.
+            let progress_token = request.meta.as_ref().and_then(|m| m.get_progress_token());
+            *self.progress_token.lock().await = progress_token;
             let tool_context = ToolCallContext::new(self, request, context);
-            tokio::select! {
+            let result = tokio::select! {
                 result = self.tool_router.call(tool_context) => {
                     match result {
                         // Static router handled it.
@@ -312,7 +377,9 @@ impl rmcp::ServerHandler for SeleneTools {
                     message: "request cancelled by client".into(),
                     data: None,
                 }),
-            }
+            };
+            *self.progress_token.lock().await = None;
+            result
         }
     }
 
@@ -431,6 +498,145 @@ impl rmcp::ServerHandler for SeleneTools {
                     }
                 }
             });
+        }
+    }
+
+    // ── Task lifecycle ──────────────────────────────────────────────
+
+    fn enqueue_task(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CreateTaskResult, McpError>> + Send + '_ {
+        async move {
+            static TASK_COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let task_id = format!(
+                "task-{}",
+                TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let now = TaskStore::now_iso();
+            let cancel = tokio_util::sync::CancellationToken::new();
+
+            let task = Task::new(task_id.clone(), TaskStatus::Working, now.clone(), now);
+
+            // Store task entry before spawning
+            {
+                let mut store = self.task_store.0.lock().await;
+                store.insert(
+                    task_id.clone(),
+                    TaskEntry {
+                        task: task.clone(),
+                        result: None,
+                        cancel: cancel.clone(),
+                    },
+                );
+            }
+
+            // Spawn tool execution in background
+            let tools = self.clone();
+            let tid = task_id.clone();
+            let ct = cancel.clone();
+            tokio::spawn(async move {
+                let outcome = tokio::select! {
+                    r = tools.call_tool(request, context) => r,
+                    _ = ct.cancelled() => Err(McpError::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        "task cancelled",
+                        None,
+                    )),
+                };
+
+                let mut store = tools.task_store.0.lock().await;
+                if let Some(entry) = store.get_mut(&tid) {
+                    let now = TaskStore::now_iso();
+                    if let Ok(result) = outcome {
+                        entry.task.status = TaskStatus::Completed;
+                        entry.task.last_updated_at = now;
+                        entry.result = Some(result);
+                    } else {
+                        entry.task.status = if ct.is_cancelled() {
+                            TaskStatus::Cancelled
+                        } else {
+                            TaskStatus::Failed
+                        };
+                        entry.task.last_updated_at = now;
+                    }
+                }
+            });
+
+            Ok(CreateTaskResult::new(task))
+        }
+    }
+
+    fn list_tasks(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListTasksResult, McpError>> + Send + '_ {
+        async move {
+            let store = self.task_store.0.lock().await;
+            let tasks: Vec<Task> = store.values().map(|e| e.task.clone()).collect();
+            Ok(ListTasksResult::new(tasks))
+        }
+    }
+
+    fn get_task_info(
+        &self,
+        request: GetTaskInfoParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetTaskResult, McpError>> + Send + '_ {
+        async move {
+            let store = self.task_store.0.lock().await;
+            let entry = store.get(&request.task_id).ok_or_else(|| {
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
+            })?;
+            Ok(GetTaskResult {
+                meta: None,
+                task: entry.task.clone(),
+            })
+        }
+    }
+
+    fn get_task_result(
+        &self,
+        request: GetTaskResultParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetTaskPayloadResult, McpError>> + Send + '_ {
+        async move {
+            let store = self.task_store.0.lock().await;
+            let entry = store.get(&request.task_id).ok_or_else(|| {
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
+            })?;
+            let result = entry.result.as_ref().ok_or_else(|| {
+                McpError::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    "task result not yet available",
+                    None,
+                )
+            })?;
+            let value = serde_json::to_value(result).unwrap_or_default();
+            Ok(GetTaskPayloadResult::new(value))
+        }
+    }
+
+    fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CancelTaskResult, McpError>> + Send + '_ {
+        async move {
+            let mut store = self.task_store.0.lock().await;
+            let entry = store.get_mut(&request.task_id).ok_or_else(|| {
+                McpError::invalid_params(format!("task not found: {}", request.task_id), None)
+            })?;
+            entry.cancel.cancel();
+            entry.task.status = TaskStatus::Cancelled;
+            entry.task.last_updated_at = TaskStore::now_iso();
+            Ok(CancelTaskResult {
+                meta: None,
+                task: entry.task.clone(),
+            })
         }
     }
 

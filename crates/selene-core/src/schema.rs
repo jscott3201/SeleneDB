@@ -191,7 +191,9 @@ pub struct NodeSchema {
     /// all property definitions from the parent (resolved at registration time).
     pub parent: Option<Arc<str>>,
     pub properties: Vec<PropertyDef>,
+    #[serde(default)]
     pub valid_edge_labels: Vec<Arc<str>>,
+    #[serde(default)]
     pub description: String,
     /// Application-defined annotations on this type definition.
     /// Selene stores and persists these but never interprets them.
@@ -215,10 +217,13 @@ pub struct NodeSchema {
 pub struct EdgeSchema {
     pub label: Arc<str>,
     pub properties: Vec<PropertyDef>,
+    #[serde(default)]
     pub description: String,
     /// If non-empty, source node must carry at least one of these labels.
+    #[serde(default)]
     pub source_labels: Vec<Arc<str>>,
     /// If non-empty, target node must carry at least one of these labels.
+    #[serde(default)]
     pub target_labels: Vec<Arc<str>>,
     /// Application-defined annotations on this type definition.
     /// Selene stores and persists these but never interprets them.
@@ -255,6 +260,7 @@ pub struct PropertyDef {
     pub required: bool,
     #[serde(default)]
     pub default: Option<Value>,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub indexed: bool,

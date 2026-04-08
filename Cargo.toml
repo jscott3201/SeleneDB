@@ -88,7 +88,7 @@ toml = "1"
 
 # Async utilities
 futures = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

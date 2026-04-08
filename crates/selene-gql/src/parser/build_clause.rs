@@ -84,24 +84,16 @@ fn build_order_term(pair: Pair<'_, Rule>) -> Result<OrderTerm, GqlError> {
 
 // ── GROUP BY ──────────────────────────────────────────────────────
 
-/// Parse a GROUP BY clause into a list of variable names.
+/// Parse a GROUP BY clause into a list of expressions.
 ///
 /// Shared by `build_return`, `build_with`, and `build_select`.
-pub(in crate::parser) fn build_group_by(pair: Pair<'_, Rule>) -> Result<Vec<IStr>, GqlError> {
+pub(in crate::parser) fn build_group_by(pair: Pair<'_, Rule>) -> Result<Vec<Expr>, GqlError> {
     let mut keys = Vec::new();
     for gb_inner in pair.into_inner() {
         match gb_inner.as_rule() {
-            Rule::ident => keys.push(intern_var(gb_inner)),
+            Rule::ident => keys.push(Expr::Var(intern_var(gb_inner))),
             Rule::group_by_item => {
-                let expr = build_expr(first_inner(gb_inner)?)?;
-                match &expr {
-                    Expr::Var(name) => keys.push(*name),
-                    _ => {
-                        return Err(GqlError::parse_error(
-                            "GROUP BY currently supports variable names only, not expressions",
-                        ));
-                    }
-                }
+                keys.push(build_expr(first_inner(gb_inner)?)?);
             }
             _ => {}
         }
@@ -215,7 +207,7 @@ pub(in crate::parser) fn build_projection(pair: Pair<'_, Rule>) -> Result<Projec
             Rule::alias => {
                 let ident_pair = inner
                     .into_inner()
-                    .find(|p| p.as_rule() == Rule::ident)
+                    .find(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::prop_ident)
                     .ok_or_else(|| GqlError::parse_error("expected ident in alias"))?;
                 alias = Some(intern_var(ident_pair));
             }
@@ -239,6 +231,8 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
     let mut name = None;
     let mut args = Vec::new();
     let mut yields = Vec::new();
+    let mut yield_star = false;
+    let mut filter = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -254,9 +248,20 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
             Rule::yield_clause => {
                 for yi in inner.into_inner() {
                     if yi.as_rule() == Rule::yield_item {
-                        yields.push(build_yield_item(yi)?);
+                        if yi.as_str().trim() == "*" {
+                            yield_star = true;
+                        } else {
+                            yields.push(build_yield_item(yi)?);
+                        }
                     }
                 }
+            }
+            Rule::yield_filter => {
+                let expr_pair = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::expr || p.as_rule() == Rule::or_expr)
+                    .ok_or_else(|| GqlError::parse_error("expected expression in YIELD filter"))?;
+                filter = Some(build_expr(expr_pair)?);
             }
             _ => {}
         }
@@ -266,6 +271,8 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
         name: name.ok_or_else(|| GqlError::parse_error("expected procedure name"))?,
         args,
         yields,
+        yield_star,
+        filter,
     })
 }
 
@@ -275,11 +282,13 @@ pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldI
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::ident if name.is_none() => name = Some(intern_var(inner)),
+            Rule::ident | Rule::prop_ident if name.is_none() => {
+                name = Some(intern_var(inner));
+            }
             Rule::alias => {
                 let ident_pair = inner
                     .into_inner()
-                    .find(|p| p.as_rule() == Rule::ident)
+                    .find(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::prop_ident)
                     .ok_or_else(|| {
                         GqlError::parse_error(
                             "unexpected parser state: missing ident in YIELD alias",
@@ -384,6 +393,7 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
         // are all handled directly in build_mutation_pipeline (multi-item expansion).
         // Only merge_op and fallback cases reach this function.
         Rule::merge_op => {
+            let mut merge_var: Option<IStr> = None;
             let mut labels = Vec::new();
             let mut properties = Vec::new();
             let mut on_create = Vec::new();
@@ -394,6 +404,9 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                     Rule::node_pattern => {
                         for np in inner.into_inner() {
                             match np.as_rule() {
+                                Rule::node_var => {
+                                    merge_var = Some(intern_var(first_inner(np)?));
+                                }
                                 Rule::label_expr => {
                                     if let Ok(le) = build_label_expr(np) {
                                         collect_label_names(&le, &mut labels);
@@ -453,6 +466,7 @@ fn build_mutation_op(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                 }
             }
             Ok(MutationOp::Merge {
+                var: merge_var,
                 labels,
                 properties,
                 on_create,
@@ -535,15 +549,16 @@ fn build_insert_pattern(pair: Pair<'_, Rule>) -> Result<MutationOp, GqlError> {
                     for p in elem.into_inner() {
                         match p.as_rule() {
                             Rule::ident => var = Some(intern_var(p)),
-                            Rule::insert_label_set => {
-                                for lbl in p.into_inner() {
-                                    if lbl.as_rule() == Rule::ident {
-                                        labels.push(intern_name(lbl));
-                                    }
-                                }
-                            }
-                            Rule::label_expr => {
-                                if let Ok(le) = build_label_expr(p) {
+                            Rule::insert_label_set | Rule::label_expr => {
+                                // insert_label_set wraps label_expr; unwrap if needed
+                                let le_pair = if p.as_rule() == Rule::insert_label_set {
+                                    p.into_inner().find(|c| c.as_rule() == Rule::label_expr)
+                                } else {
+                                    Some(p)
+                                };
+                                if let Some(lp) = le_pair
+                                    && let Ok(le) = build_label_expr(lp)
+                                {
                                     collect_label_names(&le, &mut labels);
                                 }
                             }

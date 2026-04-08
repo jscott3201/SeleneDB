@@ -67,7 +67,11 @@ impl GqlOptimizerRule for IndexOrderRule {
             return Ok(Transformed::no(plan));
         }
         let term = &terms[0];
-        let limit = *limit as usize;
+        // Index order optimization only works with literal limits (not parameters)
+        let crate::ast::statement::LimitValue::Literal(limit_n) = limit else {
+            return Ok(Transformed::no(plan));
+        };
+        let limit = *limit_n as usize;
 
         // Check if sort expression is var.property
         let Some(sort_key) = extract_simple_property(&term.expr, scan_var) else {

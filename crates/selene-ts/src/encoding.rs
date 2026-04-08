@@ -1231,7 +1231,7 @@ mod tests {
 
     #[test]
     fn rle_single_sample() {
-        let samples = vec![sample(1_000_000_000, 3.14)];
+        let samples = vec![sample(1_000_000_000, 3.15)];
         let block = TsBlock::encode(&samples, ValueEncoding::Rle);
         let decoded = block.decode_all();
         assert_eq!(decoded, samples);

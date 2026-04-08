@@ -232,18 +232,23 @@ pub(super) fn eval_property_exists(
 pub(super) fn eval_exists(
     pattern: &crate::ast::pattern::MatchClause,
     negated: bool,
+    binding: &Binding,
     ctx: &EvalContext<'_>,
 ) -> Result<GqlValue, GqlError> {
     let inner_ops = plan_subquery_cached(pattern, ctx.graph)?;
-    let results = crate::runtime::execute::execute_pattern_ops_with_max(
+    let results = crate::runtime::execute::execute_pattern_ops_with_max_and_ctx(
         &inner_ops,
         ctx.graph,
         ctx.scope,
         None,
+        Some(binding),
         None,
         None,
-        Some(1),
+        ctx,
     )?;
+    // Apply the inner MATCH's WHERE clause if present (plan_subquery_cached
+    // only returns pattern ops and does not convert WHERE to a filter).
+    let results = filter_subquery_results(results, pattern, ctx)?;
     let exists = !results.is_empty();
     Ok(GqlValue::Bool(if negated { !exists } else { exists }))
 }
@@ -467,10 +472,11 @@ fn execute_subquery_plan(
     ctx: &EvalContext<'_>,
 ) -> Result<Vec<Binding>, GqlError> {
     let plan = crate::planner::plan_query(pipeline, ctx.graph)?;
-    let mut bindings = crate::runtime::execute::execute_pattern_ops_public(
+    let mut bindings = crate::runtime::execute::execute_pattern_ops_with_eval_ctx(
         &plan.pattern_ops,
         ctx.graph,
         ctx.scope,
+        ctx,
     )?;
     for op in &plan.pipeline {
         bindings = crate::pipeline::stages::execute_pipeline_op(op, bindings, ctx)?;
@@ -588,10 +594,36 @@ pub(super) fn eval_count_subquery(
     ctx: &EvalContext<'_>,
 ) -> Result<GqlValue, GqlError> {
     let inner_ops = plan_subquery_cached(pattern, ctx.graph)?;
-    let results = crate::runtime::execute::execute_pattern_ops_correlated(
-        &inner_ops, ctx.graph, ctx.scope, binding,
+    let results = crate::runtime::execute::execute_pattern_ops_correlated_with_ctx(
+        &inner_ops, ctx.graph, ctx.scope, binding, ctx,
     )?;
+    // Apply the inner MATCH's WHERE clause if present.
+    let results = filter_subquery_results(results, pattern, ctx)?;
     Ok(GqlValue::Int(results.len() as i64))
+}
+
+/// Apply the WHERE clause from an inner MATCH to subquery results.
+///
+/// `plan_subquery_cached` only returns pattern ops and does not convert the
+/// MatchClause's `where_clause` into a pipeline filter. This helper applies
+/// the WHERE predicate as a post-filter on the returned bindings.
+fn filter_subquery_results(
+    results: Vec<Binding>,
+    pattern: &crate::ast::pattern::MatchClause,
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<Binding>, GqlError> {
+    let Some(ref predicate) = pattern.where_clause else {
+        return Ok(results);
+    };
+    results
+        .into_iter()
+        .filter_map(|b| match eval_expr_ctx(predicate, &b, ctx) {
+            Ok(GqlValue::Bool(true)) => Some(Ok(b)),
+            Ok(GqlValue::Bool(false) | GqlValue::Null) => None,
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect()
 }
 
 /// Cache subquery plans by MatchClause pointer identity + graph generation.

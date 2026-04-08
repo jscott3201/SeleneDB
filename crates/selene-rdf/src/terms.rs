@@ -7,10 +7,8 @@
 use std::sync::Arc;
 
 use oxrdf::{Literal, NamedNode, vocab::xsd};
-#[cfg(feature = "sparql")]
 use selene_core::interner::IStr;
 use selene_core::value::{Value, epoch_days_to_ymd};
-#[cfg(feature = "sparql")]
 use selene_core::{EdgeId, NodeId};
 
 // ---------------------------------------------------------------------------
@@ -176,7 +174,6 @@ pub fn literal_to_value(literal: &Literal) -> Value {
 // SeleneRdfTerm (sparql feature only)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sparql")]
 /// Internal RDF term representation for the Selene RDF layer.
 ///
 /// Bridges Selene's typed entity model with RDF's term model. Used by
@@ -200,7 +197,6 @@ pub enum SeleneRdfTerm {
     OntologyTerm(oxrdf::Term),
 }
 
-#[cfg(feature = "sparql")]
 impl PartialEq for SeleneRdfTerm {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -216,10 +212,8 @@ impl PartialEq for SeleneRdfTerm {
     }
 }
 
-#[cfg(feature = "sparql")]
 impl Eq for SeleneRdfTerm {}
 
-#[cfg(feature = "sparql")]
 impl std::hash::Hash for SeleneRdfTerm {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -238,7 +232,6 @@ impl std::hash::Hash for SeleneRdfTerm {
     }
 }
 
-#[cfg(feature = "sparql")]
 impl SeleneRdfTerm {
     /// Convert an `oxrdf::Term` (e.g. from a SPARQL query) into a
     /// `SeleneRdfTerm` that references Selene-native structures.
@@ -335,7 +328,6 @@ impl SeleneRdfTerm {
 // RdfPredicate (sparql feature only)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sparql")]
 /// Predicate types used in Selene RDF triple generation.
 ///
 /// Separates well-known predicates (rdf:type, SOSA terms) from
@@ -715,7 +707,6 @@ fn format_double(f: f64) -> String {
 // Value equality and hashing helpers (for SeleneRdfTerm)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sparql")]
 /// Bitwise equality for Value, handling f64 and f32 NaN correctly.
 ///
 /// Uses `to_bits()` for float comparison so NaN == NaN (same bit pattern).
@@ -732,7 +723,6 @@ fn value_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-#[cfg(feature = "sparql")]
 /// Hash a Value for use in SeleneRdfTerm, handling f64/f32 via to_bits().
 fn value_hash<H: std::hash::Hasher>(v: &Value, state: &mut H) {
     use std::hash::Hash;
@@ -772,7 +762,6 @@ fn value_hash<H: std::hash::Hasher>(v: &Value, state: &mut H) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "sparql")]
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -820,11 +809,11 @@ mod tests {
 
     #[test]
     fn float_to_literal() {
-        let lit = value_to_literal(&Value::Float(3.14)).unwrap();
+        let lit = value_to_literal(&Value::Float(3.15)).unwrap();
         assert_eq!(lit.datatype(), xsd::DOUBLE);
         // Should parse back to the same value.
         let parsed: f64 = lit.value().parse().unwrap();
-        assert!((parsed - 3.14).abs() < 1e-10);
+        assert!((parsed - 3.15).abs() < 1e-10);
     }
 
     #[test]
@@ -956,11 +945,11 @@ mod tests {
 
     #[test]
     fn round_trip_float() {
-        let orig = Value::Float(3.14);
+        let orig = Value::Float(3.15);
         let lit = value_to_literal(&orig).unwrap();
         let back = literal_to_value(&lit);
         if let Value::Float(f) = back {
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float, got {back:?}");
         }
@@ -1044,10 +1033,10 @@ mod tests {
 
     #[test]
     fn xsd_decimal_maps_to_float() {
-        let lit = Literal::new_typed_literal("3.14", xsd::DECIMAL);
+        let lit = Literal::new_typed_literal("3.15", xsd::DECIMAL);
         let val = literal_to_value(&lit);
         if let Value::Float(f) = val {
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float, got {val:?}");
         }
@@ -1055,7 +1044,6 @@ mod tests {
 
     // --- SeleneRdfTerm (sparql feature only) ---
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn selene_rdf_term_eq_node() {
         let a = SeleneRdfTerm::Node(NodeId(1));
@@ -1065,7 +1053,6 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn selene_rdf_term_eq_literal_float() {
         // NaN == NaN should work for SeleneRdfTerm.
@@ -1074,7 +1061,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn selene_rdf_term_hash_in_set() {
         let mut set = HashSet::new();
@@ -1084,7 +1070,6 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn selene_rdf_term_hash_literal_float() {
         let mut set = HashSet::new();
@@ -1093,7 +1078,6 @@ mod tests {
         assert_eq!(set.len(), 1);
     }
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn selene_rdf_term_different_variants_not_equal() {
         let a = SeleneRdfTerm::Node(NodeId(1));
@@ -1103,7 +1087,6 @@ mod tests {
 
     // --- RdfPredicate (sparql feature only) ---
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn rdf_predicate_eq() {
         assert_eq!(RdfPredicate::RdfType, RdfPredicate::RdfType);
@@ -1114,7 +1097,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[cfg(feature = "sparql")]
     #[test]
     fn rdf_predicate_hash_in_set() {
         let mut set = HashSet::new();

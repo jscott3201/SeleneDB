@@ -1,7 +1,5 @@
 //! Integration test: full export pipeline round-trip with cloud adapter.
 
-#![cfg(feature = "cloud-storage")]
-
 use std::path::Path;
 use std::sync::Arc;
 

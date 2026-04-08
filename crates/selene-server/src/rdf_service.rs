@@ -94,35 +94,26 @@ impl selene_gql::runtime::procedures::rdf::RdfProvider for ServerRdfProvider {
     }
 
     fn sparql(&self, query: &str) -> Result<String, String> {
-        #[cfg(feature = "rdf-sparql")]
-        {
-            let snap = self.graph.load_snapshot();
-            let csr = crate::bootstrap::get_or_build_csr(&self.csr_cache, &snap);
-            let ontology_guard = self.ontology.read();
-            let ontology_ref = if ontology_guard.is_empty() {
-                None
-            } else {
-                Some(&*ontology_guard)
-            };
+        let snap = self.graph.load_snapshot();
+        let csr = crate::bootstrap::get_or_build_csr(&self.csr_cache, &snap);
+        let ontology_guard = self.ontology.read();
+        let ontology_ref = if ontology_guard.is_empty() {
+            None
+        } else {
+            Some(&*ontology_guard)
+        };
 
-            let (bytes, _content_type) = selene_rdf::sparql::execute_sparql(
-                &snap,
-                &csr,
-                &self.namespace,
-                ontology_ref,
-                query,
-                selene_rdf::sparql::SparqlResultFormat::Json,
-            )
-            .map_err(|e| e.to_string())?;
+        let (bytes, _content_type) = selene_rdf::sparql::execute_sparql(
+            &snap,
+            &csr,
+            &self.namespace,
+            ontology_ref,
+            query,
+            selene_rdf::sparql::SparqlResultFormat::Json,
+        )
+        .map_err(|e| e.to_string())?;
 
-            String::from_utf8(bytes).map_err(|e| format!("SPARQL result is not valid UTF-8: {e}"))
-        }
-
-        #[cfg(not(feature = "rdf-sparql"))]
-        {
-            let _ = query;
-            Err("SPARQL not available (compile with --features rdf-sparql)".into())
-        }
+        String::from_utf8(bytes).map_err(|e| format!("SPARQL result is not valid UTF-8: {e}"))
     }
 }
 

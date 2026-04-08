@@ -195,8 +195,9 @@ nulls_order   = { ^"NULLS" ~ (^"FIRST" | ^"LAST") }
 
 // ── OFFSET / LIMIT ─────────────────────────────────────────────────
 
-offset_stmt = { ^"OFFSET" ~ uint }
-limit_stmt  = { ^"LIMIT" ~ uint }
+offset_stmt   = { (^"OFFSET" | ^"SKIP") ~ limit_value }
+limit_stmt    = { ^"LIMIT" ~ limit_value }
+limit_value   = { param_ref | uint }
 
 // ── RETURN ─────────────────────────────────────────────────────────
 
@@ -212,7 +213,7 @@ distinct_kw = { ^"DISTINCT" }
 
 projection_list = { projection ~ ("," ~ projection)* }
 projection      = { expr ~ alias? }
-alias           = { ^"AS" ~ ident }
+alias           = { ^"AS" ~ prop_ident }
 
 group_by_clause = { group_by_kw ~ group_by_item ~ ("," ~ group_by_item)* }
 group_by_kw     = { ^"GROUP" ~ ^"BY" }
@@ -225,15 +226,16 @@ group_by_item   = { expr }
 
 call_stmt      = { ^"CALL" ~ (call_subquery | call_procedure) }
 call_subquery  = { "{" ~ query_pipeline ~ "}" }
-call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause }
-qualified_name = { ident ~ ("." ~ ident)* }
+call_procedure = { qualified_name ~ "(" ~ arg_list? ~ ")" ~ yield_clause ~ yield_filter? }
+qualified_name = { ident ~ ("." ~ prop_ident)* }
 arg_list       = { expr ~ ("," ~ expr)* }
 yield_clause   = { ^"YIELD" ~ yield_item ~ ("," ~ yield_item)* }
-yield_item     = { ident ~ alias? }
+yield_item     = { ("*" | prop_ident) ~ alias? }
+yield_filter   = { (^"WHERE" | ^"FILTER" ~ ^"WHERE"?) ~ expr }
 
 // ── Mutations ──────────────────────────────────────────────────────
 
-mutation_pipeline = { (match_stmt ~ filter_stmt?)? ~ mutation_op+ ~ (return_stmt | finish_stmt)? }
+mutation_pipeline = { (match_stmt | filter_stmt)* ~ mutation_op+ ~ (return_stmt | finish_stmt)? }
 finish_stmt       = { ^"FINISH" }
 mutation_op       = { insert_op | merge_op | set_stmt | remove_stmt | detach_delete_op | delete_op }
 
@@ -248,8 +250,8 @@ insert_op = { ^"INSERT" ~ insert_graph_pattern }
 insert_graph_pattern = { insert_path_pattern ~ ("," ~ insert_path_pattern)* }
 insert_path_pattern = { insert_node_pattern ~ (insert_edge_pattern ~ insert_node_pattern)* }
 insert_node_pattern = { "(" ~ ident? ~ insert_label_set? ~ property_map? ~ ")" }
-// INSERT uses AND-only label set (spec §16.5), not full label_expr (no OR/NOT/wildcard)
-insert_label_set = { ":" ~ ident ~ ("&" ~ ":" ~ ident)* }
+// INSERT label set: reuses full label_expr (AND-only semantics enforced by executor)
+insert_label_set = { label_expr }
 insert_edge_pattern = { insert_edge_right | insert_edge_left }
 insert_edge_right = { "-" ~ "[" ~ edge_var? ~ label_expr? ~ property_map? ~ "]" ~ "->" }
 insert_edge_left  = { "<-" ~ "[" ~ edge_var? ~ label_expr? ~ property_map? ~ "]" ~ "-" }
@@ -390,7 +392,8 @@ trim_spec = { ^"LEADING" | ^"TRAILING" | ^"BOTH" }
 trim_char = { expr }
 
 // Record constructor (spec §20.18): RECORD {name: expr, ...}
-record_constructor = { ^"RECORD" ~ "{" ~ record_field ~ ("," ~ record_field)* ~ "}" }
+// The RECORD keyword is optional: both `RECORD {a: 1}` and `{a: 1}` are valid.
+record_constructor = { ^"RECORD"? ~ "{" ~ record_field ~ ("," ~ record_field)* ~ "}" }
 record_field = { prop_ident ~ ":" ~ expr }
 
 // Aggregates with optional DISTINCT (spec §20.9)
@@ -537,7 +540,7 @@ keyword = @{
     | ^"NULL" | ^"TRUE" | ^"FALSE" | ^"UNKNOWN"
     | ^"WALK" | ^"TRAIL" | ^"ACYCLIC" | ^"SIMPLE" | ^"OPTIONAL" | ^"SHORTEST" | ^"DISTINCT" | ^"ASC" | ^"DESC"
     | ^"START" | ^"COMMIT" | ^"ROLLBACK" | ^"UNION" | ^"INTERSECT" | ^"EXCEPT" | ^"OTHERWISE" | ^"NEXT"
-    | ^"CAST" | ^"CASE" | ^"WHEN" | ^"THEN" | ^"ELSE" | ^"END" | ^"LABELS"
+    | ^"CAST" | ^"CASE" | ^"WHEN" | ^"THEN" | ^"ELSE" | ^"END"
     | ^"COUNT" | ^"SUM" | ^"AVERAGE" | ^"AVG"
     | ^"STDDEV_SAMP" | ^"STDDEV_POP"
     | ^"COLLECT_LIST" | ^"COLLECT"

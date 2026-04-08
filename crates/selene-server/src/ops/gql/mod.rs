@@ -1,7 +1,11 @@
-//! GQL execution bridge — connects transports to selene-gql.
+//! GQL execution bridge -- connects transports to selene-gql.
 //!
 //! Handles auth scope, read vs mutation dispatch, EXPLAIN/PROFILE,
 //! error mapping to GQLSTATUS codes, and result format conversion.
+
+mod ddl;
+mod format;
+mod routing;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -12,16 +16,26 @@ use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 use selene_core::Value;
 
+use ddl::{
+    execute_ddl, is_ddl_statement, is_graph_state_ddl, sync_search_indexes_after_ddl,
+    sync_view_state_after_ddl,
+};
+use format::{batches_to_ipc, batches_to_json};
+use routing::{
+    execute_local_graph_query, execute_remote_query, execute_vault_query, parse_use_prefix,
+};
+
 /// Default query timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Result format for GQL output.
+#[derive(Clone, Copy)]
 pub enum ResultFormat {
     Json,
     ArrowIpc,
 }
 
-/// GQL execution result — transport-agnostic.
+/// GQL execution result -- transport-agnostic.
 pub struct GqlQueryResult {
     /// 5-digit GQLSTATUS code (e.g. "00000", "42601").
     pub status_code: String,
@@ -52,7 +66,7 @@ pub struct MutationStatsResult {
 /// Execute a GQL query through the ops layer.
 ///
 /// Handles: auth checks, mutation detection, scope filtering,
-/// EXPLAIN/PROFILE, error → GQLSTATUS mapping, and result formatting.
+/// EXPLAIN/PROFILE, error -> GQLSTATUS mapping, and result formatting.
 pub fn execute_gql(
     state: &ServerState,
     auth: &AuthContext,
@@ -85,7 +99,7 @@ pub fn execute_gql_with_timeout(
     let start = Instant::now();
     let deadline_ms = timeout_ms.map_or(DEFAULT_TIMEOUT_MS, u64::from);
 
-    // Check for "USE <graph>" prefix — route to vault, local graph, or remote peer
+    // Check for "USE <graph>" prefix -- route to vault, local graph, or remote peer
     if let Some((graph_name, remaining)) = parse_use_prefix(query) {
         let catalog = state
             .services
@@ -94,7 +108,6 @@ pub fn execute_gql_with_timeout(
         let resolver = super::graph_resolver::GraphResolver::new(
             &catalog.catalog,
             state.services.get::<crate::vault::VaultService>().is_some(),
-            #[cfg(feature = "federation")]
             state
                 .services
                 .get::<crate::federation::FederationService>()
@@ -120,7 +133,6 @@ pub fn execute_gql_with_timeout(
                     deadline_ms,
                 ))
             }
-            #[cfg(feature = "federation")]
             Ok(super::graph_resolver::ResolvedGraph::Remote { peer_name }) => execute_remote_query(
                 state,
                 auth,
@@ -166,12 +178,13 @@ pub fn execute_gql_with_timeout(
             return Ok(error_result("42501", "DDL requires Admin role"));
         }
         crate::metrics::query_start();
-        let result = execute_mutation(state, auth, query);
+        let result = execute_mutation(state, auth, query, None);
         crate::metrics::query_end();
 
         // Sync ViewStateStore after materialized view DDL succeeds.
         if result.is_ok() {
             sync_view_state_after_ddl(state, &stmt);
+            sync_search_indexes_after_ddl(state, &stmt);
         }
 
         let elapsed = start.elapsed();
@@ -229,10 +242,10 @@ pub fn execute_gql_with_timeout(
         ));
     }
 
-    // Execute — pass parsed stmt to read path (avoids re-parsing)
+    // Execute -- pass parsed stmt to read path (avoids re-parsing)
     crate::metrics::query_start();
     let result = if is_mutation {
-        execute_mutation(state, auth, query)
+        execute_mutation(state, auth, query, gql_params.as_ref())
     } else {
         execute_read(state, auth, &stmt, gql_params.as_ref())
     };
@@ -268,8 +281,10 @@ pub fn execute_gql_with_timeout(
     }
 }
 
+// ── Shared helpers (visible to submodules) ──────────────────────────────
+
 /// Emit a structured audit log for each query execution.
-fn audit_log(
+pub(super) fn audit_log(
     auth: &AuthContext,
     query: &str,
     status: &str,
@@ -307,7 +322,9 @@ fn execute_read(
     };
     // Use cached CSR (rebuilds only when graph generation changes).
     let csr = crate::bootstrap::get_or_build_csr(&state.csr_cache, &snapshot);
-    let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins();
+    let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins_and_catalog(
+        state.projection_catalog.clone(),
+    );
     let mut qb = selene_gql::QueryBuilder::from_statement(stmt, &snapshot)
         .with_hot_tier(&state.hot_tier)
         .with_procedures(&registry)
@@ -326,6 +343,7 @@ fn execute_mutation(
     state: &ServerState,
     auth: &AuthContext,
     query: &str,
+    parameters: Option<&selene_gql::ParameterMap>,
 ) -> Result<selene_gql::GqlResult, selene_gql::GqlError> {
     if state.replica.is_replica {
         return Err(selene_gql::GqlError::Internal {
@@ -341,6 +359,9 @@ fn execute_mutation(
     let mut mb = selene_gql::MutationBuilder::new(query).with_hot_tier(&state.hot_tier);
     if let Some(s) = scope {
         mb = mb.with_scope(s);
+    }
+    if let Some(p) = parameters {
+        mb = mb.with_parameters(p);
     }
     let result = mb.execute(&state.graph)?;
 
@@ -386,7 +407,7 @@ fn execute_explain(
 }
 
 /// Format a successful GqlResult into the transport result.
-fn format_result(result: selene_gql::GqlResult, format: ResultFormat) -> GqlQueryResult {
+pub(super) fn format_result(result: selene_gql::GqlResult, format: ResultFormat) -> GqlQueryResult {
     let status_code = result.status.code.code();
 
     let row_count = result.row_count() as u64;
@@ -433,81 +454,8 @@ fn format_result(result: selene_gql::GqlResult, format: ResultFormat) -> GqlQuer
     }
 }
 
-/// Convert Arrow RecordBatches to JSON array string.
-fn batches_to_json(
-    batches: &[arrow::record_batch::RecordBatch],
-    schema: &arrow::datatypes::Schema,
-) -> String {
-    let mut rows = Vec::new();
-    for batch in batches {
-        for row_idx in 0..batch.num_rows() {
-            let mut obj = serde_json::Map::new();
-            for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
-                let val = arrow_value_to_json(col.as_ref(), row_idx);
-                obj.insert(field.name().clone(), val);
-            }
-            rows.push(serde_json::Value::Object(obj));
-        }
-    }
-    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Extract a single cell value from an Arrow array as JSON.
-fn arrow_value_to_json(array: &dyn arrow::array::Array, idx: usize) -> serde_json::Value {
-    use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray, UInt64Array};
-    use arrow::datatypes::DataType;
-
-    if array.is_null(idx) {
-        return serde_json::Value::Null;
-    }
-
-    match array.data_type() {
-        DataType::Int64 => {
-            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            serde_json::json!(a.value(idx))
-        }
-        DataType::UInt64 => {
-            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            serde_json::json!(a.value(idx))
-        }
-        DataType::Float64 => {
-            let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            serde_json::json!(a.value(idx))
-        }
-        DataType::Boolean => {
-            let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            serde_json::json!(a.value(idx))
-        }
-        DataType::Utf8 => {
-            let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-            serde_json::json!(a.value(idx))
-        }
-        _ => serde_json::Value::Null,
-    }
-}
-
-/// Convert Arrow RecordBatches to IPC bytes.
-fn batches_to_ipc(
-    batches: &[arrow::record_batch::RecordBatch],
-    schema: &arrow::datatypes::Schema,
-) -> Vec<u8> {
-    use arrow::ipc::writer::StreamWriter;
-    use std::sync::Arc;
-
-    let mut buf = Vec::new();
-    let schema = Arc::new(schema.clone());
-    if let Ok(mut writer) = StreamWriter::try_new(&mut buf, &schema) {
-        for batch in batches {
-            let _ = writer.write(batch);
-        }
-        let _ = writer.finish();
-    }
-    buf
-}
-
-/// Map a GqlError to a GQLSTATUS result (no OpError — errors are data).
-fn map_gql_error(err: &selene_gql::GqlError) -> GqlQueryResult {
+/// Map a GqlError to a GQLSTATUS result (no OpError -- errors are data).
+pub(super) fn map_gql_error(err: &selene_gql::GqlError) -> GqlQueryResult {
     use selene_gql::GqlError;
 
     let (code, message) = match err {
@@ -531,7 +479,7 @@ fn map_gql_error_to_op(err: &selene_gql::GqlError) -> OpError {
 }
 
 /// Create an error-status GqlQueryResult.
-fn error_result(code: &str, message: &str) -> GqlQueryResult {
+pub(super) fn error_result(code: &str, message: &str) -> GqlQueryResult {
     GqlQueryResult {
         status_code: code.to_string(),
         message: message.to_string(),
@@ -541,499 +489,6 @@ fn error_result(code: &str, message: &str) -> GqlQueryResult {
         mutations: None,
         plan: None,
     }
-}
-
-// ── DDL execution ────────────────────────────────────────────────────────
-
-/// Check if a statement is a DDL handled by execute_ddl (admin-only, returns message strings).
-fn is_ddl_statement(stmt: &selene_gql::GqlStatement) -> bool {
-    use selene_gql::GqlStatement;
-    matches!(
-        stmt,
-        GqlStatement::CreateGraph { .. }
-            | GqlStatement::DropGraph { .. }
-            | GqlStatement::CreateIndex { .. }
-            | GqlStatement::DropIndex { .. }
-            | GqlStatement::CreateUser { .. }
-            | GqlStatement::DropUser { .. }
-            | GqlStatement::CreateRole { .. }
-            | GqlStatement::DropRole { .. }
-            | GqlStatement::GrantRole { .. }
-            | GqlStatement::RevokeRole { .. }
-            | GqlStatement::CreateProcedure { .. }
-            | GqlStatement::DropProcedure { .. }
-    )
-}
-
-/// Sync ViewStateStore after a materialized view CREATE or DROP succeeds.
-///
-/// The executor registers/removes the definition in ViewRegistry (inside
-/// SeleneGraph), but aggregate state lives in the server-layer ViewStateStore.
-/// This hook bridges the two layers.
-fn sync_view_state_after_ddl(state: &ServerState, stmt: &selene_gql::GqlStatement) {
-    use selene_gql::GqlStatement;
-    let Some(svc) = state.services.get::<crate::view_state::ViewStateService>() else {
-        return;
-    };
-    match stmt {
-        GqlStatement::CreateMaterializedView { name, .. } => {
-            let upper = name.as_str().to_uppercase();
-            state.graph.read(|g| {
-                if let Some(def) = g.view_registry().get(&upper) {
-                    svc.store.register_view(def, g);
-                    tracing::debug!(view = %upper, "materialized view state initialized");
-                }
-            });
-        }
-        GqlStatement::DropMaterializedView { name, .. } => {
-            let upper = name.as_str().to_uppercase();
-            svc.store.remove_view(&upper);
-            tracing::debug!(view = %upper, "materialized view state removed");
-        }
-        _ => {}
-    }
-}
-
-/// Check if a statement is graph-state DDL requiring SharedGraph write access (admin-only).
-fn is_graph_state_ddl(stmt: &selene_gql::GqlStatement) -> bool {
-    use selene_gql::GqlStatement;
-    matches!(
-        stmt,
-        GqlStatement::CreateTrigger(_)
-            | GqlStatement::DropTrigger(_)
-            | GqlStatement::ShowTriggers
-            | GqlStatement::CreateNodeType { .. }
-            | GqlStatement::DropNodeType { .. }
-            | GqlStatement::ShowNodeTypes
-            | GqlStatement::CreateEdgeType { .. }
-            | GqlStatement::DropEdgeType { .. }
-            | GqlStatement::ShowEdgeTypes
-            | GqlStatement::CreateMaterializedView { .. }
-            | GqlStatement::DropMaterializedView { .. }
-            | GqlStatement::ShowMaterializedViews
-    )
-}
-
-fn execute_ddl(
-    state: &ServerState,
-    stmt: &selene_gql::GqlStatement,
-) -> Result<GqlQueryResult, OpError> {
-    use selene_gql::GqlStatement;
-    let message = match stmt {
-        GqlStatement::CreateGraph {
-            name,
-            if_not_exists,
-            or_replace,
-        } => {
-            let cat_svc = state
-                .services
-                .get::<crate::service_registry::GraphCatalogService>()
-                .ok_or_else(|| OpError::Internal("GraphCatalogService not registered".into()))?;
-            let mut catalog = cat_svc.catalog.lock();
-            if *or_replace {
-                catalog
-                    .create_or_replace_graph(name)
-                    .map_err(|e| OpError::QueryError(e.to_string()))?;
-                format!("Graph '{name}' created (or replaced)")
-            } else if *if_not_exists {
-                if catalog.get_graph(name).is_none() {
-                    catalog
-                        .create_graph(name)
-                        .map_err(|e| OpError::QueryError(e.to_string()))?;
-                }
-                format!("Graph '{name}' created")
-            } else {
-                catalog
-                    .create_graph(name)
-                    .map_err(|e| OpError::QueryError(e.to_string()))?;
-                format!("Graph '{name}' created")
-            }
-        }
-        GqlStatement::DropGraph { name, if_exists } => {
-            let cat_svc = state
-                .services
-                .get::<crate::service_registry::GraphCatalogService>()
-                .ok_or_else(|| OpError::Internal("GraphCatalogService not registered".into()))?;
-            let mut catalog = cat_svc.catalog.lock();
-            if *if_exists {
-                catalog.drop_graph_if_exists(name);
-                format!("Graph '{name}' dropped")
-            } else {
-                catalog
-                    .drop_graph(name)
-                    .map_err(|e| OpError::QueryError(e.to_string()))?;
-                format!("Graph '{name}' dropped")
-            }
-        }
-        GqlStatement::CreateIndex {
-            name,
-            label,
-            properties,
-            ..
-        } => {
-            let props_str = properties.join(", ");
-            tracing::warn!(index = name, label = label, properties = %props_str, "CREATE INDEX parsed but not yet persisted — index is parse-only stub");
-            format!(
-                "Index '{name}' created on :{label}({props_str}) (parse-only — not yet persisted)"
-            )
-        }
-        GqlStatement::DropIndex { name, .. } => {
-            tracing::warn!(index = name, "DROP INDEX parsed but not yet persisted");
-            format!("Index '{name}' dropped (parse-only)")
-        }
-        GqlStatement::CreateUser { username, role, .. } => {
-            // Never log the password
-            let role_str = role.as_deref().unwrap_or("Reader");
-            tracing::warn!(
-                username = username,
-                role = role_str,
-                "CREATE USER parsed but not yet persisted — requires vault"
-            );
-            format!(
-                "User '{username}' created with role '{role_str}' (parse-only — requires vault)"
-            )
-        }
-        GqlStatement::DropUser { username, .. } => {
-            tracing::warn!(
-                username = username,
-                "DROP USER parsed but not yet persisted"
-            );
-            format!("User '{username}' dropped (parse-only)")
-        }
-        GqlStatement::CreateRole { name, .. } => {
-            tracing::warn!(
-                role = name,
-                "CREATE ROLE parsed but not yet persisted — requires vault"
-            );
-            format!("Role '{name}' created (parse-only — requires vault)")
-        }
-        GqlStatement::DropRole { name, .. } => {
-            tracing::warn!(role = name, "DROP ROLE parsed but not yet persisted");
-            format!("Role '{name}' dropped (parse-only)")
-        }
-        GqlStatement::GrantRole { role, username } => {
-            tracing::warn!(
-                role = role,
-                username = username,
-                "GRANT ROLE parsed but not yet persisted"
-            );
-            format!("Role '{role}' granted to '{username}' (parse-only)")
-        }
-        GqlStatement::RevokeRole { role, username } => {
-            tracing::warn!(
-                role = role,
-                username = username,
-                "REVOKE ROLE parsed but not yet persisted"
-            );
-            format!("Role '{role}' revoked from '{username}' (parse-only)")
-        }
-        GqlStatement::CreateProcedure { name, .. } => {
-            tracing::warn!(
-                procedure = name,
-                "CREATE PROCEDURE parsed but not yet persisted"
-            );
-            format!("Procedure '{name}' created (parse-only)")
-        }
-        GqlStatement::DropProcedure { name, .. } => {
-            tracing::warn!(
-                procedure = name,
-                "DROP PROCEDURE parsed but not yet persisted"
-            );
-            format!("Procedure '{name}' dropped (parse-only)")
-        }
-        _ => return Ok(error_result("XX000", "unknown DDL statement")),
-    };
-
-    Ok(GqlQueryResult {
-        status_code: "0A000".to_string(),
-        message: format!("{message} -- feature not yet implemented"),
-        data_json: Some("[]".to_string()),
-        data_arrow: None,
-        row_count: 0,
-        mutations: None,
-        plan: None,
-    })
-}
-
-// ── Graph routing (USE prefix) ──────────────────────────────────────────
-
-/// Parse a `USE <graph>;` prefix from a query, returning `(graph_name, remaining_query)`.
-/// Returns `None` if the query does not start with `USE`.
-///
-/// Examples:
-/// - `"USE secure; MATCH ..."` → `Some(("secure", "MATCH ..."))`
-/// - `"USE building_a MATCH ..."` → `Some(("building_a", "MATCH ..."))`
-/// - `"MATCH ..."` → `None`
-fn parse_use_prefix(query: &str) -> Option<(&str, &str)> {
-    let trimmed = query.trim_start();
-    let bytes = trimmed.as_bytes();
-    if bytes.len() < 5 || !bytes[..3].eq_ignore_ascii_case(b"USE") || bytes[3] != b' ' {
-        return None;
-    }
-    let rest = trimmed[4..].trim_start();
-    // Graph name ends at semicolon or whitespace
-    let name_end = rest.find(|c: char| c == ';' || c.is_whitespace())?;
-    let name = &rest[..name_end];
-    if name.is_empty() {
-        return None;
-    }
-    let remainder = rest[name_end..].trim_start();
-    let remainder = remainder
-        .strip_prefix(';')
-        .unwrap_or(remainder)
-        .trim_start();
-    if remainder.is_empty() {
-        return None; // USE without a following query
-    }
-    Some((name, remainder))
-}
-
-/// Execute a query against the vault graph.
-fn execute_vault_query(
-    state: &ServerState,
-    auth: &AuthContext,
-    query: &str,
-    format: ResultFormat,
-    start: Instant,
-    deadline_ms: u64,
-) -> GqlQueryResult {
-    // Admin-only access
-    if !auth.is_admin() {
-        audit_log(auth, query, "vault_denied", 0, start.elapsed());
-        return error_result("42501", "vault access requires Admin role");
-    }
-
-    let Some(vault_svc) = state.services.get::<crate::vault::VaultService>() else {
-        return error_result(
-            "XX000",
-            "secure vault not available — enable vault in config",
-        );
-    };
-    let vault = &vault_svc.handle;
-
-    // Parse the vault query
-    let stmt = match selene_gql::parse_statement(query) {
-        Ok(s) => s,
-        Err(e) => {
-            audit_log(auth, query, "vault_parse_error", 0, start.elapsed());
-            return map_gql_error(&e);
-        }
-    };
-
-    let is_mutation = matches!(
-        stmt,
-        selene_gql::GqlStatement::Mutate(_)
-            | selene_gql::GqlStatement::StartTransaction
-            | selene_gql::GqlStatement::Commit
-            | selene_gql::GqlStatement::Rollback
-    );
-
-    // Timeout check
-    if start.elapsed().as_millis() as u64 > deadline_ms {
-        return error_result("57014", "query cancelled: timeout");
-    }
-
-    // Execute against vault graph
-    let result = if is_mutation {
-        // Mutation: execute via SharedGraph::write
-        let gql_result = selene_gql::MutationBuilder::new(query).execute(&vault.graph);
-
-        if gql_result.is_ok() {
-            // Write audit log before flush so it's included in the encrypted payload
-            let audit_details = if query.len() > 200 {
-                &query[..query.floor_char_boundary(200)]
-            } else {
-                query
-            };
-            crate::vault::audit::log_audit(
-                &vault.graph,
-                &format!("{}", auth.principal_node_id.0),
-                "gql_mutate",
-                audit_details,
-            );
-
-            // Flush vault to disk
-            {
-                if let Err(e) = vault.flush(&vault_svc.master_key) {
-                    tracing::error!("vault flush failed: {e}");
-                    return error_result("XX000", &format!("vault flush failed: {e}"));
-                }
-            }
-        }
-
-        gql_result
-    } else {
-        // Read: snapshot-based query
-        let snapshot = vault.graph.load_snapshot();
-        let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins();
-        selene_gql::QueryBuilder::from_statement(&stmt, &snapshot)
-            .with_procedures(&registry)
-            .execute()
-    };
-
-    let elapsed = start.elapsed();
-    audit_log(auth, query, "vault_ok", 0, elapsed);
-
-    match result {
-        Ok(gql_result) => format_result(gql_result, format),
-        Err(ref gql_err) => map_gql_error(gql_err),
-    }
-}
-
-/// Execute a query against a local named graph (from GraphCatalog).
-fn execute_local_graph_query(
-    state: &ServerState,
-    auth: &AuthContext,
-    query: &str,
-    graph: &selene_graph::SharedGraph,
-    format: ResultFormat,
-    start: Instant,
-    deadline_ms: u64,
-) -> GqlQueryResult {
-    let stmt = match selene_gql::parse_statement(query) {
-        Ok(s) => s,
-        Err(e) => {
-            audit_log(auth, query, "local_graph_parse_error", 0, start.elapsed());
-            return map_gql_error(&e);
-        }
-    };
-
-    // DDL requires admin -- same check as the default graph path
-    if is_ddl_statement(&stmt) {
-        if !auth.is_admin() {
-            audit_log(auth, query, "local_graph_ddl_denied", 0, start.elapsed());
-            return error_result("42501", "DDL requires Admin role");
-        }
-        // DDL on named graphs not supported -- schemas belong to the default graph
-        return error_result("0A000", "DDL not supported on named graphs");
-    }
-
-    let is_mutation = matches!(
-        stmt,
-        selene_gql::GqlStatement::Mutate(_)
-            | selene_gql::GqlStatement::StartTransaction
-            | selene_gql::GqlStatement::Commit
-            | selene_gql::GqlStatement::Rollback
-    );
-
-    // Auth check -- same as default graph path
-    let action = if is_mutation {
-        Action::GqlMutate
-    } else {
-        Action::GqlQuery
-    };
-    if !auth.is_admin() && !state.auth_engine.authorize_action(auth, action) {
-        audit_log(auth, query, "local_graph_auth_denied", 0, start.elapsed());
-        return error_result("42501", "insufficient privilege");
-    }
-
-    if start.elapsed().as_millis() as u64 > deadline_ms {
-        return error_result("57014", "query cancelled: timeout");
-    }
-
-    let result = if is_mutation {
-        // Mutations go through the SharedGraph write path
-        let scope = if auth.is_admin() {
-            None
-        } else {
-            Some(&auth.scope)
-        };
-        {
-            let mut mb = selene_gql::MutationBuilder::new(query);
-            if let Some(s) = scope {
-                mb = mb.with_scope(s);
-            }
-            mb.execute(graph)
-        }
-    } else {
-        let snapshot = graph.load_snapshot();
-        let scope = if auth.is_admin() {
-            None
-        } else {
-            Some(&auth.scope)
-        };
-        let registry = selene_gql::runtime::procedures::ProcedureRegistry::with_builtins();
-        let mut qb =
-            selene_gql::QueryBuilder::from_statement(&stmt, &snapshot).with_procedures(&registry);
-        if let Some(s) = scope {
-            qb = qb.with_scope(s);
-        }
-        qb.execute()
-    };
-
-    let elapsed = start.elapsed();
-    audit_log(auth, query, "local_graph_ok", 0, elapsed);
-
-    match result {
-        Ok(gql_result) => format_result(gql_result, format),
-        Err(ref gql_err) => map_gql_error(gql_err),
-    }
-}
-
-/// Execute a GQL query on a remote peer via federation forwarding.
-#[cfg(feature = "federation")]
-fn execute_remote_query(
-    state: &ServerState,
-    auth: &AuthContext,
-    query: &str,
-    peer_name: &str,
-    format: ResultFormat,
-    start: Instant,
-    _deadline_ms: u64,
-) -> Result<GqlQueryResult, OpError> {
-    let fed_svc = state
-        .services
-        .get::<crate::federation::FederationService>()
-        .ok_or_else(|| OpError::Internal("federation not enabled".into()))?;
-    let manager = &fed_svc.manager;
-
-    // Get existing connection (don't block the sync context with async connect)
-    let client = manager
-        .get_connection(peer_name)
-        .ok_or_else(|| OpError::Internal(format!("peer '{peer_name}' not connected")))?;
-
-    let json_format = matches!(format, ResultFormat::Json);
-    let forwarded_scope = {
-        let mut buf = Vec::new();
-        auth.scope.serialize_into(&mut buf).ok();
-        Some(buf)
-    };
-
-    let req = selene_wire::dto::federation::FederationGqlRequest {
-        query: query.to_string(),
-        json_format,
-        forwarded_scope,
-    };
-
-    // Block on the async call — we're already in a sync ops context
-    let resp: selene_wire::dto::federation::FederationGqlResponse =
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { client.federation_gql(req).await })
-        })
-        .map_err(|e| OpError::Internal(format!("federation query to {peer_name}: {e}")))?;
-
-    let elapsed = start.elapsed();
-    audit_log(
-        auth,
-        query,
-        &format!("remote:{peer_name}"),
-        resp.row_count as usize,
-        elapsed,
-    );
-
-    if let Some(err) = resp.error {
-        return Ok(error_result(&err.code, &err.message));
-    }
-
-    Ok(GqlQueryResult {
-        status_code: resp.status_code,
-        message: resp.message,
-        data_json: resp.json_result,
-        data_arrow: resp.ipc_bytes,
-        row_count: resp.row_count,
-        mutations: None,
-        plan: None,
-    })
 }
 
 #[cfg(test)]
@@ -1193,6 +648,8 @@ mod tests {
 
     #[test]
     fn parse_use_prefix_general() {
+        use routing::parse_use_prefix;
+
         // Secure graph
         let (name, rest) = parse_use_prefix("USE secure MATCH (n) RETURN n").unwrap();
         assert_eq!(name, "secure");

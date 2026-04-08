@@ -187,7 +187,7 @@ mod tests {
             source: NodeId(1),
             target: NodeId(2),
             key: IStr::new("weight"),
-            value: Value::Float(3.14),
+            value: Value::Float(3.15),
             old_value: None,
         };
         if let Change::EdgePropertySet {

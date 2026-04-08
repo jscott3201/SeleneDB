@@ -148,8 +148,8 @@ impl ScalarFunction for IdFunction {
     }
     fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
         match args.first() {
-            Some(GqlValue::Node(id)) => Ok(GqlValue::UInt(id.0)),
-            Some(GqlValue::Edge(id)) => Ok(GqlValue::UInt(id.0)),
+            Some(GqlValue::Node(id)) => Ok(GqlValue::Int(id.0 as i64)),
+            Some(GqlValue::Edge(id)) => Ok(GqlValue::Int(id.0 as i64)),
             Some(GqlValue::Null) | None => Ok(GqlValue::Null),
             _ => Err(GqlError::type_error("id() requires a node or edge")),
         }
@@ -824,7 +824,7 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         let r = f.invoke(&[GqlValue::Node(NodeId(5))], &c).unwrap();
-        assert_eq!(r, GqlValue::UInt(5));
+        assert_eq!(r, GqlValue::Int(5));
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         let r = f.invoke(&[GqlValue::Edge(EdgeId(10))], &c).unwrap();
-        assert_eq!(r, GqlValue::UInt(10));
+        assert_eq!(r, GqlValue::Int(10));
     }
 
     #[test]

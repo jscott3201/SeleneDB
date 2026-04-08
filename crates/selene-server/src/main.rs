@@ -15,6 +15,7 @@ use selene_server::tls;
 
 #[derive(Parser)]
 #[command(name = "selene-server", about = "Selene property graph server")]
+#[allow(clippy::struct_excessive_bools)]
 struct ServerCli {
     /// Path to TOML config file.
     #[arg(long)]
@@ -44,6 +45,11 @@ struct ServerCli {
     /// Start as a read-only replica of the given primary address (host:port).
     #[arg(long)]
     replica_of: Option<String>,
+    /// Run MCP server over stdin/stdout instead of HTTP/QUIC.
+    /// Designed for IDE integrations and agent frameworks that spawn
+    /// the database as a subprocess.
+    #[arg(long)]
+    stdio: bool,
 }
 
 fn parse_profile(s: &str) -> Result<selene_server::config::ProfileType, String> {
@@ -108,15 +114,18 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         tracing::warn!("Do NOT use dev mode in production deployments");
     }
 
-    // Set embedding model path before bootstrap
-    #[cfg(feature = "vector")]
+    // Set embedding model config before bootstrap
     {
         let model_path = config
             .vector
             .model_path
             .clone()
-            .unwrap_or_else(|| config.data_dir.join("models/all-MiniLM-L6-v2"));
-        selene_gql::runtime::embed::set_model_path(model_path);
+            .unwrap_or_else(|| config.data_dir.join("models").join("embeddinggemma-300m"));
+        selene_gql::runtime::embed::set_model_config(
+            config.vector.model.clone(),
+            model_path,
+            config.vector.dimensions,
+        );
     }
 
     let mut state = bootstrap::bootstrap(config, vault_passphrase).await?;
@@ -157,6 +166,22 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
     let bg = tasks::spawn_background_tasks(Arc::clone(&state), cancel);
 
+    // stdio mode: serve MCP over stdin/stdout, skip HTTP/QUIC
+    if cli.stdio {
+        state.set_ready();
+        tracing::info!("serving MCP over stdio (stdin/stdout)");
+
+        if let Err(e) = selene_server::serve_stdio_mcp(Arc::clone(&state)).await {
+            tracing::error!("stdio MCP server error: {e}");
+        }
+
+        tracing::info!("stdio client disconnected, shutting down");
+        bg.shutdown();
+        tasks::shutdown_snapshot(&state);
+        bg.wait().await;
+        return Ok(());
+    }
+
     // Bootstrap federation peers
     if let Some(fed_svc) = state
         .services()
@@ -168,10 +193,7 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         });
 
         let mgr = Arc::clone(&fed_svc.manager);
-        #[cfg(feature = "federation")]
         let refresh_secs = state.config().federation.refresh_interval_secs;
-        #[cfg(not(feature = "federation"))]
-        let refresh_secs = 60u64;
         let cancel = bg.cancel.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));

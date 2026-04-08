@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 061006c9e6e5503fad5affddf611ed92f68538bdf97618fa1a4849cc3cedfc75 # shrinks to query = "MATCH (n:sensor) FILTER n.name < 0 RETURN n.name AS name"

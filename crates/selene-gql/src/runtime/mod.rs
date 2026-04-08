@@ -1,7 +1,6 @@
 //! GQL execution runtime: expression evaluation, context, transactions.
 
 pub mod cache;
-#[cfg(feature = "vector")]
 pub mod embed;
 pub mod eval;
 pub(crate) mod eval_aggregate;

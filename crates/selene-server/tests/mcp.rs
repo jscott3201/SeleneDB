@@ -424,8 +424,8 @@ async fn prompts_list() {
 
     assert_eq!(
         prompts.len(),
-        3,
-        "expected 3 prompts, got {}",
+        4,
+        "expected 4 prompts, got {}",
         prompts.len()
     );
 
@@ -442,6 +442,7 @@ async fn prompts_list() {
         names.contains(&"import-guide"),
         "import-guide prompt must exist"
     );
+    assert!(names.contains(&"text2gql"), "text2gql prompt must exist");
 }
 
 #[tokio::test]

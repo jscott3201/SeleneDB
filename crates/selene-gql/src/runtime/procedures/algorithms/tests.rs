@@ -1001,7 +1001,7 @@ fn label_propagation_assigns_communities() {
     for row in &rows {
         match &row[1].1 {
             GqlValue::Int(_) => {}
-            other => panic!("expected Int communityId, got {other:?}"),
+            other => panic!("expected Int community_id, got {other:?}"),
         }
     }
 }
@@ -1031,7 +1031,7 @@ fn louvain_detects_communities() {
     let rows = proc.execute(&args, &g, None, None).unwrap();
     assert_eq!(rows.len(), 5);
 
-    // Each row should have nodeId, communityId, and level
+    // Each row should have node_id, community_id, and level
     for row in &rows {
         assert_eq!(row.len(), 3);
         match (&row[0].1, &row[1].1, &row[2].1) {

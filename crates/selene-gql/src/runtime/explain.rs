@@ -286,8 +286,8 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
                 .collect();
             format!("TopK(k={limit}, {})", ts.join(", "))
         }
-        PipelineOp::Offset { count } => format!("Offset({count})"),
-        PipelineOp::Limit { count } => format!("Limit({count})"),
+        PipelineOp::Offset { value } => format!("Offset({value})"),
+        PipelineOp::Limit { value } => format!("Limit({value})"),
         PipelineOp::Return {
             projections,
             group_by,
@@ -302,7 +302,7 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
                 format!("Return({})", cols.join(", "))
             };
             if !group_by.is_empty() {
-                let gk: Vec<&str> = group_by.iter().map(|g| g.as_str()).collect();
+                let gk: Vec<String> = group_by.iter().map(|g| format!("{g:?}")).collect();
                 let _ = write!(s, ", GROUP BY [{}]", gk.join(", "));
             }
             if having.is_some() {
@@ -323,7 +323,7 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
             let cols: Vec<&str> = projections.iter().map(|p| p.alias.as_str()).collect();
             let mut s = format!("With({})", cols.join(", "));
             if !group_by.is_empty() {
-                let gk: Vec<&str> = group_by.iter().map(|g| g.as_str()).collect();
+                let gk: Vec<String> = group_by.iter().map(|g| format!("{g:?}")).collect();
                 let _ = write!(s, ", GROUP BY [{}]", gk.join(", "));
             }
             if having.is_some() {
@@ -345,15 +345,35 @@ fn format_pipeline_op(op: &PipelineOp) -> String {
             format!("Subquery(pipeline=[{}])", inner.join("; "))
         }
         PipelineOp::For { var, .. } => format!("For({})", var.as_str()),
-        PipelineOp::ViewScan { view_name, yields } => {
-            let cols: Vec<String> = yields
-                .iter()
-                .map(|(name, alias)| match alias {
-                    Some(a) => format!("{name} AS {a}"),
-                    None => name.to_string(),
-                })
-                .collect();
-            format!("ViewScan({}, yields: [{}])", view_name, cols.join(", "))
+        PipelineOp::NestedMatch {
+            pattern_ops,
+            where_filter,
+        } => {
+            let ops: Vec<String> = pattern_ops.iter().map(|op| format!("{op:?}")).collect();
+            let where_part = if where_filter.is_some() {
+                " WHERE ..."
+            } else {
+                ""
+            };
+            format!("NestedMatch([{}]{})", ops.join(", "), where_part)
+        }
+        PipelineOp::ViewScan {
+            view_name,
+            yields,
+            yield_star,
+        } => {
+            if *yield_star {
+                format!("ViewScan({view_name}, yields: [*])")
+            } else {
+                let cols: Vec<String> = yields
+                    .iter()
+                    .map(|(name, alias)| match alias {
+                        Some(a) => format!("{name} AS {a}"),
+                        None => name.to_string(),
+                    })
+                    .collect();
+                format!("ViewScan({view_name}, yields: [{}])", cols.join(", "))
+            }
         }
     }
 }

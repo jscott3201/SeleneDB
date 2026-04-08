@@ -14,7 +14,7 @@ use crate::runtime::procedures::ts::extract_duration;
 use crate::types::error::GqlError;
 use crate::types::value::{GqlType, GqlValue};
 
-/// ts.scopedAggregate(rootNodeId, maxHops, property, aggFn, duration) -> value, nodeCount, sampleCount
+/// ts.scopedAggregate(rootNodeId, maxHops, property, aggFn, duration) -> value, node_count, sample_count
 ///
 /// BFS from a root node, collect descendant nodes, aggregate their
 /// time-series data for the given property and duration.
@@ -55,11 +55,11 @@ impl Procedure for TsScopedAggregate {
                     typ: GqlType::Float,
                 },
                 YieldColumn {
-                    name: "nodeCount",
+                    name: "node_count",
                     typ: GqlType::Int,
                 },
                 YieldColumn {
-                    name: "sampleCount",
+                    name: "sample_count",
                     typ: GqlType::Int,
                 },
             ],
@@ -132,8 +132,8 @@ impl Procedure for TsScopedAggregate {
 
         Ok(vec![smallvec![
             (IStr::new("value"), GqlValue::Float(result)),
-            (IStr::new("nodeCount"), GqlValue::Int(node_count)),
-            (IStr::new("sampleCount"), GqlValue::Int(sample_count)),
+            (IStr::new("node_count"), GqlValue::Int(node_count)),
+            (IStr::new("sample_count"), GqlValue::Int(sample_count)),
         ]])
     }
 }

@@ -422,7 +422,9 @@ pub(super) fn create_materialized_view(
     }
     shared.publish_snapshot();
 
-    Ok(GqlResult::empty())
+    Ok(GqlResult::ddl_success(&format!(
+        "materialized view '{name}' created"
+    )))
 }
 
 pub(super) fn drop_materialized_view(
@@ -444,7 +446,9 @@ pub(super) fn drop_materialized_view(
     }
     shared.publish_snapshot();
 
-    Ok(GqlResult::empty())
+    Ok(GqlResult::ddl_success(&format!(
+        "materialized view '{name}' dropped"
+    )))
 }
 
 pub(super) fn show_materialized_views(shared: &SharedGraph) -> Result<GqlResult, GqlError> {

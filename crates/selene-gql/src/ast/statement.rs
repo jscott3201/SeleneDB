@@ -252,11 +252,11 @@ pub enum PipelineStatement {
     /// ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST], ...
     OrderBy(Vec<OrderTerm>),
 
-    /// OFFSET n
-    Offset(u64),
+    /// OFFSET n or OFFSET $param
+    Offset(LimitValue),
 
-    /// LIMIT n
-    Limit(u64),
+    /// LIMIT n or LIMIT $param
+    Limit(LimitValue),
 
     /// RETURN [DISTINCT] projections [GROUP BY vars] [HAVING expr]
     Return(ReturnClause),
@@ -275,7 +275,11 @@ pub enum PipelineStatement {
     For { var: IStr, list_expr: Expr },
 
     /// MATCH VIEW name YIELD col1, col2 AS alias -- read from a materialized view.
-    MatchView { name: IStr, yields: Vec<YieldItem> },
+    MatchView {
+        name: IStr,
+        yields: Vec<YieldItem>,
+        yield_star: bool,
+    },
 }
 
 /// Variable binding in a LET statement.
@@ -283,6 +287,65 @@ pub enum PipelineStatement {
 pub struct LetBinding {
     pub var: IStr,
     pub expr: Expr,
+}
+
+/// LIMIT or OFFSET value: either a literal integer or a query parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LimitValue {
+    /// Integer literal: `LIMIT 10`
+    Literal(u64),
+    /// Parameter reference: `LIMIT $n`
+    Parameter(IStr),
+}
+
+impl LimitValue {
+    /// Resolve to a concrete u64. For literals, returns the value directly.
+    /// For parameters, looks up the value in the parameter map and casts to u64.
+    pub fn resolve(
+        &self,
+        params: Option<&std::collections::HashMap<IStr, crate::types::value::GqlValue>>,
+    ) -> Result<u64, crate::types::error::GqlError> {
+        use crate::types::error::GqlError;
+        use crate::types::value::GqlValue;
+        match self {
+            LimitValue::Literal(n) => Ok(*n),
+            LimitValue::Parameter(name) => {
+                let val = params.and_then(|p| p.get(name)).ok_or_else(|| {
+                    GqlError::type_error(format!(
+                        "LIMIT/OFFSET parameter ${} is not bound",
+                        name.as_str()
+                    ))
+                })?;
+                match val {
+                    GqlValue::Int(n) => {
+                        if *n < 0 {
+                            Err(GqlError::type_error(format!(
+                                "LIMIT/OFFSET parameter ${} must be non-negative, got {n}",
+                                name.as_str()
+                            )))
+                        } else {
+                            Ok(*n as u64)
+                        }
+                    }
+                    GqlValue::UInt(n) => Ok(*n),
+                    other => Err(GqlError::type_error(format!(
+                        "LIMIT/OFFSET parameter ${} must be an integer, got {}",
+                        name.as_str(),
+                        other.gql_type()
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for LimitValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LimitValue::Literal(n) => write!(f, "{n}"),
+            LimitValue::Parameter(name) => write!(f, "${}", name.as_str()),
+        }
+    }
 }
 
 /// Sort term for ORDER BY.
@@ -311,16 +374,16 @@ pub struct ReturnClause {
     pub all: bool,
     /// Column projections (empty when all=true).
     pub projections: Vec<Projection>,
-    /// GROUP BY variable names.
-    pub group_by: Vec<IStr>,
+    /// GROUP BY expressions (variables, property access, etc.).
+    pub group_by: Vec<Expr>,
     /// HAVING condition -- post-aggregation filter.
     pub having: Option<Expr>,
     /// RETURN-level ORDER BY -- only populated by SELECT desugaring.
     pub order_by: Vec<OrderTerm>,
     /// RETURN-level OFFSET -- only populated by SELECT desugaring.
-    pub offset: Option<u64>,
+    pub offset: Option<LimitValue>,
     /// RETURN-level LIMIT -- only populated by SELECT desugaring.
-    pub limit: Option<u64>,
+    pub limit: Option<LimitValue>,
 }
 
 /// WITH clause -- intermediate projection that resets binding scope.
@@ -329,7 +392,7 @@ pub struct ReturnClause {
 pub struct WithClause {
     pub distinct: bool,
     pub projections: Vec<Projection>,
-    pub group_by: Vec<IStr>,
+    pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
     /// Optional WHERE filter applied after projection.
     pub where_filter: Option<Expr>,

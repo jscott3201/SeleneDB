@@ -52,6 +52,114 @@ fn e2e_optional_match_no_results_gives_null() {
     assert_eq!(result.row_count(), 2); // 2 sensors, each with NULL x
 }
 
+// Bug 1 regression: inline property filters on OPTIONAL MATCH target node.
+#[test]
+fn e2e_optional_match_inline_prop_filter_matches() {
+    let g = setup_graph();
+    // Floor-1 exists -- inline prop filter should find it
+    let result = QueryBuilder::new(
+        "MATCH (b:building) OPTIONAL MATCH (b)-[:contains]->(f:floor {name: 'Floor-1'}) \
+         RETURN b.name AS building, f.name AS floor",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Building matches, Floor-1 is found -- one row with real floor name
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let floor_col = batch
+        .column_by_name("FLOOR")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(floor_col.value(0), "Floor-1");
+}
+
+#[test]
+fn e2e_optional_match_inline_prop_filter_no_match_gives_null() {
+    let g = setup_graph();
+    // No floor named 'Level-99' -- inline prop filter should produce NULL
+    let result = QueryBuilder::new(
+        "MATCH (b:building) OPTIONAL MATCH (b)-[:contains]->(f:floor {name: 'Level-99'}) \
+         RETURN b.name AS building, f.name AS floor",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Outer building row survives with NULL floor (left-join semantics)
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let building_col = batch
+        .column_by_name("BUILDING")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(building_col.value(0), "HQ");
+    let floor_col = batch.column_by_name("FLOOR").unwrap();
+    assert!(
+        floor_col.is_null(0),
+        "floor column should be NULL when inline filter matches nothing"
+    );
+}
+
+// Bug 2 regression: OPTIONAL MATCH WHERE clause drops outer row when no match exists.
+#[test]
+fn e2e_optional_match_where_filters_inner_match_passes() {
+    let g = setup_graph();
+    // Floor-1 exists and WHERE f.name = 'Floor-1' passes -- one row with real floor name
+    let result = QueryBuilder::new(
+        "MATCH (b:building) OPTIONAL MATCH (b)-[:contains]->(f:floor) WHERE f.name = 'Floor-1' \
+         RETURN b.name AS building, f.name AS floor",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    let batch = &result.batches[0];
+    let floor_col = batch
+        .column_by_name("FLOOR")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(floor_col.value(0), "Floor-1");
+}
+
+#[test]
+fn e2e_optional_match_where_no_inner_match_gives_null_not_drop() {
+    let g = setup_graph();
+    // WHERE f.name = 'Level-99' matches nothing -- outer building row should survive
+    // with NULL floor (left-join semantics). Before the fix, this row was dropped.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) OPTIONAL MATCH (b)-[:contains]->(f:floor) WHERE f.name = 'Level-99' \
+         RETURN b.name AS building, f.name AS floor",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    // Outer row must survive with NULL floor
+    assert_eq!(
+        result.row_count(),
+        1,
+        "outer row must not be dropped when optional inner WHERE matches nothing"
+    );
+    let batch = &result.batches[0];
+    let building_col = batch
+        .column_by_name("BUILDING")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(building_col.value(0), "HQ");
+    let floor_col = batch.column_by_name("FLOOR").unwrap();
+    assert!(
+        floor_col.is_null(0),
+        "floor should be NULL when optional WHERE matches nothing"
+    );
+}
+
 // ── CASE WHEN ──
 
 #[test]
@@ -403,4 +511,201 @@ fn e2e_keyword_graph_as_property() {
         .execute()
         .unwrap();
     assert_eq!(result.row_count(), 2);
+}
+
+// ── IN-list on non-indexed property ──
+
+#[test]
+fn e2e_in_list_no_index_returns_results() {
+    // No property index on temp; IN-list must fall through to runtime eval.
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [72.5, 80.0] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        2,
+        "IN-list on non-indexed property must return matching nodes"
+    );
+}
+
+#[test]
+fn e2e_in_list_no_index_partial_match() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [72.5] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        1,
+        "IN-list with single match should return one node"
+    );
+}
+
+#[test]
+fn e2e_in_list_no_index_no_match() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) FILTER s.temp IN [999.0] RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        0,
+        "IN-list with no matches should return zero rows"
+    );
+}
+
+// ── WITH followed by MATCH ──
+
+// Regression test: WITH passes bindings to a subsequent MATCH.
+// Before the fix, the MATCH after WITH would run against the full graph
+// and then WITH would strip variables that RETURN needed, causing
+// "unbound variable" errors.
+#[test]
+fn e2e_with_then_match_basic() {
+    // Graph: building -[contains]-> floor -[contains]-> sensor
+    // WITH should pass floor to the second MATCH.
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WITH b MATCH (b)-[:contains]->(f:floor) RETURN b.name AS bname, f.name AS fname",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1, "one building-floor pair");
+}
+
+#[test]
+fn e2e_with_filter_then_match() {
+    // WITH with WHERE should filter before the second MATCH expands.
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (f:floor) WITH f WHERE f.name = 'Floor-1' MATCH (f)-[:contains]->(s:sensor) RETURN s.name AS sname",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 2, "two sensors under Floor-1");
+}
+
+#[test]
+fn e2e_with_no_match_drops_row() {
+    // If the second MATCH finds no results, the row from WITH should be dropped.
+    let g = setup_graph();
+    // Sensors don't have outgoing :contains edges, so the MATCH returns nothing.
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) WITH s MATCH (s)-[:contains]->(x) RETURN s.name AS sname",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 0, "sensors have no :contains edges");
+}
+
+#[test]
+fn e2e_with_then_match_with_count() {
+    // Matches the originally failing pattern: WITH then MATCH with aggregation.
+    // Building -[contains]-> floor, count per building.
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WITH b MATCH (b)-[:contains]->(f:floor) RETURN b.name AS bname, count(f) AS cnt GROUP BY b.name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1, "one building with floors");
+    // Extract the count value
+    use arrow::array::{Array, Int64Array};
+    let batch = &result.batches[0];
+    let cnt_col = batch
+        .column_by_name("CNT")
+        .expect("CNT column should be present");
+    let cnt_arr = cnt_col.as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(cnt_arr.value(0), 1, "building has 1 floor");
+}
+
+// ── Parameterized LIMIT/OFFSET ──
+
+#[test]
+fn e2e_parameterized_limit() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::Int(2));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn e2e_parameterized_offset() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("skip"), GqlValue::Int(2));
+    let all = QueryBuilder::new("MATCH (x) RETURN x", &g)
+        .execute()
+        .unwrap()
+        .row_count();
+    let result = QueryBuilder::new("MATCH (x) RETURN x OFFSET $skip", &g)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), all - 2);
+}
+
+#[test]
+fn e2e_parameterized_limit_negative_error() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::Int(-1));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "negative LIMIT should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("non-negative"),
+        "error should mention non-negative: {err}"
+    );
+}
+
+#[test]
+fn e2e_parameterized_limit_type_error() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("n"), GqlValue::String(SmolStr::new("five")));
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "string LIMIT should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("integer"),
+        "error should mention integer: {err}"
+    );
+}
+
+#[test]
+fn e2e_parameterized_limit_unbound_error() {
+    let g = setup_graph();
+    let params = ParameterMap::new();
+    let result = QueryBuilder::new("MATCH (x) RETURN x LIMIT $n", &g)
+        .with_parameters(&params)
+        .execute();
+    assert!(result.is_err(), "unbound LIMIT param should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not bound"),
+        "error should mention not bound: {err}"
+    );
 }

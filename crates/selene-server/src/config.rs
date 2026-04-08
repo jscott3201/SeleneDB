@@ -38,6 +38,56 @@ pub struct HttpConfig {
     /// Set to true only if a TLS-terminating reverse proxy is in front.
     #[serde(default)]
     pub allow_plaintext: bool,
+    /// Per-endpoint rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Per-endpoint rate limiting (token bucket, requests per second).
+///
+/// Requests are classified into tiers by path and method. Each tier has
+/// an independent token bucket. Excess requests receive 429 Too Many
+/// Requests. System endpoints (health, ready) are never rate-limited.
+///
+/// Set any tier to 0 to disable rate limiting for that tier.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Requests/sec for read endpoints: GET nodes, edges, stats, ts queries.
+    #[serde(default = "default_rate_read")]
+    pub read_per_sec: u32,
+    /// Requests/sec for write endpoints: POST/PUT/DELETE nodes, edges, schemas.
+    #[serde(default = "default_rate_write")]
+    pub write_per_sec: u32,
+    /// Requests/sec for query endpoints: GQL, SPARQL, graph slice.
+    #[serde(default = "default_rate_query")]
+    pub query_per_sec: u32,
+    /// Requests/sec for heavy data endpoints: CSV/RDF import/export.
+    #[serde(default = "default_rate_data")]
+    pub data_per_sec: u32,
+}
+
+fn default_rate_read() -> u32 {
+    200
+}
+fn default_rate_write() -> u32 {
+    100
+}
+fn default_rate_query() -> u32 {
+    50
+}
+fn default_rate_data() -> u32 {
+    20
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            read_per_sec: default_rate_read(),
+            write_per_sec: default_rate_write(),
+            query_per_sec: default_rate_query(),
+            data_per_sec: default_rate_data(),
+        }
+    }
 }
 
 impl std::fmt::Debug for HttpConfig {
@@ -51,6 +101,7 @@ impl std::fmt::Debug for HttpConfig {
                 &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
             )
             .field("allow_plaintext", &self.allow_plaintext)
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -63,6 +114,7 @@ impl Default for HttpConfig {
             cors_origins: Vec::new(),
             metrics_token: None,
             allow_plaintext: false,
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -113,6 +165,21 @@ pub struct McpConfig {
     #[serde(default)]
     pub registration_token: Option<String>,
 
+    /// Public base URL for OAuth discovery and MCP metadata.
+    ///
+    /// Used by `/.well-known/oauth-authorization-server` to build endpoint
+    /// URLs that external clients can reach. Required when the server binds
+    /// to `0.0.0.0` inside a container but clients connect via
+    /// `localhost` or a reverse proxy hostname.
+    ///
+    /// Example: `public_url = "http://localhost:8080"`
+    /// Env: `SELENE_PUBLIC_URL`
+    ///
+    /// When absent, derived from `http.listen_addr` with `0.0.0.0`
+    /// replaced by `localhost`.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
     /// MCP session idle timeout in seconds (default: 300 = 5 minutes).
     /// Sessions with no activity beyond this threshold are cleaned up.
     #[serde(default = "default_mcp_session_timeout")]
@@ -152,6 +219,7 @@ impl std::fmt::Debug for McpConfig {
                 "registration_token",
                 &self.registration_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("public_url", &self.public_url)
             .field("session_timeout_secs", &self.session_timeout_secs)
             .field("max_sessions", &self.max_sessions)
             .finish()
@@ -169,8 +237,30 @@ impl Default for McpConfig {
             refresh_token_ttl_secs: 604_800,
             registration_token: None,
             session_timeout_secs: default_mcp_session_timeout(),
+            public_url: None,
             max_sessions: default_mcp_max_sessions(),
         }
+    }
+}
+
+impl McpConfig {
+    /// Resolve the public base URL for OAuth discovery endpoints.
+    ///
+    /// Priority: explicit `public_url` > derived from `http_addr` with
+    /// `0.0.0.0` replaced by `localhost` (unreachable bind addresses
+    /// break MCP clients running outside the container).
+    pub fn resolve_public_url(&self, http_addr: std::net::SocketAddr, dev_mode: bool) -> String {
+        if let Some(url) = &self.public_url {
+            return url.trim_end_matches('/').to_string();
+        }
+        let scheme = if dev_mode { "http" } else { "https" };
+        let addr_str = http_addr.to_string();
+        let host = if addr_str.starts_with("0.0.0.0:") {
+            addr_str.replacen("0.0.0.0", "localhost", 1)
+        } else {
+            addr_str
+        };
+        format!("{scheme}://{host}")
     }
 }
 
@@ -220,11 +310,17 @@ pub struct VaultConfig {
 /// Vector embedding configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct VectorConfig {
+    /// Embedding model name (default: `"embeddinggemma"`).
+    #[serde(default = "default_model_name")]
+    pub model: String,
     /// Path to model directory (safetensors + tokenizer + config).
-    /// Default: {data_dir}/models/all-MiniLM-L6-v2/
+    /// Default: `{data_dir}/models/embeddinggemma-300m/`
     pub model_path: Option<PathBuf>,
+    /// Output dimensions for EmbeddingGemma (MRL truncation).
+    /// Options: 768 (default), 512, 256, 128.
+    #[serde(default)]
+    pub dimensions: Option<usize>,
     /// Remote embedding endpoint (alternative to local model).
     /// When set, embed() calls this HTTP endpoint instead of local candle.
     /// Example: "http://hub:8090/v1/embeddings"
@@ -246,9 +342,22 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
-    /// HNSW staging buffer capacity before rebuild (default: 256).
-    #[serde(default)]
-    pub hnsw_staging_capacity: Option<usize>,
+}
+
+impl Default for VectorConfig {
+    fn default() -> Self {
+        Self {
+            model: default_model_name(),
+            model_path: None,
+            dimensions: None,
+            endpoint: None,
+            auto_embed: Vec::new(),
+            hnsw_m: None,
+            hnsw_m0: None,
+            hnsw_ef_construction: None,
+            hnsw_ef_search: None,
+        }
+    }
 }
 
 impl VectorConfig {
@@ -263,9 +372,6 @@ impl VectorConfig {
         }
         if let Some(ef) = self.hnsw_ef_search {
             params.ef_search = ef;
-        }
-        if let Some(cap) = self.hnsw_staging_capacity {
-            params.staging_capacity = cap;
         }
         params
     }
@@ -285,6 +391,10 @@ pub struct AutoEmbedRule {
 
 fn default_embedding_property() -> String {
     "embedding".into()
+}
+
+fn default_model_name() -> String {
+    "embeddinggemma".into()
 }
 
 // ── Runtime profiles & services ──────────────────────────────────────────
@@ -622,7 +732,6 @@ pub struct SeleneConfig {
     /// Bidirectional sync settings for hub-spoke topologies.
     pub sync: SyncConfig,
     /// Federation settings.
-    #[cfg(feature = "federation")]
     pub federation: crate::federation::config::FederationConfig,
 }
 
@@ -674,11 +783,34 @@ impl SeleneConfig {
         if let Ok(token) = std::env::var("SELENE_METRICS_TOKEN") {
             http.metrics_token = Some(token);
         }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_READ")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.read_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_WRITE")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.write_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_QUERY")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.query_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_DATA")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.data_per_sec = n;
+        }
 
         // MCP: env override
         let mut mcp = file_config.mcp.unwrap_or_default();
         if let Some(enabled) = env_bool("SELENE_MCP_ENABLED") {
             mcp.enabled = enabled;
+        }
+        if let Ok(url) = std::env::var("SELENE_PUBLIC_URL") {
+            mcp.public_url = Some(url);
         }
 
         let performance = file_config.performance.unwrap_or_default();
@@ -788,7 +920,6 @@ impl SeleneConfig {
             node_tls: file_config.node_tls,
             replica: file_config.replica,
             sync: file_config.sync.unwrap_or_default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         })
     }
@@ -830,7 +961,6 @@ impl SeleneConfig {
             node_tls: NodeTlsConfig::default(),
             replica: ReplicaConfig::default(),
             sync: SyncConfig::default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         }
     }
@@ -862,7 +992,6 @@ impl SeleneConfig {
             node_tls: NodeTlsConfig::default(),
             replica: ReplicaConfig::default(),
             sync: SyncConfig::default(),
-            #[cfg(feature = "federation")]
             federation: crate::federation::config::FederationConfig::default(),
         }
     }

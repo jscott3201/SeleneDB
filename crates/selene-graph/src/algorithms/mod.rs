@@ -8,6 +8,6 @@ pub mod path;
 pub mod traversal;
 
 // Re-export all functions at the module level for backwards compatibility.
-pub use containment::{containment_children, containment_walk_up};
+pub use containment::{containment_children, containment_walk_up, walk_ancestors};
 pub use path::shortest_path;
-pub use traversal::{bfs, dfs, reachable};
+pub use traversal::{bfs, bfs_with_depth, dfs, reachable};

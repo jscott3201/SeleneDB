@@ -25,7 +25,7 @@ impl GqlOptimizerRule for InListOptimizationRule {
     fn rewrite(
         &self,
         mut plan: ExecutionPlan,
-        _ctx: &OptimizeContext<'_>,
+        ctx: &OptimizeContext<'_>,
     ) -> Result<Transformed<ExecutionPlan>, GqlError> {
         // Collect scan variables
         let scan_vars: Vec<(IStr, Option<IStr>)> = plan
@@ -83,16 +83,33 @@ impl GqlOptimizerRule for InListOptimizationRule {
                         .collect();
 
                     if literals.len() == list.len() {
-                        claimed_vars.insert(*var);
-                        hints.push((
-                            *var,
-                            InListHint {
-                                key: *key,
-                                values: literals,
-                            },
-                        ));
-                        changed = true;
-                        return false; // remove from pipeline
+                        // Only claim this filter (removing it from the pipeline)
+                        // if a property index exists for the target property.
+                        // Without an index, the in_list_hint produces an empty
+                        // bitmap and silently drops all results.
+                        let has_index = ctx
+                            .graph
+                            .and_then(|g| {
+                                let label = scan_vars
+                                    .iter()
+                                    .find(|(sv, _)| sv == var)
+                                    .and_then(|(_, l)| *l)?;
+                                Some(g.has_property_index(label, *key))
+                            })
+                            .unwrap_or(false);
+
+                        if has_index {
+                            claimed_vars.insert(*var);
+                            hints.push((
+                                *var,
+                                InListHint {
+                                    key: *key,
+                                    values: literals,
+                                },
+                            ));
+                            changed = true;
+                            return false; // remove from pipeline
+                        }
                     }
                 }
             }

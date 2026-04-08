@@ -18,11 +18,8 @@ parquet = { workspace = true, features = ["zstd"] }
 tokio = { workspace = true, features = ["time", "fs"] }
 tracing.workspace = true
 thiserror.workspace = true
-url = { version = "2", optional = true }
-object_store = { version = "0.13", optional = true, default-features = false, features = ["aws", "gcp", "azure"] }
-
-[features]
-cloud-storage = ["dep:object_store", "dep:url"]
+url = "2"
+object_store = { version = "0.13", default-features = false, features = ["aws", "gcp", "azure"] }
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["bench"] }

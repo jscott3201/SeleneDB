@@ -11,8 +11,6 @@ pub struct HnswParams {
     pub ef_construction: usize,
     /// Default search width during query (default: 50, overridable per-query).
     pub ef_search: usize,
-    /// Max vectors in staging buffer before triggering rebuild (default: 256).
-    pub staging_capacity: usize,
     /// Layer assignment probability factor: 1.0 / ln(M).
     pub level_factor: f64,
 }
@@ -24,7 +22,6 @@ impl HnswParams {
             m0: m * 2,
             ef_construction: 200,
             ef_search: 50,
-            staging_capacity: 256,
             level_factor: 1.0 / (m as f64).ln(),
         }
     }
@@ -51,7 +48,6 @@ mod tests {
         assert_eq!(p.m0, 32);
         assert_eq!(p.ef_construction, 200);
         assert_eq!(p.ef_search, 50);
-        assert_eq!(p.staging_capacity, 256);
     }
 
     #[test]

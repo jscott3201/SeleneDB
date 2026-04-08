@@ -284,16 +284,20 @@ pub enum PipelineOp {
     /// ORDER BY -- pipeline breaker (must materialize + sort).
     Sort { terms: Vec<OrderTerm> },
 
-    /// OFFSET n -- streaming skip.
-    Offset { count: u64 },
+    /// OFFSET n or $param -- streaming skip.
+    Offset {
+        value: crate::ast::statement::LimitValue,
+    },
 
-    /// LIMIT n -- streaming truncate.
-    Limit { count: u64 },
+    /// LIMIT n or $param -- streaming truncate.
+    Limit {
+        value: crate::ast::statement::LimitValue,
+    },
 
     /// RETURN -- terminal projection with optional GROUP BY + HAVING.
     Return {
         projections: Vec<PlannedProjection>,
-        group_by: Vec<IStr>,
+        group_by: Vec<Expr>,
         distinct: bool,
         having: Option<Expr>,
         /// RETURN * -- project all bound variables (projections will be empty).
@@ -305,7 +309,7 @@ pub enum PipelineOp {
     /// Only projected variables survive into subsequent pipeline stages.
     With {
         projections: Vec<PlannedProjection>,
-        group_by: Vec<IStr>,
+        group_by: Vec<Expr>,
         distinct: bool,
         having: Option<Expr>,
         where_filter: Option<Expr>,
@@ -315,7 +319,10 @@ pub enum PipelineOp {
     Call { procedure: ProcedureCall },
 
     /// ORDER BY + LIMIT fused into bounded heap: O(N log K) vs O(N log N).
-    TopK { terms: Vec<OrderTerm>, limit: u64 },
+    TopK {
+        terms: Vec<OrderTerm>,
+        limit: crate::ast::statement::LimitValue,
+    },
 
     /// CALL { subquery } -- inline subquery per input row.
     Subquery { plan: Box<ExecutionPlan> },
@@ -323,10 +330,22 @@ pub enum PipelineOp {
     /// FOR var IN expr -- unwind list to rows.
     For { var: IStr, list_expr: Expr },
 
+    /// MATCH following a WITH -- correlated pattern expansion seeded by prior bindings.
+    ///
+    /// Generated when a MATCH appears after a WITH clause. At execution time, the
+    /// pattern ops are run per-binding using the WITH output as seeds. Variables
+    /// already present in the seed binding short-circuit their LabelScan (correlated
+    /// path). An optional WHERE filter from the MATCH clause is applied after expansion.
+    NestedMatch {
+        pattern_ops: Vec<PatternOp>,
+        where_filter: Option<Expr>,
+    },
+
     /// Read materialized view state (produced by MATCH VIEW ... YIELD).
     ViewScan {
         view_name: IStr,
         yields: Vec<(IStr, Option<IStr>)>, // (column_name, alias)
+        yield_star: bool,
     },
 }
 

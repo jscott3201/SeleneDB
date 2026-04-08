@@ -19,6 +19,7 @@ path = "src/main.rs"
 selene-core.workspace = true
 selene-graph.workspace = true
 selene-gql.workspace = true
+selene-algorithms.workspace = true
 selene-ts.workspace = true
 selene-persist.workspace = true
 selene-wire.workspace = true
@@ -32,6 +33,8 @@ rustls-pki-types.workspace = true
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tokio-stream.workspace = true
+futures.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -77,6 +80,9 @@ hostname = "0.4"
 # CSV import/export
 csv = "1"
 
+# SPARQL form-encoded POST support
+form_urlencoded = "1"
+
 # Metrics
 prometheus = "0.14"
 
@@ -101,27 +107,21 @@ tower-http = { version = "0.6", features = ["cors", "request-id", "set-header", 
 subtle = "2"
 
 # MCP (always compiled, runtime toggle via config)
-rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+rmcp = { workspace = true, features = ["transport-streamable-http-server", "transport-io"] }
 schemars.workspace = true
 
 # Used by replica mode (always) and federation (feature-gated)
 selene-client.workspace = true
 
-# Full-text search (feature-gated)
-tantivy = { version = "0.26", optional = true }
+# Full-text search
+tantivy = "0.26"
 
-# RDF import/export (feature-gated)
-selene-rdf = { workspace = true, optional = true }
+# RDF import/export
+selene-rdf.workspace = true
 
 [features]
 default = []
 dev-tls = ["dep:rcgen"]
-federation = []
-vector = ["selene-gql/vector"]
-search = ["dep:tantivy"]
-cloud-storage = ["selene-ts/cloud-storage"]
-rdf = ["selene-rdf"]
-rdf-sparql = ["rdf", "selene-rdf/sparql"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["tls"] }

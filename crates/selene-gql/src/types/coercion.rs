@@ -49,6 +49,25 @@ impl GqlValue {
                 Trilean::from(a_utc == b_utc)
             }
             (GqlValue::Duration(a), GqlValue::Duration(b)) => Trilean::from(a.nanos == b.nanos),
+            (GqlValue::List(a), GqlValue::List(b)) => {
+                if a.len() == b.len() {
+                    let mut all_true = true;
+                    for (x, y) in a.elements.iter().zip(b.elements.iter()) {
+                        match x.gql_eq(y) {
+                            Trilean::False => return Trilean::False,
+                            Trilean::Unknown => all_true = false,
+                            Trilean::True => {}
+                        }
+                    }
+                    if all_true {
+                        Trilean::True
+                    } else {
+                        Trilean::Unknown
+                    }
+                } else {
+                    Trilean::False
+                }
+            }
             // Numeric: coerce and compare
             _ if self.is_numeric() && other.is_numeric() => {
                 match coerce_and_compare_numeric(self, other) {
@@ -587,8 +606,8 @@ mod tests {
 
     #[test]
     fn distinctness_key_float_deterministic() {
-        let a = GqlValue::Float(3.14);
-        let b = GqlValue::Float(3.14);
+        let a = GqlValue::Float(3.15);
+        let b = GqlValue::Float(3.15);
         assert_eq!(a.distinctness_key(), b.distinctness_key());
     }
 
@@ -636,8 +655,8 @@ mod tests {
 
     #[test]
     fn coerce_string_to_float() {
-        let v = GqlValue::String(SmolStr::new("3.14"));
-        assert_eq!(try_coerce_to_numeric(&v), Some(GqlValue::Float(3.14)));
+        let v = GqlValue::String(SmolStr::new("3.15"));
+        assert_eq!(try_coerce_to_numeric(&v), Some(GqlValue::Float(3.15)));
     }
 
     #[test]

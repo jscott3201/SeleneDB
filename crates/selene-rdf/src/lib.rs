@@ -12,10 +12,9 @@ pub mod observation;
 pub mod ontology;
 pub mod terms;
 
-#[cfg(feature = "sparql")]
 pub mod adapter;
-#[cfg(feature = "sparql")]
 pub mod sparql;
+pub mod update;
 
 /// Supported RDF serialization formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

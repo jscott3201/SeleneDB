@@ -122,6 +122,81 @@ impl ScalarFunction for ToStringFunction {
     }
 }
 
+// ── Type conversion functions (Cypher-compatible camelCase names) ────
+
+pub(crate) struct ToStringCypherFunction;
+impl ScalarFunction for ToStringCypherFunction {
+    fn name(&self) -> &'static str {
+        "tostring"
+    }
+    fn description(&self) -> &'static str {
+        "Convert any value to its string representation; Null returns Null"
+    }
+    fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
+        match args.first() {
+            Some(GqlValue::Null) | None => Ok(GqlValue::Null),
+            Some(GqlValue::String(s)) => Ok(GqlValue::String(s.clone())),
+            Some(GqlValue::Int(i)) => Ok(GqlValue::String(SmolStr::new(i.to_string()))),
+            Some(GqlValue::UInt(u)) => Ok(GqlValue::String(SmolStr::new(u.to_string()))),
+            Some(GqlValue::Float(f)) => Ok(GqlValue::String(SmolStr::new(f.to_string()))),
+            Some(GqlValue::Bool(b)) => Ok(GqlValue::String(SmolStr::new(if *b {
+                "true"
+            } else {
+                "false"
+            }))),
+            _ => Ok(GqlValue::String(SmolStr::new("<complex>"))),
+        }
+    }
+}
+
+pub(crate) struct ToIntegerFunction;
+impl ScalarFunction for ToIntegerFunction {
+    fn name(&self) -> &'static str {
+        "tointeger"
+    }
+    fn description(&self) -> &'static str {
+        "Convert a value to integer; returns Null on parse failure or Null input"
+    }
+    fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
+        match args.first() {
+            Some(GqlValue::Null) | None => Ok(GqlValue::Null),
+            Some(GqlValue::Int(i)) => Ok(GqlValue::Int(*i)),
+            Some(GqlValue::UInt(u)) => Ok(GqlValue::Int(*u as i64)),
+            Some(GqlValue::Float(f)) => Ok(GqlValue::Int(*f as i64)),
+            Some(GqlValue::Bool(b)) => Ok(GqlValue::Int(i64::from(*b))),
+            Some(GqlValue::String(s)) => match s.trim().parse::<i64>() {
+                Ok(n) => Ok(GqlValue::Int(n)),
+                Err(_) => Ok(GqlValue::Null),
+            },
+            _ => Ok(GqlValue::Null),
+        }
+    }
+}
+
+pub(crate) struct ToFloatFunction;
+impl ScalarFunction for ToFloatFunction {
+    fn name(&self) -> &'static str {
+        "tofloat"
+    }
+    fn description(&self) -> &'static str {
+        "Convert a value to float; returns Null on parse failure or Null input"
+    }
+    fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
+        match args.first() {
+            Some(GqlValue::Null) | None => Ok(GqlValue::Null),
+            Some(GqlValue::Float(f)) => Ok(GqlValue::Float(*f)),
+            Some(GqlValue::Int(i)) => Ok(GqlValue::Float(*i as f64)),
+            Some(GqlValue::UInt(u)) => Ok(GqlValue::Float(*u as f64)),
+            Some(GqlValue::Bool(b)) => Ok(GqlValue::Float(if *b { 1.0 } else { 0.0 })),
+            Some(GqlValue::String(s)) => match s.trim().parse::<f64>() {
+                Ok(n) => Ok(GqlValue::Float(n)),
+                Err(_) => Ok(GqlValue::Null),
+            },
+            _ => Ok(GqlValue::Null),
+        }
+    }
+}
+
 // ── Type checking functions ───────────────────────────────────────
 
 pub(crate) struct ValueTypeFunction;

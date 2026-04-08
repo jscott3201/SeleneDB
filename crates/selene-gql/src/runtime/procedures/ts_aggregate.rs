@@ -62,6 +62,13 @@ impl Procedure for TsAggregate {
     ) -> Result<Vec<ProcedureRow>, GqlError> {
         let hot = hot_tier.ok_or_else(|| GqlError::internal("time-series not available"))?;
 
+        if args.len() < 4 {
+            return Err(GqlError::InvalidArgument {
+                message: "ts.aggregate requires 4 arguments: entity_id, property, duration, agg_fn"
+                    .into(),
+            });
+        }
+
         let entity_id = args[0].as_int()?;
 
         // Auth scope check

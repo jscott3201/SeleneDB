@@ -553,12 +553,10 @@ mod tests {
             .unwrap();
         file.write_all(&[0xFF]).unwrap();
 
-        let result = Wal::read_entries_after(&path, 0);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            PersistError::CrcMismatch { .. }
-        ));
+        // CRC mismatch stops replay with a warning (not an error).
+        // The corrupted entry is skipped, so we get zero valid entries.
+        let entries = Wal::read_entries_after(&path, 0).unwrap();
+        assert!(entries.is_empty(), "corrupted entry should be skipped");
     }
 
     #[test]
@@ -1112,7 +1110,7 @@ mod tests {
             Change::PropertySet {
                 node_id: NodeId(1),
                 key: IStr::new("float_val"),
-                value: Value::Float(3.14),
+                value: Value::Float(3.15),
                 old_value: None,
             },
             Change::PropertySet {

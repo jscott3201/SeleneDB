@@ -124,7 +124,7 @@ pub(crate) fn select_neighbors_heuristic(
 ///    d. Add the new node to each selected neighbor's list (bidirectional).
 ///    e. If a neighbor exceeds M connections, prune via heuristic selection.
 /// 4. If `node.max_layer > graph.max_layer`, update the entry point.
-pub(crate) fn insert_node(graph: &mut HnswGraph, node: HnswNode, params: &HnswParams) {
+pub fn insert_node(graph: &mut HnswGraph, node: HnswNode, params: &HnswParams) {
     let new_idx = graph.nodes.len() as u32;
     let node_max_layer = node.max_layer;
     let node_id_raw = node.node_id.0;

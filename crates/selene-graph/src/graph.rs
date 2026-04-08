@@ -46,16 +46,20 @@ pub struct SeleneGraph {
     // Property secondary index: (label, prop_key) → TypedIndex
     // Only populated for schema properties with `indexed: true`.
     // TypedIndex uses native BTreeMap per value type for correct sort order.
-    pub(crate) property_index: FxHashMap<(IStr, IStr), crate::typed_index::TypedIndex>,
+    // Wrapped in Arc for O(1) clone during snapshot publish (CoW on mutation).
+    pub(crate) property_index:
+        FxHashMap<(IStr, IStr), std::sync::Arc<crate::typed_index::TypedIndex>>,
 
     // Composite property index: (label, [key1, key2, ...]) → CompositeTypedIndex
     // Populated for schemas with key_properties.len() >= 2.
+    // Wrapped in Arc for O(1) clone during snapshot publish (CoW on mutation).
     pub(crate) composite_indexes:
-        FxHashMap<(IStr, Vec<IStr>), crate::typed_index::CompositeTypedIndex>,
+        FxHashMap<(IStr, Vec<IStr>), std::sync::Arc<crate::typed_index::CompositeTypedIndex>>,
 
-    /// HNSW approximate nearest neighbor index for vector properties.
-    /// None when no vector properties exist or vector feature is disabled.
-    pub(crate) hnsw_index: Option<std::sync::Arc<crate::hnsw::HnswIndex>>,
+    /// HNSW approximate nearest neighbor indexes, keyed by namespace.
+    /// Default namespace `""` holds non-system vectors. System labels (e.g.
+    /// `__Memory`) route to namespaces like `"__memory"`.
+    pub(crate) hnsw_indexes: rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>>,
 
     // Mutation generation -- incremented on every commit for cache invalidation
     generation: u64,
@@ -97,7 +101,7 @@ impl SeleneGraph {
             next_edge_id: 1,
             property_index: FxHashMap::default(),
             composite_indexes: FxHashMap::default(),
-            hnsw_index: None,
+            hnsw_indexes: rustc_hash::FxHashMap::default(),
             generation: 0,
             schema,
             changelog: ChangelogBuffer::new(changelog_capacity),
@@ -307,6 +311,42 @@ impl SeleneGraph {
         self.property_index.contains_key(&(label, prop_key))
     }
 
+    /// Create or replace a property index for the given (label, property_key) pair,
+    /// populating it from existing nodes that carry the label and have the property set.
+    pub fn create_property_index(&mut self, label: IStr, prop_key: IStr) {
+        use crate::typed_index::TypedIndex;
+        use selene_core::ValueType;
+
+        // Determine the value type from the first matching node's property.
+        let value_type = self
+            .all_node_bitmap()
+            .iter()
+            .filter_map(|nid| self.get_node(NodeId(u64::from(nid))))
+            .filter(|n| n.labels.contains(label))
+            .find_map(|n| {
+                n.properties.get(prop_key).map(|v| match v {
+                    selene_core::Value::Int(_) => ValueType::Int,
+                    selene_core::Value::UInt(_) => ValueType::UInt,
+                    selene_core::Value::Float(_) => ValueType::Float,
+                    _ => ValueType::String,
+                })
+            })
+            .unwrap_or(ValueType::String);
+
+        let mut idx = TypedIndex::new_for_type(&value_type);
+        for nid in &self.all_node_bitmap() {
+            let node_id = NodeId(u64::from(nid));
+            if let Some(node) = self.get_node(node_id)
+                && node.labels.contains(label)
+                && let Some(val) = node.properties.get(prop_key)
+            {
+                idx.insert(val, node_id);
+            }
+        }
+        self.property_index
+            .insert((label, prop_key), std::sync::Arc::new(idx));
+    }
+
     /// Get the TypedIndex for sorted iteration (index-ordered scan).
     /// Returns None if no index exists for this (label, key) pair.
     pub fn property_index_entries(
@@ -314,7 +354,7 @@ impl SeleneGraph {
         label: IStr,
         prop_key: IStr,
     ) -> Option<&crate::typed_index::TypedIndex> {
-        self.property_index.get(&(label, prop_key))
+        self.property_index.get(&(label, prop_key)).map(|v| &**v)
     }
 
     /// Look up nodes by composite key (label, [key1, key2, ...], [val1, val2, ...]).
@@ -343,6 +383,7 @@ impl SeleneGraph {
         self.composite_indexes
             .iter()
             .filter(move |((l, _), _)| *l == label)
+            .map(|(k, v)| (k, &**v))
     }
 
     // -- Accessors --
@@ -388,14 +429,38 @@ impl SeleneGraph {
         &mut self.view_registry
     }
 
-    /// Get the HNSW vector index (if one has been built).
+    /// Get the default-namespace HNSW vector index.
     pub fn hnsw_index(&self) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
-        self.hnsw_index.as_ref()
+        self.hnsw_indexes.get("")
     }
 
-    /// Set the HNSW vector index.
+    /// Get the HNSW vector index for a specific namespace.
+    pub fn hnsw_index_for(
+        &self,
+        namespace: &str,
+    ) -> Option<&std::sync::Arc<crate::hnsw::HnswIndex>> {
+        self.hnsw_indexes.get(namespace)
+    }
+
+    /// Set the HNSW vector index for a namespace (empty string = default).
+    pub fn set_hnsw_index_for(
+        &mut self,
+        namespace: String,
+        index: std::sync::Arc<crate::hnsw::HnswIndex>,
+    ) {
+        self.hnsw_indexes.insert(namespace, index);
+    }
+
+    /// Set the default-namespace HNSW vector index.
     pub fn set_hnsw_index(&mut self, index: std::sync::Arc<crate::hnsw::HnswIndex>) {
-        self.hnsw_index = Some(index);
+        self.hnsw_indexes.insert(String::new(), index);
+    }
+
+    /// Iterate all HNSW indexes by namespace.
+    pub fn hnsw_indexes(
+        &self,
+    ) -> &rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>> {
+        &self.hnsw_indexes
     }
 
     /// Read-only access to the node store (for column-level scans).
@@ -499,7 +564,7 @@ impl SeleneGraph {
             for (prop_key, prop_value) in node.properties.iter() {
                 let index_key = (label, *prop_key);
                 if let Some(idx) = self.property_index.get_mut(&index_key) {
-                    idx.insert(prop_value, id);
+                    std::sync::Arc::make_mut(idx).insert(prop_value, id);
                 }
             }
         }
@@ -537,7 +602,7 @@ impl SeleneGraph {
                     for &label in &old_labels {
                         let index_key = (label, *prop_key);
                         if let Some(idx) = self.property_index.get_mut(&index_key) {
-                            idx.remove(prop_value, id);
+                            std::sync::Arc::make_mut(idx).remove(prop_value, id);
                         }
                     }
                 }
@@ -563,7 +628,7 @@ impl SeleneGraph {
             for (prop_key, prop_value) in node.properties.iter() {
                 let index_key = (label, *prop_key);
                 if let Some(idx) = self.property_index.get_mut(&index_key) {
-                    idx.remove(prop_value, id);
+                    std::sync::Arc::make_mut(idx).remove(prop_value, id);
                 }
             }
         }
@@ -661,7 +726,7 @@ impl SeleneGraph {
                 if let Some(idx) = self.property_index.get_mut(&index_key)
                     && let Some(old_val) = node.properties.get(key)
                 {
-                    idx.remove(old_val, id);
+                    std::sync::Arc::make_mut(idx).remove(old_val, id);
                 }
             }
             // Remove old composite index entry
@@ -684,7 +749,7 @@ impl SeleneGraph {
             for label in node.labels.iter() {
                 let index_key = (label, key);
                 if let Some(idx) = self.property_index.get_mut(&index_key) {
-                    idx.insert(&value, id);
+                    std::sync::Arc::make_mut(idx).insert(&value, id);
                 }
             }
             // Insert new composite index entry
@@ -710,7 +775,7 @@ impl SeleneGraph {
                 if let Some(idx) = self.property_index.get_mut(&index_key)
                     && let Some(val) = node.properties.get(key)
                 {
-                    idx.remove(val, id);
+                    std::sync::Arc::make_mut(idx).remove(val, id);
                 }
             }
             // Remove from composite indexes
@@ -801,7 +866,10 @@ impl SeleneGraph {
 /// If `key_filter` is `Some(k)`, only composite indexes containing property
 /// `k` are updated. If `insert` is true, inserts the node; otherwise removes.
 pub(crate) fn composite_index_apply(
-    indexes: &mut FxHashMap<(IStr, Vec<IStr>), crate::typed_index::CompositeTypedIndex>,
+    indexes: &mut FxHashMap<
+        (IStr, Vec<IStr>),
+        std::sync::Arc<crate::typed_index::CompositeTypedIndex>,
+    >,
     label: IStr,
     node_id: NodeId,
     properties: &selene_core::PropertyMap,
@@ -819,9 +887,9 @@ pub(crate) fn composite_index_apply(
             && let Some(cidx) = indexes.get_mut(&(label, props))
         {
             if insert {
-                cidx.insert(&values, node_id);
+                std::sync::Arc::make_mut(cidx).insert(&values, node_id);
             } else {
-                cidx.remove(&values, node_id);
+                std::sync::Arc::make_mut(cidx).remove(&values, node_id);
             }
         }
     }
@@ -922,7 +990,7 @@ impl SeleneGraph {
         for (label, prop_key, vt) in &indexed_props {
             self.property_index
                 .entry((*label, *prop_key))
-                .or_insert_with(|| TypedIndex::new_for_type(vt));
+                .or_insert_with(|| std::sync::Arc::new(TypedIndex::new_for_type(vt)));
         }
 
         // Populate from existing nodes
@@ -933,7 +1001,7 @@ impl SeleneGraph {
                         && let Some(value) = node.properties.get(*prop_key)
                         && let Some(idx) = self.property_index.get_mut(&(*label, *prop_key))
                     {
-                        idx.insert(value, node_id);
+                        std::sync::Arc::make_mut(idx).insert(value, node_id);
                     }
                 }
             }
@@ -976,7 +1044,7 @@ impl SeleneGraph {
             let index_key = (*label, props.clone());
             self.composite_indexes
                 .entry(index_key)
-                .or_insert_with(|| CompositeTypedIndex::new(props.clone()));
+                .or_insert_with(|| std::sync::Arc::new(CompositeTypedIndex::new(props.clone())));
         }
 
         // Populate from existing nodes
@@ -995,7 +1063,7 @@ impl SeleneGraph {
                         continue; // some key properties missing on this node
                     }
                     if let Some(idx) = self.composite_indexes.get_mut(&(*label, props.clone())) {
-                        idx.insert(&values, node_id);
+                        std::sync::Arc::make_mut(idx).insert(&values, node_id);
                     }
                 }
             }

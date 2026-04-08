@@ -17,10 +17,8 @@ pub(crate) mod metrics;
 pub(crate) mod mutation_batcher;
 pub mod ops;
 pub mod quic;
-#[cfg(feature = "rdf")]
 pub(crate) mod rdf_service;
 pub mod replica;
-#[cfg(feature = "search")]
 pub mod search;
 pub mod service_registry;
 pub(crate) mod stats_subscriber;
@@ -39,6 +37,21 @@ pub(crate) mod wal_coalescer;
 
 // Public API re-exports
 pub use bootstrap::ServerState;
+
+/// Run the MCP server over stdin/stdout (stdio transport).
+///
+/// Blocks until the client disconnects (stdin EOF). Uses `dev_admin`
+/// auth context since stdio implies trusted local access.
+pub async fn serve_stdio_mcp(
+    state: std::sync::Arc<ServerState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use rmcp::ServiceExt;
+    let tools = http::mcp::SeleneTools::new(state, auth::handshake::AuthContext::dev_admin());
+    let transport = rmcp::transport::io::stdio();
+    let server = tools.serve(transport).await?;
+    let _ = server.waiting().await;
+    Ok(())
+}
 pub use config::SeleneConfig;
 pub use ops::init_start_time;
 pub use quic::handler;

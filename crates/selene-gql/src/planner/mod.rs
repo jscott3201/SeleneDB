@@ -9,11 +9,36 @@ pub mod optimize;
 pub mod plan;
 pub(crate) mod wco_rule;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use selene_core::IStr;
 use selene_graph::{EdgeStatistics, SeleneGraph};
+
+// Thread-local cache for EdgeStatistics keyed by graph identity + generation.
+// Avoids O(E) rebuild on every plan_query/plan_mutation call. The pointer
+// discriminator prevents false hits across distinct graph instances that
+// share the same generation (e.g., multiple fresh graphs at generation 0).
+type EdgeStatsEntry = ((usize, u64), Arc<EdgeStatistics>);
+thread_local! {
+    static EDGE_STATS_CACHE: RefCell<Option<EdgeStatsEntry>> = const { RefCell::new(None) };
+}
+
+fn cached_edge_statistics(graph: &SeleneGraph) -> Arc<EdgeStatistics> {
+    EDGE_STATS_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        let key = (std::ptr::from_ref(graph) as usize, graph.generation());
+        if let Some((cached_key, stats)) = c.as_ref()
+            && *cached_key == key
+        {
+            return Arc::clone(stats);
+        }
+        let stats = Arc::new(EdgeStatistics::build(graph));
+        *c = Some((key, Arc::clone(&stats)));
+        stats
+    })
+}
 
 use crate::ast::expr::Expr;
 use crate::ast::pattern::*;
@@ -48,19 +73,23 @@ fn plan_pipeline_stmt(
                 terms: terms.clone(),
             });
         }
-        PipelineStatement::Offset(n) => {
-            pipeline_ops.push(PipelineOp::Offset { count: *n });
+        PipelineStatement::Offset(v) => {
+            pipeline_ops.push(PipelineOp::Offset { value: v.clone() });
         }
-        PipelineStatement::Limit(n) => {
-            pipeline_ops.push(PipelineOp::Limit { count: *n });
+        PipelineStatement::Limit(v) => {
+            pipeline_ops.push(PipelineOp::Limit { value: v.clone() });
         }
         PipelineStatement::With(with) => {
             plan_with(with, pipeline_ops);
         }
         PipelineStatement::Call(call) => {
+            let filter = call.filter.clone();
             pipeline_ops.push(PipelineOp::Call {
                 procedure: call.clone(),
             });
+            if let Some(predicate) = filter {
+                pipeline_ops.push(PipelineOp::Filter { predicate });
+            }
         }
         PipelineStatement::Subquery(sub_pipeline) => {
             let sub_plan = plan_query(sub_pipeline, graph)?;
@@ -74,10 +103,15 @@ fn plan_pipeline_stmt(
                 list_expr: list_expr.clone(),
             });
         }
-        PipelineStatement::MatchView { name, yields } => {
+        PipelineStatement::MatchView {
+            name,
+            yields,
+            yield_star,
+        } => {
             pipeline_ops.push(PipelineOp::ViewScan {
                 view_name: *name,
                 yields: yields.iter().map(|y| (y.name, y.alias)).collect(),
+                yield_star: *yield_star,
             });
         }
         _ => return Ok(false),
@@ -93,16 +127,57 @@ pub fn plan_query(
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
     let mut bound_vars: HashSet<IStr> = HashSet::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
+    // Set to true after a WITH clause is processed. The next MATCH must be
+    // planned as a NestedMatch pipeline op (seeded by WITH output) rather
+    // than appended to the pre-WITH pattern_ops.
+    let mut after_with = false;
 
     for stmt in &pipeline.statements {
         match stmt {
             PipelineStatement::Match(m) => {
-                if m.optional {
-                    // OPTIONAL MATCH: wrap inner ops in Optional with join vars
+                if after_with {
+                    // MATCH after WITH: plan as a correlated NestedMatch pipeline op.
+                    // The seed bindings (WITH output) already carry the join variables,
+                    // so no Join op is needed -- the LabelScan short-circuits when the
+                    // variable is already present in the seed chunk (correlated path).
+                    let mut nested_ops = Vec::new();
+                    plan_match(m, &mut nested_ops, graph, &edge_stats)?;
+                    let new_vars = collect_bound_vars(&nested_ops);
+                    let where_filter = m.where_clause.clone();
+                    pipeline_ops.push(PipelineOp::NestedMatch {
+                        pattern_ops: nested_ops,
+                        where_filter,
+                    });
+                    bound_vars.extend(new_vars);
+                    after_with = false;
+                } else if m.optional {
+                    // OPTIONAL MATCH: wrap inner ops in Optional with join vars.
+                    //
+                    // WHERE clause routing (left-join semantics):
+                    //   - Predicates referencing only inner variables are pushed inside
+                    //     inner_ops as an IntermediateFilter. They filter inner candidates
+                    //     before null-padding, so when no inner candidate survives the
+                    //     filter the outer row is null-padded (not dropped).
+                    //   - Predicates referencing outer variables remain as pipeline
+                    //     filters. They run post-null-padding where the outer variable
+                    //     is guaranteed to be bound.
                     let mut inner_ops = Vec::new();
                     plan_match(m, &mut inner_ops, graph, &edge_stats)?;
                     let inner_vars = collect_bound_vars(&inner_ops);
+                    if let Some(ref predicate) = m.where_clause {
+                        if expr_references_outer_var(predicate, &inner_vars) {
+                            // Keep as pipeline filter: predicate uses outer variables.
+                            pipeline_ops.push(PipelineOp::Filter {
+                                predicate: predicate.clone(),
+                            });
+                        } else {
+                            // Safe to push inside: predicate references only inner vars.
+                            inner_ops.push(PatternOp::IntermediateFilter {
+                                predicate: predicate.clone(),
+                            });
+                        }
+                    }
                     let new_vars = inner_vars.iter().copied().collect();
                     let join_vars: Vec<IStr> =
                         bound_vars.intersection(&inner_vars).copied().collect();
@@ -121,9 +196,36 @@ pub fn plan_query(
                     let shared: Vec<IStr> = bound_vars.intersection(&new_vars).copied().collect();
                     if pattern_ops.is_empty() {
                         pattern_ops.extend(new_ops);
+                        // Push WHERE as IntermediateFilter to reduce bindings before
+                        // a potential subsequent Join (avoids cartesian explosion).
+                        if let Some(ref predicate) = m.where_clause {
+                            if expr_references_outer_var(predicate, &new_vars) {
+                                pipeline_ops.push(PipelineOp::Filter {
+                                    predicate: predicate.clone(),
+                                });
+                            } else {
+                                pattern_ops.push(PatternOp::IntermediateFilter {
+                                    predicate: predicate.clone(),
+                                });
+                            }
+                        }
                     } else {
                         let right_start = pattern_ops.len();
                         pattern_ops.extend(new_ops);
+                        // Push WHERE for the right side as IntermediateFilter
+                        // (filters right-side bindings before the Join).
+                        if let Some(ref predicate) = m.where_clause {
+                            if expr_references_outer_var(predicate, &new_vars) {
+                                // References left-side vars: keep as pipeline filter
+                                pipeline_ops.push(PipelineOp::Filter {
+                                    predicate: predicate.clone(),
+                                });
+                            } else {
+                                pattern_ops.push(PatternOp::IntermediateFilter {
+                                    predicate: predicate.clone(),
+                                });
+                            }
+                        }
                         let right_end = pattern_ops.len();
                         pattern_ops.push(PatternOp::Join {
                             right_start,
@@ -133,22 +235,38 @@ pub fn plan_query(
                     }
                     bound_vars.extend(new_vars);
                 }
-
-                // MATCH ... WHERE predicate → add as pipeline filter
-                if let Some(ref predicate) = m.where_clause {
-                    pipeline_ops.push(PipelineOp::Filter {
-                        predicate: predicate.clone(),
-                    });
-                }
+            }
+            PipelineStatement::With(with) => {
+                plan_with(with, &mut pipeline_ops);
+                // Update bound_vars to only the variables projected by WITH.
+                // Subsequent MATCHes operate in the reset scope.
+                bound_vars = with
+                    .projections
+                    .iter()
+                    .map(|p| {
+                        p.alias.unwrap_or_else(|| match &p.expr {
+                            crate::ast::expr::Expr::Var(name) => *name,
+                            _ => IStr::new("col"),
+                        })
+                    })
+                    .collect();
+                after_with = true;
             }
             PipelineStatement::Return(ret) => {
                 plan_return(ret, &mut pipeline_ops);
+                after_with = false;
             }
             other => {
                 plan_pipeline_stmt(other, &mut pipeline_ops, graph)?;
+                // LET, FILTER, etc. between WITH and MATCH do not consume the
+                // after_with flag -- only a MATCH resets it.
             }
         }
     }
+
+    // Canonicalize LIMIT/OFFSET order: OFFSET must precede LIMIT per SQL/GQL
+    // semantics regardless of their textual order in the query.
+    canonicalize_limit_offset(&mut pipeline_ops);
 
     // Rewrite Sort/TopK expressions that follow Return to reference projected aliases.
     // After RETURN, original pattern variables are destroyed -- Sort must use alias names.
@@ -178,13 +296,38 @@ pub fn plan_mutation(
 ) -> Result<ExecutionPlan, GqlError> {
     let mut pattern_ops = Vec::new();
     let mut pipeline_ops = Vec::new();
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
 
     if let Some(query) = &mp.query {
+        let mut prev_vars: Option<HashSet<IStr>> = None;
+
         for stmt in &query.statements {
             match stmt {
                 PipelineStatement::Match(m) => {
+                    let start = pattern_ops.len();
                     plan_match(m, &mut pattern_ops, graph, &edge_stats)?;
+
+                    // If this is the second+ MATCH, join with prior bindings.
+                    if let Some(ref prev) = prev_vars {
+                        let new_vars = collect_bound_vars(&pattern_ops[start..]);
+                        let join_vars: Vec<IStr> = prev.intersection(&new_vars).copied().collect();
+                        let right_end = pattern_ops.len();
+                        pattern_ops.push(PatternOp::Join {
+                            right_start: start,
+                            right_end,
+                            join_vars,
+                        });
+                    }
+
+                    let current_vars = collect_bound_vars(&pattern_ops);
+                    prev_vars = Some(current_vars);
+
+                    // MATCH ... WHERE predicate → add as pipeline filter
+                    if let Some(ref predicate) = m.where_clause {
+                        pipeline_ops.push(PipelineOp::Filter {
+                            predicate: predicate.clone(),
+                        });
+                    }
                 }
                 PipelineStatement::Return(_) => {
                     return Err(GqlError::parse_error(
@@ -231,7 +374,7 @@ pub fn plan_match_public(
     ops: &mut Vec<PatternOp>,
     graph: &SeleneGraph,
 ) -> Result<(), GqlError> {
-    let edge_stats = EdgeStatistics::build(graph);
+    let edge_stats = cached_edge_statistics(graph);
     plan_match(m, ops, graph, &edge_stats)
 }
 
@@ -592,14 +735,37 @@ fn fixup_target_vars(elements: &[PatternElement], ops: &mut [PatternOp], path_va
                 // After the first node, each node follows an edge.
                 // The edge's op is at ops[edge_count] (edge_count is 1-based after increment).
                 if node_idx > 0 && edge_count > 0 && edge_count <= ops.len() {
+                    // Convert inline property filters ({key: value}) on the target
+                    // node to PropertyFilter objects for scan-time pushdown on the
+                    // Expand. Only literal equality expressions are converted here;
+                    // complex expressions fall through to post-pattern pipeline
+                    // filtering via the optimizer's filter pushdown rules.
+                    let inline_as_filters: Vec<crate::pattern::scan::PropertyFilter> = node
+                        .properties
+                        .iter()
+                        .filter_map(|(key, expr)| {
+                            if let crate::ast::expr::Expr::Literal(val) = expr {
+                                Some(crate::pattern::scan::PropertyFilter {
+                                    key: *key,
+                                    op: crate::ast::expr::CompareOp::Eq,
+                                    value: val.clone(),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
                     match &mut ops[edge_count] {
                         PatternOp::Expand {
                             target_var,
                             target_labels,
+                            target_property_filters,
                             ..
                         } => {
                             *target_var = var;
                             *target_labels = node.labels.clone();
+                            target_property_filters.extend(inline_as_filters);
                         }
                         PatternOp::VarExpand {
                             target_var,
@@ -663,11 +829,11 @@ fn plan_return(ret: &ReturnClause, ops: &mut Vec<PipelineOp>) {
             terms: ret.order_by.clone(),
         });
     }
-    if let Some(offset) = ret.offset {
-        ops.push(PipelineOp::Offset { count: offset });
+    if let Some(offset) = ret.offset.clone() {
+        ops.push(PipelineOp::Offset { value: offset });
     }
-    if let Some(limit) = ret.limit {
-        ops.push(PipelineOp::Limit { count: limit });
+    if let Some(limit) = ret.limit.clone() {
+        ops.push(PipelineOp::Limit { value: limit });
     }
 }
 
@@ -688,7 +854,24 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let alias = p.alias.unwrap_or_else(|| IStr::new(&format!("col_{i}")));
+            let alias = p.alias.unwrap_or_else(|| {
+                // Infer alias from expression structure. Standard GQL
+                // behavior: `RETURN x` produces column `x`, `RETURN n.prop`
+                // produces column `n.prop`, function calls use the function
+                // name. Fall back to positional `col_{i}` for complex exprs.
+                match &p.expr {
+                    Expr::Var(name) => *name,
+                    Expr::Property(base, prop) => {
+                        if let Expr::Var(var) = base.as_ref() {
+                            IStr::new(&format!("{var}.{prop}"))
+                        } else {
+                            IStr::new(&format!("col_{i}"))
+                        }
+                    }
+                    Expr::Function(fc) => IStr::new(&format!("{}()", fc.name)),
+                    _ => IStr::new(&format!("col_{i}")),
+                }
+            });
             PlannedProjection {
                 expr: p.expr.clone(),
                 alias,
@@ -702,6 +885,19 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
 /// After RETURN, original pattern variables (s, n, etc.) are replaced by
 /// projection aliases (col_0, name, temp, etc.). Any Sort/TopK that follows
 /// must use the alias names. If an ORDER BY expression wasn't projected, it's
+/// Swap adjacent Limit/Offset so OFFSET always precedes LIMIT. Users may
+/// write `LIMIT 3 OFFSET 2` (SQL-style) but the correct execution order is
+/// skip-then-take regardless of textual order.
+fn canonicalize_limit_offset(pipeline: &mut [PipelineOp]) {
+    for i in 0..pipeline.len().saturating_sub(1) {
+        if matches!(pipeline[i], PipelineOp::Limit { .. })
+            && matches!(pipeline[i + 1], PipelineOp::Offset { .. })
+        {
+            pipeline.swap(i, i + 1);
+        }
+    }
+}
+
 /// added as a hidden projection (prefixed with `_sort_`) that is computed but
 /// excluded from the output Arrow schema.
 fn rewrite_sort_after_return(pipeline: &mut [PipelineOp]) {
@@ -836,6 +1032,111 @@ fn expr_structurally_equal(a: &Expr, b: &Expr) -> bool {
     }
 }
 
+/// Check whether an expression references any variable that is NOT in the
+/// provided set of inner variables.
+///
+/// Used to decide whether an OPTIONAL MATCH WHERE predicate can be pushed
+/// inside the Optional's inner_ops. If the predicate only references inner
+/// variables, it is safe to push inside (correct left-join semantics). If
+/// it references outer variables, it must remain as a pipeline filter.
+fn expr_references_outer_var(expr: &Expr, inner_vars: &std::collections::HashSet<IStr>) -> bool {
+    match expr {
+        Expr::Var(v) => !inner_vars.contains(v),
+        Expr::Property(base, _) | Expr::TemporalProperty(base, _, _) => {
+            expr_references_outer_var(base, inner_vars)
+        }
+        Expr::Compare(l, _, r) | Expr::Arithmetic(l, _, r) | Expr::Concat(l, r) => {
+            expr_references_outer_var(l, inner_vars) || expr_references_outer_var(r, inner_vars)
+        }
+        Expr::Logic(l, _, r) => {
+            expr_references_outer_var(l, inner_vars) || expr_references_outer_var(r, inner_vars)
+        }
+        Expr::Not(inner) | Expr::Negate(inner) => expr_references_outer_var(inner, inner_vars),
+        Expr::StringMatch(l, _, r) => {
+            expr_references_outer_var(l, inner_vars) || expr_references_outer_var(r, inner_vars)
+        }
+        Expr::IsNull { expr: e, .. }
+        | Expr::Cast(e, _)
+        | Expr::Labels(e)
+        | Expr::IsLabeled { expr: e, .. }
+        | Expr::IsDirected { expr: e, .. }
+        | Expr::IsTruthValue { expr: e, .. }
+        | Expr::IsTyped { expr: e, .. }
+        | Expr::IsNormalized { expr: e, .. }
+        | Expr::PropertyExists(e, _) => expr_references_outer_var(e, inner_vars),
+        Expr::IsSourceOf { node, edge, .. } | Expr::IsDestinationOf { node, edge, .. } => {
+            expr_references_outer_var(node, inner_vars)
+                || expr_references_outer_var(edge, inner_vars)
+        }
+        Expr::InList { expr: e, list, .. } => {
+            expr_references_outer_var(e, inner_vars)
+                || list
+                    .iter()
+                    .any(|item| expr_references_outer_var(item, inner_vars))
+        }
+        Expr::Between {
+            expr: e, low, high, ..
+        } => {
+            expr_references_outer_var(e, inner_vars)
+                || expr_references_outer_var(low, inner_vars)
+                || expr_references_outer_var(high, inner_vars)
+        }
+        Expr::Like {
+            expr: e,
+            pattern: p,
+            ..
+        } => expr_references_outer_var(e, inner_vars) || expr_references_outer_var(p, inner_vars),
+        Expr::Trim {
+            source, character, ..
+        } => {
+            expr_references_outer_var(source, inner_vars)
+                || character
+                    .as_deref()
+                    .is_some_and(|c| expr_references_outer_var(c, inner_vars))
+        }
+        Expr::Function(f) => f
+            .args
+            .iter()
+            .any(|a| expr_references_outer_var(a, inner_vars)),
+        Expr::Aggregate(agg) => agg
+            .expr
+            .as_deref()
+            .is_some_and(|e| expr_references_outer_var(e, inner_vars)),
+        Expr::ListConstruct(items) => items
+            .iter()
+            .any(|item| expr_references_outer_var(item, inner_vars)),
+        Expr::ListAccess(list, idx) => {
+            expr_references_outer_var(list, inner_vars)
+                || expr_references_outer_var(idx, inner_vars)
+        }
+        Expr::RecordConstruct(fields) => fields
+            .iter()
+            .any(|(_, e)| expr_references_outer_var(e, inner_vars)),
+        Expr::AllDifferent(args) | Expr::Same(args) => args
+            .iter()
+            .any(|a| expr_references_outer_var(a, inner_vars)),
+        Expr::Case {
+            branches,
+            else_expr,
+        } => {
+            branches.iter().any(|(cond, then)| {
+                expr_references_outer_var(cond, inner_vars)
+                    || expr_references_outer_var(then, inner_vars)
+            }) || else_expr
+                .as_deref()
+                .is_some_and(|e| expr_references_outer_var(e, inner_vars))
+        }
+        // Subquery expressions, parameters, and literals do not reference outer
+        // variables in a way that requires this routing decision.
+        Expr::Literal(_)
+        | Expr::Parameter(_)
+        | Expr::Exists { .. }
+        | Expr::CountSubquery(_)
+        | Expr::ValueSubquery(_)
+        | Expr::CollectSubquery(_) => false,
+    }
+}
+
 /// Detect if this is a pure `RETURN count(*)` query that can skip binding
 /// materialization:
 /// - Single LabelScan pattern (no Expand, VarExpand, Join)
@@ -888,6 +1189,7 @@ fn is_count_only_query(pattern_ops: &[PatternOp], pipeline_ops: &[PipelineOp]) -
 }
 
 fn derive_output_schema(ops: &[PipelineOp]) -> Arc<arrow::datatypes::Schema> {
+    // Return takes precedence when present.
     for op in ops {
         if let PipelineOp::Return { projections, .. } = op {
             let fields: Vec<arrow::datatypes::Field> = projections
@@ -899,6 +1201,26 @@ fn derive_output_schema(ops: &[PipelineOp]) -> Arc<arrow::datatypes::Schema> {
                 })
                 .collect();
             return Arc::new(arrow::datatypes::Schema::new(fields));
+        }
+    }
+    // Standalone CALL/YIELD (no RETURN): derive schema from yield items.
+    for op in ops {
+        if let PipelineOp::Call { procedure } = op {
+            let fields: Vec<arrow::datatypes::Field> = procedure
+                .yields
+                .iter()
+                .map(|yi| {
+                    let col = yi.alias.as_ref().unwrap_or(&yi.name);
+                    arrow::datatypes::Field::new(
+                        col.as_str(),
+                        arrow::datatypes::DataType::Utf8,
+                        true,
+                    )
+                })
+                .collect();
+            if !fields.is_empty() {
+                return Arc::new(arrow::datatypes::Schema::new(fields));
+            }
         }
     }
     Arc::new(arrow::datatypes::Schema::empty())
@@ -1200,6 +1522,36 @@ mod tests {
                         .iter()
                         .any(|op| matches!(op, PipelineOp::Return { .. }))
                 );
+            }
+            _ => panic!("expected Mutate"),
+        }
+    }
+
+    #[test]
+    fn plan_mutation_multi_match_insert_edge() {
+        let g = setup_graph();
+        let stmt = parse_statement(
+            "MATCH (a:sensor) WHERE id(a) = 1 MATCH (b:sensor) WHERE id(b) = 2 \
+             INSERT (a)-[:monitors]->(b)",
+        )
+        .unwrap();
+        match stmt {
+            GqlStatement::Mutate(mp) => {
+                let plan = plan_mutation(&mp, &g).unwrap();
+                // Two MATCH clauses produce pattern ops.
+                assert!(
+                    !plan.pattern_ops.is_empty(),
+                    "multi-match should produce pattern ops"
+                );
+                // WHERE clauses produce filters (optimizer may merge them).
+                let filter_count = plan
+                    .pipeline
+                    .iter()
+                    .filter(|op| matches!(op, PipelineOp::Filter { .. }))
+                    .count();
+                assert!(filter_count >= 1, "WHERE clauses should produce filters");
+                // One INSERT mutation.
+                assert_eq!(plan.mutations.len(), 1);
             }
             _ => panic!("expected Mutate"),
         }

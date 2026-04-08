@@ -98,23 +98,30 @@ pub fn spawn_background_tasks(
     }));
 
     // Auto-embed task (vector service with configured rules)
-    #[cfg(feature = "vector")]
+    // Built-in rule: __Memory nodes always get auto-embedding on the content property.
+    let mut auto_embed_rules = state.config.vector.auto_embed.clone();
+    if !auto_embed_rules.iter().any(|r| r.label == "__Memory") {
+        auto_embed_rules.push(crate::config::AutoEmbedRule {
+            label: "__Memory".into(),
+            text_property: "content".into(),
+            embedding_property: "embedding".into(),
+        });
+    }
     if state
         .services
         .get::<crate::vector_store::VectorStoreService>()
         .is_some()
-        && !state.config.vector.auto_embed.is_empty()
+        && !auto_embed_rules.is_empty()
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        let rules = state.config.vector.auto_embed.clone();
+        let rules = auto_embed_rules;
         handles.push(tokio::spawn(async move {
             auto_embed_loop(s, rules, token).await;
         }));
     }
 
     // Search index updater
-    #[cfg(feature = "search")]
     if state
         .services
         .get::<crate::search::SearchIndexService>()
@@ -323,7 +330,6 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
     }
 
     // Serialize RDF ontology store as a tagged extra section
-    #[cfg(feature = "rdf")]
     if let Some(ontology_arc) = state.rdf_ontology.as_ref() {
         let ontology = ontology_arc.read();
         if !ontology.is_empty() {
@@ -339,22 +345,37 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
         }
     }
 
-    // Serialize HNSW vector index as a tagged extra section (tag 0x03).
-    // Only written when the index is non-empty; an absent section is treated
-    // as empty on restore, so old snapshots remain compatible.
+    // Serialize HNSW vector indexes as tagged extra sections.
+    // Tag 0x03: default namespace. Tag 0x05: namespaced (prefixed with namespace length + name).
     state.graph.read(|g| {
-        if let Some(hnsw) = g.hnsw_index() {
+        for (ns, hnsw) in g.hnsw_indexes() {
             let hnsw_graph = hnsw.load_graph();
-            if !hnsw_graph.is_empty() {
-                match hnsw_graph.to_bytes() {
-                    Ok(bytes) => {
+            if hnsw_graph.is_empty() {
+                continue;
+            }
+            match hnsw_graph.to_bytes() {
+                Ok(bytes) => {
+                    if ns.is_empty() {
+                        // Default namespace uses tag 0x03 for simplicity
                         let mut tagged = Vec::with_capacity(1 + bytes.len());
                         tagged.push(0x03);
                         tagged.extend_from_slice(&bytes);
                         extra_sections.push(tagged);
+                    } else {
+                        // Named namespace: tag 0x05 + u16 name length + name + hnsw bytes
+                        let name_bytes = ns.as_bytes();
+                        let mut tagged = Vec::with_capacity(1 + 2 + name_bytes.len() + bytes.len());
+                        tagged.push(0x05);
+                        tagged.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+                        tagged.extend_from_slice(name_bytes);
+                        tagged.extend_from_slice(&bytes);
+                        extra_sections.push(tagged);
                     }
-                    Err(e) => tracing::warn!("failed to serialize HNSW index: {e}"),
                 }
+                Err(e) => tracing::warn!(
+                    namespace = ns.as_str(),
+                    "failed to serialize HNSW index: {e}"
+                ),
             }
         }
     });
@@ -602,7 +623,6 @@ async fn metrics_update_loop(state: Arc<ServerState>, cancel: CancellationToken)
 }
 
 /// Background search index updater — watches changelog and incrementally updates tantivy indexes.
-#[cfg(feature = "search")]
 async fn search_index_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     use selene_core::changeset::Change;
 
@@ -679,7 +699,6 @@ async fn search_index_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 
 /// Auto-embed background task — watches changelog for text property changes
 /// and generates vector embeddings asynchronously.
-#[cfg(feature = "vector")]
 async fn auto_embed_loop(
     state: Arc<ServerState>,
     rules: Vec<crate::config::AutoEmbedRule>,
@@ -811,7 +830,10 @@ async fn auto_embed_loop(
                 continue;
             }
 
-            match selene_gql::runtime::embed::embed_text(text) {
+            match selene_gql::runtime::embed::embed_text_with_task(
+                text,
+                selene_gql::runtime::embed::EmbeddingTask::Document,
+            ) {
                 Ok(vec) => {
                     let embed_key = IStr::new(&rule.embedding_property);
                     let nid = selene_core::NodeId(*node_id);
@@ -1067,9 +1089,21 @@ async fn vector_store_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 /// Background task: watches for vector property changes and maintains the HNSW index.
 ///
 /// On startup, if the graph has vector properties but no HNSW index, builds one.
-/// Then watches the changelog for vector property changes, stages inserts and
-/// tombstones for deletions, and triggers a full rebuild when staging exceeds
-/// capacity (controlled by `hnsw_staging_capacity` in `[vector]` config).
+/// Then watches the changelog for vector property changes, applies incremental
+/// inserts and tombstones, and periodically snapshots the mutable graph into the
+/// lock-free read path.
+/// Determine the HNSW namespace for a node based on its labels.
+/// System labels (double-underscore prefix) get their own namespace.
+fn hnsw_namespace_for_labels(labels: impl Iterator<Item = selene_core::IStr>) -> String {
+    for label in labels {
+        let s = label.as_str();
+        if s.starts_with("__") {
+            return s.to_lowercase();
+        }
+    }
+    String::new() // default namespace
+}
+
 async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     use selene_core::Value;
     use selene_core::changeset::Change;
@@ -1078,32 +1112,59 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     let mut rx = state.persistence.changelog_notify.subscribe();
     let mut last_seq: u64;
 
-    // Initial build: if graph has vector properties but no HNSW index, scan
-    // and build from scratch so the index is available immediately on startup.
+    // Initial build: partition vectors by namespace and build one index per namespace.
     {
-        let needs_build = state.graph.read(|g| g.hnsw_index().is_none());
+        let needs_build = state.graph.read(|g| g.hnsw_indexes().is_empty());
         if needs_build {
-            let mut vectors: Vec<(selene_core::NodeId, std::sync::Arc<[f32]>)> = Vec::new();
+            type NsVectors = std::collections::HashMap<
+                String,
+                Vec<(selene_core::NodeId, std::sync::Arc<[f32]>)>,
+            >;
+            let mut ns_vectors: NsVectors = std::collections::HashMap::new();
             state.graph.read(|g| {
                 for node_id in g.all_node_ids() {
                     if let Some(node) = g.get_node(node_id) {
                         for (_, value) in node.properties.iter() {
                             if let Value::Vector(v) = value {
-                                vectors.push((node_id, Arc::clone(v)));
+                                let ns = hnsw_namespace_for_labels(node.labels.iter());
+                                ns_vectors
+                                    .entry(ns)
+                                    .or_default()
+                                    .push((node_id, Arc::clone(v)));
                                 break; // one vector property per node
                             }
                         }
                     }
                 }
             });
-            if !vectors.is_empty() {
-                let dimensions = vectors[0].1.len() as u16;
-                let index = selene_graph::hnsw::HnswIndex::new(params.clone(), dimensions);
-                index.rebuild(vectors);
-                let index_arc = std::sync::Arc::new(index);
-                state.graph.inner().write().set_hnsw_index(index_arc);
+            if !ns_vectors.is_empty() {
+                let provider_dims = selene_gql::runtime::embed::embedding_dimensions()
+                    .ok()
+                    .map(|d| d as u16);
+
+                let mut graph_w = state.graph.inner().write();
+                for (ns, vectors) in &ns_vectors {
+                    let stored_dims = vectors[0].1.len() as u16;
+                    if let Some(pd) = provider_dims.filter(|&pd| stored_dims != pd) {
+                        tracing::warn!(
+                            namespace = ns.as_str(),
+                            stored = stored_dims,
+                            provider = pd,
+                            "HNSW dimension mismatch in namespace"
+                        );
+                    }
+                    let index = selene_graph::hnsw::HnswIndex::new(params.clone(), stored_dims);
+                    index.rebuild(vectors.clone());
+                    graph_w.set_hnsw_index_for(ns.clone(), std::sync::Arc::new(index));
+                }
+                drop(graph_w);
                 state.graph.publish_snapshot();
-                tracing::info!("HNSW index built on startup");
+                let total: usize = ns_vectors.values().map(|v| v.len()).sum();
+                tracing::info!(
+                    namespaces = ns_vectors.len(),
+                    vectors = total,
+                    "HNSW indexes built on startup"
+                );
             }
         }
 
@@ -1133,11 +1194,10 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                     last_seq = last.sequence;
                 }
 
-                // Get the current HNSW index; if none exists, skip until
-                // the initial build path above has placed one.
-                let Some(hnsw) = state.graph.load_snapshot().hnsw_index().cloned() else {
+                let snap = state.graph.load_snapshot();
+                if snap.hnsw_indexes().is_empty() {
                     continue;
-                };
+                }
 
                 for entry in &entries {
                     for change in &entry.changes {
@@ -1145,52 +1205,81 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                             Change::PropertySet {
                                 node_id,
                                 value: Value::Vector(v),
+                                old_value,
                                 ..
                             } => {
-                                hnsw.stage_insert(*node_id, Arc::clone(v));
+                                // Determine namespace from node labels
+                                let ns = snap
+                                    .get_node(*node_id)
+                                    .map(|n| hnsw_namespace_for_labels(n.labels.iter()))
+                                    .unwrap_or_default();
+                                // Get or create the namespace index
+                                let hnsw = if let Some(h) = snap.hnsw_index_for(&ns) {
+                                    Arc::clone(h)
+                                } else {
+                                    // Create a new index for this namespace
+                                    let idx = Arc::new(
+                                        selene_graph::hnsw::HnswIndex::new(
+                                            params.clone(),
+                                            v.len() as u16,
+                                        ),
+                                    );
+                                    state
+                                        .graph
+                                        .inner()
+                                        .write()
+                                        .set_hnsw_index_for(ns.clone(), Arc::clone(&idx));
+                                    state.graph.publish_snapshot();
+                                    idx
+                                };
+                                // Skip if vector dimensions don't match index
+                                let index_dims = hnsw.load_graph().dimensions() as usize;
+                                if v.len() != index_dims {
+                                    tracing::warn!(
+                                        node_id = node_id.0,
+                                        vec_dims = v.len(),
+                                        index_dims,
+                                        namespace = ns.as_str(),
+                                        "skipping HNSW insert: vector dimension mismatch"
+                                    );
+                                    continue;
+                                }
+                                if matches!(old_value, Some(Value::Vector(_))) {
+                                    hnsw.remove(*node_id);
+                                }
+                                hnsw.insert(*node_id, Arc::clone(v));
                             }
-                            Change::NodeDeleted { node_id, .. } => {
-                                hnsw.mark_tombstoned(*node_id);
+                            Change::NodeDeleted { node_id, labels, .. } => {
+                                // Remove from the namespace determined by labels
+                                let ns = hnsw_namespace_for_labels(labels.iter().copied());
+                                if let Some(hnsw) = snap.hnsw_index_for(&ns) {
+                                    hnsw.remove(*node_id);
+                                }
                             }
                             Change::PropertyRemoved {
                                 node_id,
                                 old_value: Some(Value::Vector(_)),
                                 ..
                             } => {
-                                hnsw.mark_tombstoned(*node_id);
+                                // Remove from all namespaces (we don't know which one)
+                                for hnsw in snap.hnsw_indexes().values() {
+                                    hnsw.remove(*node_id);
+                                }
                             }
                             _ => {}
                         }
                     }
                 }
 
-                // Trigger a full rebuild when staging has reached capacity.
-                if hnsw.needs_rebuild() {
-                    let tombstones = hnsw.tombstones();
-                    let mut vectors: Vec<(selene_core::NodeId, std::sync::Arc<[f32]>)> =
-                        Vec::new();
-                    state.graph.read(|g| {
-                        for node_id in g.all_node_ids() {
-                            // Exclude tombstoned (deleted) nodes from the rebuilt graph.
-                            if tombstones.contains(node_id.0 as u32) {
-                                continue;
-                            }
-                            if let Some(node) = g.get_node(node_id) {
-                                for (_, value) in node.properties.iter() {
-                                    if let Value::Vector(v) = value {
-                                        vectors.push((node_id, Arc::clone(v)));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    let vector_count = vectors.len();
-                    hnsw.rebuild(vectors);
-                    tracing::info!(
-                        vectors = vector_count,
-                        "HNSW index rebuilt"
-                    );
+                // Snapshot indexes when enough mutations have accumulated.
+                const SNAPSHOT_THRESHOLD: u64 = 100;
+                const TOMBSTONE_THRESHOLD: f64 = 0.2;
+                for hnsw in snap.hnsw_indexes().values() {
+                    if hnsw.pending_count() >= SNAPSHOT_THRESHOLD
+                        || hnsw.tombstone_ratio() > TOMBSTONE_THRESHOLD
+                    {
+                        hnsw.snapshot();
+                    }
                 }
             }
         }

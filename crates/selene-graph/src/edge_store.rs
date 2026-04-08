@@ -54,6 +54,8 @@ pub struct EdgeStore {
     properties: ChunkedVec<PropertyMap>,
     created_at: crate::timestamp_column::TimestampColumn,
     alive: Vec<u64>,
+    /// Incrementally maintained bitmap of live edge IDs.
+    alive_bm: RoaringBitmap,
     count: usize,
     slot_count: usize,
 }
@@ -93,14 +95,16 @@ impl EdgeStore {
             properties,
             created_at,
             alive: vec![0],
+            alive_bm: RoaringBitmap::new(),
             count: 0,
             slot_count: 1,
         }
     }
 
-    /// Build a RoaringBitmap of all live edge IDs.
+    /// Return a RoaringBitmap of all live edge IDs.
+    /// Maintained incrementally on insert/remove; clone cost is O(containers).
     pub fn alive_bitmap(&self) -> RoaringBitmap {
-        crate::bitset::alive_to_roaring(&self.alive)
+        self.alive_bm.clone()
     }
 
     /// Number of live edges.
@@ -166,6 +170,7 @@ impl EdgeStore {
         self.properties.set(idx, edge.properties);
         self.created_at.set(idx as u32, edge.created_at);
         bit_set(&mut self.alive, idx);
+        self.alive_bm.insert(idx as u32);
 
         (source, target, label)
     }
@@ -177,6 +182,7 @@ impl EdgeStore {
             return None;
         }
         bit_clear(&mut self.alive, idx);
+        self.alive_bm.remove(idx as u32);
         self.count -= 1;
 
         Some(Edge {

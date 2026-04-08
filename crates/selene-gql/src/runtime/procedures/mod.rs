@@ -16,9 +16,15 @@
 pub mod algorithms;
 pub mod community_search;
 pub mod graph;
+pub mod graphrag;
 pub mod history;
+pub mod introspection;
+pub mod memory;
 pub mod rdf;
+pub mod reindex;
 pub mod schema_audit;
+pub mod schema_dump;
+pub mod schema_introspect;
 pub mod search;
 pub mod ts;
 pub mod ts_aggregate;
@@ -105,6 +111,12 @@ impl ProcedureRegistry {
 
     /// Create a registry with all built-in procedures.
     pub fn with_builtins() -> Self {
+        Self::with_builtins_and_catalog(algorithms::new_shared_catalog())
+    }
+
+    /// Create a registry with all built-in procedures, using an existing
+    /// projection catalog so projections persist across requests.
+    pub fn with_builtins_and_catalog(catalog: algorithms::SharedCatalog) -> Self {
         let mut reg = Self::new();
         // Time-series
         reg.register(Arc::new(ts::TsRange));
@@ -131,23 +143,20 @@ impl ProcedureRegistry {
         reg.register(Arc::new(graph::GraphConstraints));
         reg.register(Arc::new(graph::GraphDiscoverSchema));
         // Graph algorithms
-        let catalog = algorithms::new_shared_catalog();
         algorithms::register_algorithm_procedures(&mut reg, catalog.clone());
         // Vector search
         reg.register(Arc::new(vector::VectorSearch));
         reg.register(Arc::new(vector::SimilarNodes));
         reg.register(Arc::new(vector::ScopedVectorSearch));
+        reg.register(Arc::new(vector::ScopedSemanticSearch));
         reg.register(Arc::new(vector::RebuildVectorIndex));
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(vector::SemanticSearch));
         // Community-enhanced RAG (vector + Louvain)
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(community_search::CommunitySearch {
             catalog: catalog.clone(),
         }));
         // Full-text search
         reg.register(Arc::new(search::TextSearch));
-        #[cfg(feature = "vector")]
         reg.register(Arc::new(search::HybridSearch));
         // Change history + temporal versioning
         reg.register(Arc::new(history::GraphHistory));
@@ -161,14 +170,37 @@ impl ProcedureRegistry {
         // Schema audit
         reg.register(Arc::new(schema_audit::SchemaAudit));
         reg.register(Arc::new(schema_audit::SchemaAuditDetails));
+        // Schema dump (LLM-friendly)
+        reg.register(Arc::new(schema_dump::SchemaDump));
+        // Schema introspection
+        reg.register(Arc::new(schema_introspect::SchemaNodeLabels));
+        reg.register(Arc::new(schema_introspect::SchemaEdgeLabels));
+        reg.register(Arc::new(schema_introspect::SchemaNodeSchema));
+        // GraphRAG hybrid retriever (ai feature)
+        reg.register(Arc::new(graphrag::GraphRagSearch));
+        // Agent memory recall (ai feature)
+        reg.register(Arc::new(memory::MemoryRecall));
+        // Embedding re-index
+        reg.register(Arc::new(reindex::Reindex));
+        reg.register(Arc::new(reindex::ReindexStatus));
+        // Procedure catalog introspection (registered last so it sees all others)
+        let introspect = introspection::GraphProcedures::from_registry(&reg);
+        reg.register(Arc::new(introspect));
         reg
     }
 
     pub fn register(&mut self, proc: Arc<dyn Procedure>) {
-        self.procedures.insert(IStr::new(proc.name()), proc);
+        // Normalize to lowercase so case-insensitive dispatch always matches.
+        self.procedures
+            .insert(IStr::new(&proc.name().to_lowercase()), proc);
     }
 
     pub fn get(&self, name: &IStr) -> Option<&Arc<dyn Procedure>> {
         self.procedures.get(name)
+    }
+
+    /// Iterate over all registered procedures.
+    pub fn iter(&self) -> impl Iterator<Item = (&IStr, &Arc<dyn Procedure>)> {
+        self.procedures.iter()
     }
 }

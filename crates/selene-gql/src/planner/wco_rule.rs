@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn wco_fires_on_large_triangle_graph() {
-        let g = build_large_triangle_graph(20); // 20*19 = 380 edges, estimate > 10k
+        let g = build_large_triangle_graph(25); // 25*24 = 600 edges, estimate > 10k
         let plan = make_triangle_plan();
         let ctx = OptimizeContext::new(&g);
         let rule = WcoJoinRule;
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn wco_preserves_trailing_ops() {
         // Triangle pattern followed by DifferentEdgesFilter: trailing op should survive.
-        let g = build_large_triangle_graph(20);
+        let g = build_large_triangle_graph(25);
         let mut plan = make_triangle_plan();
         plan.pattern_ops.push(PatternOp::DifferentEdgesFilter {
             edge_vars: vec![IStr::new("E0"), IStr::new("E1")],

@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+#[allow(clippy::unnecessary_wraps)]
+fn default_true_opt() -> Option<bool> {
+    Some(true)
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GqlParams {
     /// GQL query text. Example: MATCH (s:sensor) FILTER s.temp > 72 RETURN s.name AS name
@@ -33,6 +38,12 @@ pub(crate) struct NodeIdParams {
 pub(crate) struct NodeEdgesParams {
     /// Numeric node ID.
     pub(crate) id: u64,
+    /// Filter by direction: "outgoing", "incoming", or "both" (default).
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
+    /// Filter to specific edge label(s). Omit for all labels.
+    #[serde(default)]
+    pub(crate) labels: Option<Vec<String>>,
     /// Maximum number of edges to return (default: 1000, max: 10000).
     #[serde(default)]
     pub(crate) limit: Option<usize>,
@@ -154,25 +165,36 @@ pub(crate) struct TsQueryParams {
     /// End timestamp (nanos). Omit for latest.
     #[serde(default)]
     pub(crate) end: Option<i64>,
-    /// Maximum number of samples to return (default: 1000).
+    /// Maximum number of samples to return (default: 1000). Only used when aggregation is "raw".
     #[serde(default)]
     pub(crate) limit: Option<u64>,
+    /// Aggregation bucket duration: "5m", "15m", "1h", "1d", "auto", or "raw" (default).
+    /// "auto" selects based on time range: <4h=raw, <24h=5m, <7d=15m, <30d=1h, else=1d.
+    #[serde(default)]
+    pub(crate) aggregation: Option<String>,
+    /// Aggregate function: "avg" (default), "min", "max", "sum", "count".
+    /// Only used when aggregation is not "raw".
+    #[serde(default)]
+    pub(crate) function: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GraphSliceParams {
-    /// Slice type: "full", "labels", or "containment".
+    /// Slice type: "full", "labels", "containment", or "traverse".
     #[serde(default = "default_slice_type")]
     pub(crate) slice_type: String,
-    /// For "labels" slice: which labels to include.
+    /// For "labels" slice: which labels to include. For "traverse": edge labels to follow.
     #[serde(default)]
     pub(crate) labels: Option<Vec<String>>,
-    /// For "containment" slice: root node ID.
+    /// For "containment"/"traverse" slice: root node ID.
     #[serde(default)]
     pub(crate) root_id: Option<u64>,
-    /// For "containment" slice: maximum traversal depth.
+    /// For "containment"/"traverse" slice: maximum traversal depth.
     #[serde(default)]
     pub(crate) max_depth: Option<u32>,
+    /// For "traverse" slice: "outgoing" (default), "incoming", or "both".
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
     /// Pagination: max nodes to return.
     #[serde(default)]
     pub(crate) limit: Option<usize>,
@@ -257,6 +279,10 @@ pub(crate) struct SemanticSearchParams {
     /// Optional label filter (e.g., "sensor"). Omit to search all nodes.
     #[serde(default)]
     pub(crate) label: Option<String>,
+    /// If true, include full node properties (name, labels, all properties)
+    /// with each result. Saves follow-up get_node calls. Default: false.
+    #[serde(default)]
+    pub(crate) include_properties: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -328,4 +354,219 @@ pub(crate) struct UpdateSchemaParams {
 pub(crate) struct SparqlQueryParams {
     /// SPARQL query to execute against the graph.
     pub(crate) query: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ParseCheckParams {
+    /// The GQL query to parse and check.
+    pub(crate) query: String,
+}
+
+// ── AI / GraphRAG ────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BuildCommunitiesParams {
+    /// Minimum community size to persist. Communities smaller than this are skipped. Default: 2.
+    #[serde(default)]
+    pub(crate) min_community_size: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct GraphRagSearchParams {
+    /// Natural language query text.
+    pub(crate) query: String,
+    /// Number of vector search results (default: 10).
+    #[serde(default)]
+    pub(crate) k: Option<i64>,
+    /// BFS expansion depth (default: 2).
+    #[serde(default)]
+    pub(crate) max_hops: Option<i64>,
+    /// Search mode: "local" (default), "global", or "hybrid".
+    #[serde(default)]
+    pub(crate) mode: Option<String>,
+}
+
+// ── AI / Agent Memory ───────────────���───────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RememberParams {
+    /// Memory namespace (isolates memories by agent or context).
+    pub(crate) namespace: String,
+    /// The content to remember.
+    pub(crate) content: String,
+    /// Memory type classification (default: "fact"). Examples: "fact", "preference", "event".
+    #[serde(default = "default_memory_type")]
+    pub(crate) memory_type: String,
+    /// Expiry timestamp in milliseconds since epoch. 0 or omit for no expiry.
+    #[serde(default)]
+    pub(crate) valid_until: Option<i64>,
+    /// Entity names mentioned in this memory. Creates __Entity nodes and __MENTIONS edges.
+    #[serde(default)]
+    pub(crate) entities: Option<Vec<String>>,
+}
+
+fn default_memory_type() -> String {
+    "fact".into()
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RecallParams {
+    /// Memory namespace to search.
+    pub(crate) namespace: String,
+    /// Natural language query text for semantic search.
+    pub(crate) query: String,
+    /// Maximum number of results (default: 10).
+    #[serde(default)]
+    pub(crate) k: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ForgetParams {
+    /// Memory namespace to delete from.
+    pub(crate) namespace: String,
+    /// Specific memory node ID to delete.
+    #[serde(default)]
+    pub(crate) node_id: Option<u64>,
+    /// Content substring to match for deletion.
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+}
+
+// ── Resolve + Related ────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ResolveParams {
+    /// The identifier to resolve. Can be a numeric ID, exact name, or
+    /// natural language description.
+    pub(crate) identifier: String,
+    /// Optional label hint to narrow resolution (e.g., "equipment", "zone").
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// If true, include the containment path (parent chain). Default: true.
+    #[serde(default = "default_true_opt")]
+    pub(crate) include_path: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RelatedParams {
+    /// Numeric node ID.
+    pub(crate) id: u64,
+    /// Filter to specific edge label(s). Omit for all labels.
+    #[serde(default)]
+    pub(crate) edge_labels: Option<Vec<String>>,
+    /// Filter by direction: "outgoing", "incoming", or "both" (default).
+    #[serde(default)]
+    pub(crate) direction: Option<String>,
+    /// Maximum number of neighbors to return (default: 25).
+    #[serde(default)]
+    pub(crate) neighbor_limit: Option<usize>,
+}
+
+// ── Trace (training data) ────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct LogTraceParams {
+    /// Session identifier for grouping related traces.
+    pub(crate) session_id: String,
+    /// Turn number within the session.
+    pub(crate) turn: i64,
+    /// Name of the tool that was called.
+    pub(crate) tool_name: String,
+    /// JSON string of tool parameters.
+    pub(crate) tool_params: String,
+    /// Compact summary of the tool result.
+    pub(crate) tool_result_summary: String,
+    /// What the agent said after this tool call.
+    #[serde(default)]
+    pub(crate) agent_response: Option<String>,
+    /// Feedback: "approved", "rejected", "corrected", or "none" (default).
+    #[serde(default)]
+    pub(crate) feedback: Option<String>,
+    /// If feedback is "corrected", the correct answer.
+    #[serde(default)]
+    pub(crate) correction: Option<String>,
+    /// Which model generated this trace.
+    #[serde(default)]
+    pub(crate) model_id: Option<String>,
+    /// Tool execution time in milliseconds.
+    #[serde(default)]
+    pub(crate) latency_ms: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ExportTracesParams {
+    /// Filter by session ID.
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    /// Filter by tool name.
+    #[serde(default)]
+    pub(crate) tool_name: Option<String>,
+    /// Filter by feedback type.
+    #[serde(default)]
+    pub(crate) feedback: Option<String>,
+    /// Filter by model ID.
+    #[serde(default)]
+    pub(crate) model_id: Option<String>,
+    /// Start timestamp (ms). Omit for earliest.
+    #[serde(default)]
+    pub(crate) start_ms: Option<i64>,
+    /// End timestamp (ms). Omit for latest.
+    #[serde(default)]
+    pub(crate) end_ms: Option<i64>,
+    /// Maximum traces to return (default: 1000, max: 10000).
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+    /// Output format: "jsonl" (default) or "json".
+    #[serde(default)]
+    pub(crate) format: Option<String>,
+}
+
+// ── Proposals (human-in-the-loop) ───────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ProposeActionParams {
+    /// Human-readable description of the proposed action.
+    pub(crate) description: String,
+    /// The GQL query to execute if approved.
+    pub(crate) query: String,
+    /// Category for grouping proposals (e.g., "setpoint_change", "schedule").
+    #[serde(default)]
+    pub(crate) category: Option<String>,
+    /// Priority: "low", "normal" (default), "high".
+    #[serde(default)]
+    pub(crate) priority: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ProposalIdParams {
+    /// Numeric proposal node ID.
+    pub(crate) proposal_id: u64,
+    /// Optional reason for the action.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ListProposalsParams {
+    /// Filter by status: "pending", "approved", "executed", "rejected", "expired". Omit for all.
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    /// Maximum proposals to return (default: 50).
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ConfigureMemoryParams {
+    /// Memory namespace to configure.
+    pub(crate) namespace: String,
+    /// Maximum number of memories before eviction (0 = unlimited, default: 1000).
+    #[serde(default)]
+    pub(crate) max_memories: Option<i64>,
+    /// Default time-to-live in milliseconds for new memories (0 = no expiry).
+    #[serde(default)]
+    pub(crate) default_ttl_ms: Option<i64>,
+    /// Eviction policy: "clock" (default), "oldest", or "lowest_confidence".
+    #[serde(default)]
+    pub(crate) eviction_policy: Option<String>,
 }

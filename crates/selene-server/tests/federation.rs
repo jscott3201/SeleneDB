@@ -1,7 +1,7 @@
 //! Federation E2E tests — two Selene nodes communicating over QUIC.
 //!
-//! These tests require the `federation` and `dev-tls` features.
-#![cfg(all(feature = "federation", feature = "dev-tls"))]
+//! These tests require the `dev-tls` feature for self-signed certificates.
+#![cfg(feature = "dev-tls")]
 
 use std::sync::Arc;
 
@@ -53,16 +53,11 @@ async fn start_federation_server(
             let state = Arc::clone(&state2);
             tokio::spawn(async move {
                 if let Ok(conn) = incoming.await {
-                    loop {
-                        match conn.accept_bi().await {
-                            Ok((send, recv)) => {
-                                let state = Arc::clone(&state);
-                                tokio::spawn(async move {
-                                    let _ = handle_stream(state, send, recv).await;
-                                });
-                            }
-                            Err(_) => break,
-                        }
+                    while let Ok((send, recv)) = conn.accept_bi().await {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = handle_stream(state, send, recv).await;
+                        });
                     }
                 }
             });

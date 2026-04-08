@@ -48,9 +48,11 @@ pub fn set_search_provider(provider: Arc<dyn SearchProvider>) {
 }
 
 fn get_search_provider() -> Result<&'static Arc<dyn SearchProvider>, GqlError> {
-    SEARCH_PROVIDER.get().ok_or_else(|| GqlError::InvalidArgument {
-        message: "full-text search not available (no searchable schemas or --features search not enabled)".into(),
-    })
+    SEARCH_PROVIDER
+        .get()
+        .ok_or_else(|| GqlError::InvalidArgument {
+            message: "full-text search not available (no searchable schemas configured)".into(),
+        })
 }
 
 // ── graph.textSearch ────────────────────────────────────────────────
@@ -85,8 +87,8 @@ impl Procedure for TextSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -128,7 +130,7 @@ impl Procedure for TextSearch {
             .filter(|(nid, _)| scope.is_none_or(|s| s.contains(nid.0 as u32)))
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(nid.0)),
+                    (IStr::new("node_id"), GqlValue::Int(nid.0 as i64)),
                     (IStr::new("score"), GqlValue::Float(f64::from(score))),
                 ]
             })
@@ -142,10 +144,8 @@ impl Procedure for TextSearch {
 ///
 /// Combines BM25 text search + cosine vector search via reciprocal rank fusion.
 /// Requires both `search` and `vector` features.
-#[cfg(feature = "vector")]
 pub struct HybridSearch;
 
-#[cfg(feature = "vector")]
 impl Procedure for HybridSearch {
     fn name(&self) -> &'static str {
         "graph.hybridSearch"
@@ -169,8 +169,8 @@ impl Procedure for HybridSearch {
             ],
             yields: vec![
                 YieldColumn {
-                    name: "nodeId",
-                    typ: GqlType::UInt,
+                    name: "node_id",
+                    typ: GqlType::Int,
                 },
                 YieldColumn {
                     name: "score",
@@ -214,7 +214,10 @@ impl Procedure for HybridSearch {
             .unwrap_or_default();
 
         // 2. Vector search
-        let query_vec = crate::runtime::embed::embed_text(query_text)?;
+        let query_vec = crate::runtime::embed::embed_text_with_task(
+            query_text,
+            crate::runtime::embed::EmbeddingTask::Retrieval,
+        )?;
         let prop_key = IStr::new("embedding");
         let vec_results = super::vector::top_k_cosine_scan(
             graph,
@@ -248,7 +251,7 @@ impl Procedure for HybridSearch {
             .into_iter()
             .map(|(nid, score)| {
                 smallvec![
-                    (IStr::new("nodeId"), GqlValue::UInt(nid)),
+                    (IStr::new("node_id"), GqlValue::Int(nid as i64)),
                     (IStr::new("score"), GqlValue::Float(score)),
                 ]
             })

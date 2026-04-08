@@ -63,16 +63,20 @@ pub struct ServerState {
     /// Set to true once all startup services have initialized and the
     /// server is ready to serve queries. Used by the `/ready` endpoint.
     pub(crate) ready: std::sync::atomic::AtomicBool,
-    /// RDF ontology store for TBox quads (feature-gated).
-    #[cfg(feature = "rdf")]
+    /// RDF ontology store for TBox quads (None if not configured).
     pub(crate) rdf_ontology: Option<Arc<parking_lot::RwLock<selene_rdf::ontology::OntologyStore>>>,
     /// Cached RDF namespace (built once from config at startup).
-    #[cfg(feature = "rdf")]
     pub(crate) rdf_namespace: selene_rdf::namespace::RdfNamespace,
     /// Generation-gated CSR cache. Avoids rebuilding the CSR for every read
     /// query when the graph has not changed. The tuple stores
     /// `(generation, Arc<CsrAdjacency>)`.
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
+    /// Projection catalog for graph algorithms (persists across requests).
+    pub(crate) projection_catalog: selene_gql::runtime::procedures::algorithms::SharedCatalog,
+    /// Enhanced clock counters for agent memory eviction (2-bit, 0-3).
+    /// Per-namespace map of node_id to access counter. Ephemeral (not persisted).
+    pub(crate) clock_counters:
+        parking_lot::RwLock<std::collections::HashMap<String, std::collections::HashMap<u64, u8>>>,
 }
 
 // ── Accessors (pub for embedder/test API, pub(crate) for internal) ─
@@ -197,8 +201,7 @@ impl ServerState {
         self.replica.primary_addr.as_deref()
     }
 
-    /// The RDF ontology store (None if rdf feature not enabled or not initialized).
-    #[cfg(feature = "rdf")]
+    /// The RDF ontology store (None if not configured).
     pub fn rdf_ontology(
         &self,
     ) -> Option<&Arc<parking_lot::RwLock<selene_rdf::ontology::OntologyStore>>> {
@@ -206,7 +209,6 @@ impl ServerState {
     }
 
     /// The cached RDF namespace (built once from config at startup).
-    #[cfg(feature = "rdf")]
     pub fn rdf_namespace(&self) -> &selene_rdf::namespace::RdfNamespace {
         &self.rdf_namespace
     }
@@ -317,27 +319,73 @@ fn recover_graph(config: &SeleneConfig) -> anyhow::Result<(SharedGraph, Vec<Vec<
 
     let shared_graph = SharedGraph::new(graph);
 
-    // Restore HNSW vector index from snapshot (tag 0x03)
-    if let Some(tagged) = recovery_result
-        .extra_sections
-        .iter()
-        .find(|s| s.first() == Some(&0x03))
+    // Restore HNSW vector indexes from snapshot.
+    // Tag 0x03: default namespace. Tag 0x05: named namespace.
     {
-        let bytes = &tagged[1..];
-        if !bytes.is_empty() {
-            match selene_graph::hnsw::HnswGraph::from_bytes(bytes) {
-                Ok(hnsw_graph) => {
-                    let vectors = hnsw_graph.len();
-                    let params = config.vector.hnsw_params();
-                    let index = std::sync::Arc::new(selene_graph::hnsw::HnswIndex::from_graph(
-                        hnsw_graph, params,
-                    ));
-                    shared_graph.inner().write().set_hnsw_index(index);
-                    shared_graph.publish_snapshot();
-                    tracing::info!(vectors, "restored HNSW index from snapshot");
+        let params = config.vector.hnsw_params();
+        let mut restored = 0usize;
+        let mut graph_w = shared_graph.inner().write();
+        for tagged in &recovery_result.extra_sections {
+            match tagged.first() {
+                Some(&0x03) => {
+                    let bytes = &tagged[1..];
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    match selene_graph::hnsw::HnswGraph::from_bytes(bytes) {
+                        Ok(hnsw_graph) => {
+                            restored += hnsw_graph.len();
+                            let index =
+                                std::sync::Arc::new(selene_graph::hnsw::HnswIndex::from_graph(
+                                    hnsw_graph,
+                                    params.clone(),
+                                ));
+                            graph_w.set_hnsw_index(index);
+                        }
+                        Err(e) => tracing::warn!("failed to deserialize HNSW index: {e}"),
+                    }
                 }
-                Err(e) => tracing::warn!("failed to deserialize HNSW index: {e}"),
+                Some(&0x05) => {
+                    let bytes = &tagged[1..];
+                    if bytes.len() < 2 {
+                        continue;
+                    }
+                    let name_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+                    if bytes.len() < 2 + name_len {
+                        continue;
+                    }
+                    let ns = String::from_utf8_lossy(&bytes[2..2 + name_len]).into_owned();
+                    let hnsw_bytes = &bytes[2 + name_len..];
+                    if hnsw_bytes.is_empty() {
+                        continue;
+                    }
+                    match selene_graph::hnsw::HnswGraph::from_bytes(hnsw_bytes) {
+                        Ok(hnsw_graph) => {
+                            restored += hnsw_graph.len();
+                            let index =
+                                std::sync::Arc::new(selene_graph::hnsw::HnswIndex::from_graph(
+                                    hnsw_graph,
+                                    params.clone(),
+                                ));
+                            graph_w.set_hnsw_index_for(ns.clone(), index);
+                            tracing::debug!(
+                                namespace = ns.as_str(),
+                                "restored namespaced HNSW index"
+                            );
+                        }
+                        Err(e) => tracing::warn!(
+                            namespace = ns.as_str(),
+                            "failed to deserialize HNSW index: {e}"
+                        ),
+                    }
+                }
+                _ => {}
             }
+        }
+        drop(graph_w);
+        if restored > 0 {
+            shared_graph.publish_snapshot();
+            tracing::info!(vectors = restored, "restored HNSW indexes from snapshot");
         }
     }
 
@@ -439,7 +487,6 @@ pub async fn bootstrap(
 
     // 1. Recover graph from persistence (snapshot + WAL replay)
     let (shared_graph, recovery_extra_sections) = recover_graph(&config)?;
-    #[cfg(feature = "federation")]
     let graph_inner = Arc::clone(shared_graph.inner());
 
     // 2. Create hot tier
@@ -465,7 +512,6 @@ pub async fn bootstrap(
     };
 
     // 7. Initialize federation
-    #[cfg(feature = "federation")]
     let federation_service = if config.federation.enabled {
         // Gather schema labels for registration
         let schema_labels: Vec<String> = {
@@ -592,7 +638,6 @@ pub async fn bootstrap(
     };
 
     // Initialize full-text search index from searchable schema properties
-    #[cfg(feature = "search")]
     let search_index_opt = {
         let snap = shared_graph.load_snapshot();
         let index_dir = config.data_dir.join("search_index");
@@ -641,13 +686,11 @@ pub async fn bootstrap(
     }
 
     // Register search index as a service
-    #[cfg(feature = "search")]
     if let Some(si) = search_index_opt {
         services.register(crate::search::SearchIndexService::new(si));
     }
 
     // Register federation as a service
-    #[cfg(feature = "federation")]
     if let Some(fed) = federation_service {
         services.register(fed);
     }
@@ -733,7 +776,6 @@ pub async fn bootstrap(
     #[allow(unused_mut)] // mut only needed with cloud-storage feature
     let mut export_pipeline = selene_ts::export::ExportPipeline::new();
 
-    #[cfg(feature = "cloud-storage")]
     if let Some(ref cloud_url) = config.ts.cloud.url {
         let node_id = config.ts.cloud.node_id.clone().unwrap_or_else(|| {
             hostname::get().map_or_else(
@@ -758,7 +800,6 @@ pub async fn bootstrap(
 
     // Initialize RDF ontology store from snapshot extra section (if available).
     // Extra sections are tagged: first byte 0x02 = RDF ontology.
-    #[cfg(feature = "rdf")]
     let rdf_ontology = {
         let store = recovery_extra_sections
             .iter()
@@ -799,7 +840,6 @@ pub async fn bootstrap(
         Some(arc)
     };
 
-    #[cfg(feature = "rdf")]
     let rdf_namespace = selene_rdf::namespace::RdfNamespace::new(&config.rdf.namespace);
 
     let persistence = PersistenceState {
@@ -841,11 +881,11 @@ pub async fn bootstrap(
         sync,
         replica,
         ready: std::sync::atomic::AtomicBool::new(false),
-        #[cfg(feature = "rdf")]
         rdf_ontology,
-        #[cfg(feature = "rdf")]
         rdf_namespace,
         csr_cache,
+        projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+        clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
     })
 }
 
@@ -882,7 +922,6 @@ impl ServerState {
         let mutation_batcher =
             crate::mutation_batcher::MutationBatcher::spawn(shared_graph.clone());
 
-        #[cfg(feature = "rdf")]
         let rdf_namespace = selene_rdf::namespace::RdfNamespace::new(&config.rdf.namespace);
 
         let persistence = PersistenceState {
@@ -944,14 +983,14 @@ impl ServerState {
             persistence,
             sync,
             replica,
-            #[cfg(feature = "rdf")]
             rdf_ontology: None,
-            #[cfg(feature = "rdf")]
             rdf_namespace,
             csr_cache: Arc::new(ArcSwap::from_pointee((
                 0,
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
+            projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+            clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
     }
 }

@@ -161,10 +161,10 @@ num_fn!(
     |v: &GqlValue| match v {
         GqlValue::Float(f) if *f > 0.0 => Ok(GqlValue::Float(f.ln())),
         GqlValue::Float(f) if *f == 0.0 => Ok(GqlValue::Null), // log(0) -> NULL
-        GqlValue::Float(_) => Err(GqlError::type_error("log() undefined for negative numbers")),
+        GqlValue::Float(_) => Ok(GqlValue::Null),
         GqlValue::Int(i) if *i > 0 => Ok(GqlValue::Float((*i as f64).ln())),
         GqlValue::Int(0) => Ok(GqlValue::Null),
-        GqlValue::Int(_) => Err(GqlError::type_error("log() undefined for negative numbers")),
+        GqlValue::Int(_) => Ok(GqlValue::Null),
         _ => Err(GqlError::type_error("log() requires a number")),
     }
 );
@@ -176,14 +176,10 @@ num_fn!(
     |v: &GqlValue| match v {
         GqlValue::Float(f) if *f > 0.0 => Ok(GqlValue::Float(f.log10())),
         GqlValue::Float(f) if *f == 0.0 => Ok(GqlValue::Null),
-        GqlValue::Float(_) => Err(GqlError::type_error(
-            "log10() undefined for negative numbers"
-        )),
+        GqlValue::Float(_) => Ok(GqlValue::Null),
         GqlValue::Int(i) if *i > 0 => Ok(GqlValue::Float((*i as f64).log10())),
         GqlValue::Int(0) => Ok(GqlValue::Null),
-        GqlValue::Int(_) => Err(GqlError::type_error(
-            "log10() undefined for negative numbers"
-        )),
+        GqlValue::Int(_) => Ok(GqlValue::Null),
         _ => Err(GqlError::type_error("log10() requires a number")),
     }
 );
@@ -296,10 +292,10 @@ num_fn!(
     |v: &GqlValue| match v {
         GqlValue::Float(f) if *f > 0.0 => Ok(GqlValue::Float(f.ln())),
         GqlValue::Float(f) if *f == 0.0 => Ok(GqlValue::Null),
-        GqlValue::Float(_) => Err(GqlError::type_error("ln() undefined for negative numbers")),
+        GqlValue::Float(_) => Ok(GqlValue::Null),
         GqlValue::Int(i) if *i > 0 => Ok(GqlValue::Float((*i as f64).ln())),
         GqlValue::Int(0) => Ok(GqlValue::Null),
-        GqlValue::Int(_) => Err(GqlError::type_error("ln() undefined for negative numbers")),
+        GqlValue::Int(_) => Ok(GqlValue::Null),
         _ => Err(GqlError::type_error("ln() requires a number")),
     }
 );
@@ -513,10 +509,10 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         let r = f
-            .invoke(&[GqlValue::Float(3.14159), GqlValue::Int(2)], &c)
+            .invoke(&[GqlValue::Float(3.15159), GqlValue::Int(2)], &c)
             .unwrap();
         if let GqlValue::Float(v) = r {
-            assert!((v - 3.14).abs() < 1e-10);
+            assert!((v - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Float");
         }
@@ -689,11 +685,15 @@ mod tests {
     }
 
     #[test]
-    fn log_negative_errors() {
+    fn log_negative_returns_null() {
         let f = LogFunction;
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
-        assert!(f.invoke(&[GqlValue::Float(-1.0)], &c).is_err());
+        assert_eq!(
+            f.invoke(&[GqlValue::Float(-1.0)], &c).unwrap(),
+            GqlValue::Null
+        );
+        assert_eq!(f.invoke(&[GqlValue::Int(-5)], &c).unwrap(), GqlValue::Null);
     }
 
     #[test]
@@ -714,6 +714,18 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         assert_eq!(f.invoke(&[GqlValue::Int(0)], &c).unwrap(), GqlValue::Null);
+    }
+
+    #[test]
+    fn log10_negative_returns_null() {
+        let f = Log10Function;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(
+            f.invoke(&[GqlValue::Float(-1.0)], &c).unwrap(),
+            GqlValue::Null
+        );
+        assert_eq!(f.invoke(&[GqlValue::Int(-5)], &c).unwrap(), GqlValue::Null);
     }
 
     #[test]
@@ -741,12 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn ln_negative_errors() {
+    fn ln_negative_returns_null() {
         let f = LnFunction;
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
-        assert!(f.invoke(&[GqlValue::Float(-1.0)], &c).is_err());
-        assert!(f.invoke(&[GqlValue::Int(-5)], &c).is_err());
+        assert_eq!(
+            f.invoke(&[GqlValue::Float(-1.0)], &c).unwrap(),
+            GqlValue::Null
+        );
+        assert_eq!(f.invoke(&[GqlValue::Int(-5)], &c).unwrap(), GqlValue::Null);
     }
 
     // ── ExpFunction ──

@@ -5,19 +5,22 @@
 //!
 //! # Public API
 //!
-//! `HnswIndex` is the primary entry point. It wraps an immutable `HnswGraph`
-//! behind an `ArcSwap` for lock-free reads, and buffers new inserts in a
-//! staging `Vec` until a rebuild is triggered.
+//! `HnswIndex` is the primary entry point. It uses a hybrid architecture:
+//! `ArcSwap<HnswGraph>` for lock-free reads (~1ns) and `RwLock<HnswGraph>`
+//! for mutable incremental inserts (O(log N) per insert).
 //!
 //! ```text
 //! HnswIndex
-//!   graph:      ArcSwap<HnswGraph>  -- read-only, lock-free (~1 ns load)
-//!   staging:    Mutex<Vec<...>>     -- pending inserts, brute-forced at query time
-//!   tombstones: Mutex<RoaringBitmap> -- deleted node IDs, filtered from results
-//!   params:     HnswParams          -- M, ef_construction, staging_capacity, ...
+//!   read_snapshot:       ArcSwap<HnswGraph>   -- immutable, lock-free (~1 ns load)
+//!   write_graph:         RwLock<HnswGraph>     -- mutable, incremental inserts
+//!   generation:          AtomicU64             -- monotonic mutation counter
+//!   snapshot_generation: AtomicU64             -- generation at last snapshot
+//!   tombstones:          Mutex<RoaringBitmap>  -- deleted node IDs
+//!   params:              HnswParams            -- M, ef_construction, ...
 //! ```
 //!
-//! Rebuilds atomically swap in a new `Arc<HnswGraph>` without blocking readers.
+//! Snapshots clone the mutable graph into the ArcSwap, maintaining the
+//! lock-free read path for the common case (no pending mutations).
 
 pub mod build;
 pub mod distance;
@@ -31,54 +34,42 @@ pub use params::HnswParams;
 pub use search::search;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use roaring::RoaringBitmap;
+use smallvec::SmallVec;
 
 use selene_core::NodeId;
 
-use self::distance::cosine_similarity;
-
-// ---------------------------------------------------------------------------
-// StagingEntry
-// ---------------------------------------------------------------------------
-
-/// A vector pending insertion into the HNSW graph.
-///
-/// Staging entries are brute-force scanned during search and incorporated into
-/// the main graph on the next rebuild.
-#[derive(Debug, Clone)]
-pub struct StagingEntry {
-    /// Property-graph node ID.
-    pub node_id: NodeId,
-    /// Embedding vector.
-    pub vector: Arc<[f32]>,
-}
+use self::graph::HnswNode;
 
 // ---------------------------------------------------------------------------
 // HnswIndex
 // ---------------------------------------------------------------------------
 
-/// Lock-free HNSW index with staging buffer and tombstone tracking.
+/// Hybrid HNSW index with incremental inserts and lock-free snapshot reads.
 ///
-/// Reads (`search`) load the immutable `HnswGraph` via an `ArcSwap` guard
-/// (~1 ns, no refcount increment) and brute-force scan the small staging
-/// buffer in the same call. Tombstoned node IDs are filtered from the merged
-/// result list before returning.
+/// The read path loads an immutable `HnswGraph` snapshot via `ArcSwap` (~1ns,
+/// no refcount increment). When mutations are pending (generation >
+/// snapshot_generation), search also acquires a read lock on the mutable
+/// `write_graph` and merges results from both graphs.
 ///
-/// Writes are split into two categories:
-/// - **Staging inserts** (`stage_insert`): O(1) push to the staging `Vec`.
-/// - **Rebuilds** (`rebuild`): build a new `HnswGraph` from all vectors, swap
-///   it atomically, clear staging and tombstones.
-///
-/// The caller drives rebuild timing via `needs_rebuild()`.
+/// Write operations (`insert`, `remove`) acquire the `write_graph` write lock
+/// and bump the generation counter. Periodic `snapshot()` calls clone the
+/// mutable graph (excluding tombstones) into the `ArcSwap`, restoring the
+/// fast lock-free read path.
 pub struct HnswIndex {
-    /// Immutable HNSW graph, atomically swappable.
-    graph: ArcSwap<HnswGraph>,
-    /// Pending inserts awaiting incorporation into the main graph.
-    staging: Mutex<Vec<StagingEntry>>,
-    /// Deleted node IDs. Results containing these are filtered on query.
+    /// Immutable snapshot for the read-hot-path. Lock-free load (~1ns).
+    read_snapshot: ArcSwap<HnswGraph>,
+    /// Mutable graph for incremental inserts.
+    write_graph: RwLock<HnswGraph>,
+    /// Monotonic counter, bumped on each mutation.
+    generation: AtomicU64,
+    /// Generation at last snapshot.
+    snapshot_generation: AtomicU64,
+    /// Deleted node IDs.
     tombstones: Mutex<RoaringBitmap>,
     /// Index configuration.
     params: HnswParams,
@@ -87,9 +78,12 @@ pub struct HnswIndex {
 impl HnswIndex {
     /// Create an empty index for vectors of the given `dimensions`.
     pub fn new(params: HnswParams, dimensions: u16) -> Self {
+        let empty = HnswGraph::empty(dimensions);
         Self {
-            graph: ArcSwap::from(Arc::new(HnswGraph::empty(dimensions))),
-            staging: Mutex::new(Vec::new()),
+            read_snapshot: ArcSwap::from(Arc::new(empty.clone())),
+            write_graph: RwLock::new(empty),
+            generation: AtomicU64::new(0),
+            snapshot_generation: AtomicU64::new(0),
             tombstones: Mutex::new(RoaringBitmap::new()),
             params,
         }
@@ -97,74 +91,145 @@ impl HnswIndex {
 
     /// Create an index from an already-built `HnswGraph`.
     ///
-    /// Staging and tombstones start empty. Use this after deserializing a
-    /// persisted graph from a snapshot.
+    /// Both the read snapshot and write graph are initialized from `graph`.
+    /// Use this after deserializing a persisted graph from a snapshot.
     pub fn from_graph(graph: HnswGraph, params: HnswParams) -> Self {
         Self {
-            graph: ArcSwap::from(Arc::new(graph)),
-            staging: Mutex::new(Vec::new()),
+            read_snapshot: ArcSwap::from(Arc::new(graph.clone())),
+            write_graph: RwLock::new(graph),
+            generation: AtomicU64::new(0),
+            snapshot_generation: AtomicU64::new(0),
             tombstones: Mutex::new(RoaringBitmap::new()),
             params,
         }
     }
 
-    /// Push a vector into the staging buffer.
+    /// Insert a vector into the index incrementally.
     ///
-    /// O(1). The vector is not immediately visible in HNSW graph traversal but
-    /// is included in brute-force scanning during `search` calls.
-    pub fn stage_insert(&self, node_id: NodeId, vector: Arc<[f32]>) {
-        self.staging.lock().push(StagingEntry { node_id, vector });
+    /// Acquires the write lock, inserts the node using the HNSW insertion
+    /// algorithm (O(log N)), and bumps the generation counter. The vector is
+    /// immediately visible to subsequent `search()` calls via the write_graph
+    /// merge path.
+    pub fn insert(&self, node_id: NodeId, vector: Arc<[f32]>) {
+        let max_layer = build::random_layer(self.params.level_factor);
+        let mut neighbors = SmallVec::new();
+        for _ in 0..=max_layer {
+            neighbors.push(Vec::new());
+        }
+        let node = HnswNode {
+            node_id,
+            vector,
+            neighbors,
+            max_layer,
+        };
+
+        let mut wg = self.write_graph.write();
+        build::insert_node(&mut wg, node, &self.params);
+        drop(wg);
+
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Mark a node as deleted.
+    /// Mark a node as deleted, reconnecting its neighbors first.
     ///
-    /// Tombstoned nodes are excluded from all future search results. O(1)
-    /// amortized (RoaringBitmap insert).
+    /// Before tombstoning, repairs the write graph by removing the deleted
+    /// node from its neighbors' adjacency lists and filling empty slots with
+    /// connections to the deleted node's other neighbors (MN-RU). This
+    /// suppresses the "unreachable points" phenomenon at high tombstone ratios.
     ///
-    /// Node IDs are stored using the lower 32 bits of the raw `u64` value,
-    /// consistent with the filter bitmap convention used elsewhere in the
-    /// property graph.
-    pub fn mark_tombstoned(&self, node_id: NodeId) {
+    /// Tombstoned nodes are excluded from all future search results. The node
+    /// remains in the graph structure until the next `snapshot()` or `rebuild()`
+    /// removes it physically.
+    pub fn remove(&self, node_id: NodeId) {
+        // Reconnect mutual neighbors before tombstoning.
+        {
+            let mut wg = self.write_graph.write();
+            if let Some(&idx) = wg.node_id_to_idx.get(&node_id.0) {
+                wg.reconnect_neighbors(idx, &self.params);
+            }
+        }
         self.tombstones.lock().insert(node_id.0 as u32);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Returns `true` when the staging buffer has reached `staging_capacity`.
+    /// Snapshot the mutable graph into the read-only ArcSwap.
     ///
-    /// At this point the caller should call `rebuild` to incorporate staged
-    /// vectors into the main graph.
-    pub fn needs_rebuild(&self) -> bool {
-        self.staging.lock().len() >= self.params.staging_capacity
+    /// Clones the write_graph (excluding tombstoned nodes), atomically
+    /// publishes it via ArcSwap, clears tombstones, and updates the
+    /// snapshot_generation. After this call, `has_pending_mutations()` returns
+    /// false and reads use the lock-free path.
+    pub fn snapshot(&self) {
+        let tombstones = {
+            let mut ts = self.tombstones.lock();
+            std::mem::take(&mut *ts)
+        };
+
+        // Hold the write lock for the entire clone-and-replace to prevent
+        // concurrent inserts from being lost between the clone and swap.
+        let new_graph = {
+            let mut wg = self.write_graph.write();
+            let clean = wg.clone_without(&tombstones);
+            *wg = clean.clone();
+            clean
+        };
+
+        self.read_snapshot.store(Arc::new(new_graph));
+
+        let current_gen = self.generation.load(Ordering::Acquire);
+        self.snapshot_generation
+            .store(current_gen, Ordering::Release);
     }
 
-    /// Number of vectors in the main (built) HNSW graph.
+    /// Returns `true` when mutations have occurred since the last snapshot.
+    pub fn has_pending_mutations(&self) -> bool {
+        self.generation.load(Ordering::Acquire) > self.snapshot_generation.load(Ordering::Acquire)
+    }
+
+    /// Fraction of nodes that are tombstoned relative to write_graph size.
     ///
-    /// Does not include staging entries.
+    /// Returns 0.0 when the graph is empty.
+    pub fn tombstone_ratio(&self) -> f64 {
+        let tombstone_count = self.tombstones.lock().len() as f64;
+        let total = self.write_graph.read().len() as f64;
+        if total == 0.0 {
+            0.0
+        } else {
+            tombstone_count / total
+        }
+    }
+
+    /// Number of mutations since the last snapshot.
+    pub fn pending_count(&self) -> u64 {
+        let current_gen = self.generation.load(Ordering::Acquire);
+        let snap_gen = self.snapshot_generation.load(Ordering::Acquire);
+        current_gen.saturating_sub(snap_gen)
+    }
+
+    /// Number of vectors in the read snapshot graph.
     pub fn len(&self) -> usize {
-        self.graph.load().len()
+        self.read_snapshot.load().len()
     }
 
-    /// Returns `true` when the main graph is empty and staging is empty.
+    /// Returns `true` when both the read snapshot and write graph are empty.
     pub fn is_empty(&self) -> bool {
-        self.graph.load().is_empty() && self.staging.lock().is_empty()
+        self.read_snapshot.load().is_empty() && self.write_graph.read().is_empty()
     }
 
     /// Search for the `k` most similar vectors to `query`.
     ///
-    /// Combines two phases:
-    /// 1. HNSW graph search (if graph is non-empty) via greedy descent + beam
-    ///    search. Requests `k + tombstone_count` candidates to account for
-    ///    post-filter removal.
-    /// 2. Brute-force cosine scan of the staging buffer.
+    /// Combines up to two phases:
+    /// 1. Search the immutable read_snapshot via ArcSwap guard (~1ns load).
+    /// 2. If mutations are pending, also search the write_graph under a read
+    ///    lock and merge results.
     ///
-    /// Tombstoned node IDs are removed from the combined candidate list. The
-    /// final result is sorted by descending similarity and truncated to `k`.
+    /// Tombstoned node IDs are filtered from the merged result list. The final
+    /// result is sorted by descending similarity and truncated to `k`.
     ///
     /// `ef` is the beam width for HNSW search. When `None`, `params.ef_search`
-    /// is used. Pass a larger value for higher recall at the cost of latency.
+    /// is used.
     ///
-    /// The optional `filter` restricts HNSW results to nodes whose raw
-    /// `NodeId` value (lower 32 bits) appears in the bitmap. Staging entries
-    /// are not affected by the filter.
+    /// The optional `filter` restricts results to nodes whose raw `NodeId`
+    /// value (lower 32 bits) appears in the bitmap.
     pub fn search(
         &self,
         query: &[f32],
@@ -178,11 +243,12 @@ impl HnswIndex {
 
         let ef = ef.unwrap_or(self.params.ef_search);
 
-        // --- Phase 1: HNSW graph search ---
-        // Load the immutable graph via ArcSwap guard (~1 ns, no refcount bump).
-        let guard = self.graph.load();
-        let tombstone_count = self.tombstones.lock().len() as usize;
-        let k_expanded = k.saturating_add(tombstone_count);
+        // Snapshot tombstones once to avoid locking twice.
+        let tombstones_snapshot = self.tombstones.lock().clone();
+        let k_expanded = k.saturating_add(tombstones_snapshot.len() as usize);
+
+        // --- Phase 1: Search the immutable read snapshot ---
+        let guard = self.read_snapshot.load();
 
         let mut results: Vec<(NodeId, f32)> = if guard.is_empty() {
             Vec::new()
@@ -190,21 +256,30 @@ impl HnswIndex {
             search::search(&guard, query, k_expanded, ef, filter)
         };
 
-        // --- Phase 2: Brute-force staging scan ---
-        {
-            let staging = self.staging.lock();
-            for entry in staging.iter() {
-                let sim = cosine_similarity(&entry.vector, query);
-                results.push((entry.node_id, sim));
+        // --- Phase 2: Search write_graph if mutations are pending ---
+        if self.has_pending_mutations() {
+            let wg = self.write_graph.read();
+            if !wg.is_empty() {
+                let write_results = search::search(&wg, query, k_expanded, ef, filter);
+
+                // Merge: union by NodeId, keep highest similarity score.
+                // For small result sets (typical k < 64), linear scan is
+                // faster than HashMap allocation.
+                for (id, sim) in write_results {
+                    if let Some(pos) = results.iter().position(|(eid, _)| *eid == id) {
+                        if sim > results[pos].1 {
+                            results[pos].1 = sim;
+                        }
+                    } else {
+                        results.push((id, sim));
+                    }
+                }
             }
         }
 
         // --- Phase 3: Filter tombstones ---
-        {
-            let tombstones = self.tombstones.lock();
-            if !tombstones.is_empty() {
-                results.retain(|(node_id, _)| !tombstones.contains(node_id.0 as u32));
-            }
+        if !tombstones_snapshot.is_empty() {
+            results.retain(|(node_id, _)| !tombstones_snapshot.contains(node_id.0 as u32));
         }
 
         // --- Phase 4: Sort by descending similarity and return top-k ---
@@ -215,40 +290,40 @@ impl HnswIndex {
         results
     }
 
-    /// Build a new `HnswGraph` from `vectors` and atomically publish it.
+    /// Build a new `HnswGraph` from `vectors` and publish it to both graphs.
     ///
-    /// After the swap, staging entries and tombstones are cleared. All
-    /// subsequent reads see the new graph immediately (ArcSwap guarantee).
+    /// After the rebuild, tombstones are cleared and snapshot_generation is
+    /// updated. Used for bulk operations (initial build, full rebuild).
     ///
-    /// `vectors` should include all property-graph vectors for this index,
-    /// not just the delta. The caller is responsible for collecting the full
-    /// set (existing graph nodes + staged inserts, minus tombstoned IDs).
+    /// # Concurrency
+    ///
+    /// Not safe to call concurrently with `insert()`. The build phase runs
+    /// without holding the write lock, so inserts between build and swap are
+    /// lost. The caller must ensure no inserts are in flight during rebuild.
     pub fn rebuild(&self, vectors: Vec<(NodeId, Arc<[f32]>)>) {
         let new_graph = build::build(vectors, &self.params);
-        self.graph.store(Arc::new(new_graph));
-        self.staging.lock().clear();
+        // Update write_graph.
+        *self.write_graph.write() = new_graph.clone();
+        // Update read_snapshot.
+        self.read_snapshot.store(Arc::new(new_graph));
+        // Clear state.
         self.tombstones.lock().clear();
+        let current_gen = self.generation.load(Ordering::Acquire);
+        self.snapshot_generation
+            .store(current_gen, Ordering::Release);
     }
 
     /// Return an `Arc<HnswGraph>` for serialization or inspection.
     ///
-    /// This increments the `Arc` refcount (vs. the ~1 ns guard path used by
-    /// `search`). Prefer `search` for hot paths; use this only for snapshots.
+    /// Returns the immutable read snapshot. Use `search` for hot paths; use
+    /// this only for snapshot persistence.
     pub fn load_graph(&self) -> Arc<HnswGraph> {
-        self.graph.load_full()
+        self.read_snapshot.load_full()
     }
 
     /// Return a reference to the index configuration.
     pub fn params(&self) -> &HnswParams {
         &self.params
-    }
-
-    /// Drain and return all staging entries.
-    ///
-    /// Used by the rebuild coordinator to collect staged vectors alongside the
-    /// existing graph nodes before calling `rebuild`.
-    pub fn take_staging(&self) -> Vec<StagingEntry> {
-        std::mem::take(&mut self.staging.lock())
     }
 
     /// Clone the current tombstone bitmap.
@@ -316,63 +391,34 @@ mod tests {
         let index = HnswIndex::new(HnswParams::default(), 32);
         assert!(index.is_empty());
         assert_eq!(index.len(), 0);
-        assert!(!index.needs_rebuild());
+        assert!(!index.has_pending_mutations());
+        assert_eq!(index.pending_count(), 0);
 
         let results = index.search(&[0.0f32; 32], 10, None, None);
         assert!(results.is_empty(), "empty index must return no results");
     }
 
     // ------------------------------------------------------------------
-    // stage_insert_and_search
+    // insert_and_search (adapted from stage_insert_and_search)
     // ------------------------------------------------------------------
 
     #[test]
-    fn stage_insert_and_search() {
+    fn insert_and_search() {
         let index = HnswIndex::new(HnswParams::default(), 4);
 
-        // Insert a single vector into staging.
+        // Insert a single vector.
         let v = axis_vector(0, 4); // [1, 0, 0, 0]
-        index.stage_insert(NodeId(1), Arc::clone(&v));
+        index.insert(NodeId(1), Arc::clone(&v));
 
-        // The index has no built graph -- search must find the staged vector.
+        // Search must find the inserted vector via the write_graph merge path.
         let query = [1.0f32, 0.0, 0.0, 0.0];
         let results = index.search(&query, 5, None, None);
 
-        assert_eq!(results.len(), 1, "should find the one staged vector");
+        assert_eq!(results.len(), 1, "should find the one inserted vector");
         assert_eq!(results[0].0, NodeId(1));
         assert!(
             (results[0].1 - 1.0).abs() < 1e-6,
             "similarity should be ~1.0"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // needs_rebuild_at_capacity
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn needs_rebuild_at_capacity() {
-        let params = HnswParams {
-            staging_capacity: 4,
-            ..HnswParams::new(4)
-        };
-        let index = HnswIndex::new(params, 2);
-
-        assert!(!index.needs_rebuild());
-
-        for i in 0..3u64 {
-            index.stage_insert(NodeId(i), axis_vector(0, 2));
-            assert!(
-                !index.needs_rebuild(),
-                "should not need rebuild after {i} inserts"
-            );
-        }
-
-        // Fourth insert reaches capacity.
-        index.stage_insert(NodeId(3), axis_vector(1, 2));
-        assert!(
-            index.needs_rebuild(),
-            "should need rebuild once staging_capacity is reached"
         );
     }
 
@@ -384,12 +430,12 @@ mod tests {
     fn tombstone_excludes_from_search() {
         let index = HnswIndex::new(HnswParams::default(), 3);
 
-        // Stage two vectors.
-        index.stage_insert(NodeId(1), axis_vector(0, 3)); // [1, 0, 0]
-        index.stage_insert(NodeId(2), axis_vector(1, 3)); // [0, 1, 0]
+        // Insert two vectors.
+        index.insert(NodeId(1), axis_vector(0, 3)); // [1, 0, 0]
+        index.insert(NodeId(2), axis_vector(1, 3)); // [0, 1, 0]
 
         // Tombstone node 1 (the one closest to the query).
-        index.mark_tombstoned(NodeId(1));
+        index.remove(NodeId(1));
 
         let query = [1.0f32, 0.0, 0.0];
         let results = index.search(&query, 5, None, None);
@@ -411,10 +457,10 @@ mod tests {
     fn rebuild_clears_state() {
         let index = HnswIndex::new(HnswParams::new(4), 3);
 
-        // Stage some vectors and add a tombstone.
-        index.stage_insert(NodeId(1), axis_vector(0, 3));
-        index.stage_insert(NodeId(2), axis_vector(1, 3));
-        index.mark_tombstoned(NodeId(99));
+        // Insert some vectors and add a tombstone.
+        index.insert(NodeId(1), axis_vector(0, 3));
+        index.insert(NodeId(2), axis_vector(1, 3));
+        index.remove(NodeId(99));
 
         // Rebuild from a full set of vectors.
         let vectors = vec![
@@ -423,11 +469,7 @@ mod tests {
         ];
         index.rebuild(vectors);
 
-        // Staging and tombstones must be cleared.
-        assert!(
-            index.staging.lock().is_empty(),
-            "staging must be cleared after rebuild"
-        );
+        // Tombstones must be cleared.
         assert!(
             index.tombstones.lock().is_empty(),
             "tombstones must be cleared after rebuild"
@@ -435,7 +477,10 @@ mod tests {
 
         // Graph must now contain the 2 built nodes.
         assert_eq!(index.len(), 2);
-        assert!(!index.needs_rebuild());
+        assert!(
+            !index.has_pending_mutations(),
+            "rebuild should reset pending mutations"
+        );
 
         // Search should still work.
         let results = index.search(&[1.0f32, 0.0, 0.0], 1, None, None);
@@ -467,7 +512,6 @@ mod tests {
         index.rebuild(vectors);
 
         assert_eq!(index.len(), N as usize);
-        assert!(index.staging.lock().is_empty());
         assert!(index.tombstones.lock().is_empty());
 
         let mut hits = 0usize;
@@ -504,37 +548,237 @@ mod tests {
 
         let index = HnswIndex::from_graph(graph, params);
         assert_eq!(index.len(), graph_len);
-        assert!(index.staging.lock().is_empty());
         assert!(index.tombstones.lock().is_empty());
+        assert!(!index.has_pending_mutations());
     }
 
     // ------------------------------------------------------------------
-    // take_staging / tombstones
+    // tombstones
     // ------------------------------------------------------------------
-
-    #[test]
-    fn take_staging_drains_buffer() {
-        let index = HnswIndex::new(HnswParams::default(), 2);
-        index.stage_insert(NodeId(10), axis_vector(0, 2));
-        index.stage_insert(NodeId(20), axis_vector(1, 2));
-
-        let drained = index.take_staging();
-        assert_eq!(drained.len(), 2);
-        assert!(
-            index.staging.lock().is_empty(),
-            "staging must be empty after take"
-        );
-    }
 
     #[test]
     fn tombstones_returns_clone() {
         let index = HnswIndex::new(HnswParams::default(), 2);
-        index.mark_tombstoned(NodeId(5));
-        index.mark_tombstoned(NodeId(10));
+        index.remove(NodeId(5));
+        index.remove(NodeId(10));
 
         let bm = index.tombstones();
         assert!(bm.contains(5));
         assert!(bm.contains(10));
         assert_eq!(bm.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // New tests: insert, snapshot, generation tracking
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn insert_single_vector() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+        index.insert(NodeId(1), axis_vector(0, 4));
+
+        // Should find it via write_graph merge, without snapshot.
+        let results = index.search(&[1.0, 0.0, 0.0, 0.0], 1, None, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, NodeId(1));
+        assert!(index.has_pending_mutations());
+    }
+
+    #[test]
+    fn insert_multiple_and_search() {
+        let index = HnswIndex::new(HnswParams::new(8), 4);
+
+        for i in 1..=10u64 {
+            index.insert(NodeId(i), pseudo_unit_vector(i, 4));
+        }
+
+        // Search should return results from the write_graph.
+        let results = index.search(&pseudo_unit_vector(1, 4), 5, None, None);
+        assert!(!results.is_empty());
+        // The query vector for seed=1 should find NodeId(1) as the best match.
+        assert_eq!(results[0].0, NodeId(1));
+    }
+
+    #[test]
+    fn insert_then_snapshot() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+
+        index.insert(NodeId(1), axis_vector(0, 4));
+        index.insert(NodeId(2), axis_vector(1, 4));
+        assert!(index.has_pending_mutations());
+
+        index.snapshot();
+
+        assert!(!index.has_pending_mutations());
+        // Read snapshot should have the data.
+        assert_eq!(index.len(), 2);
+        // Search should work via the snapshot (no write_graph merge needed).
+        let results = index.search(&[1.0, 0.0, 0.0, 0.0], 1, None, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, NodeId(1));
+    }
+
+    #[test]
+    fn search_merges_snapshot_and_write() {
+        let index = HnswIndex::new(HnswParams::new(8), 4);
+
+        // Insert some vectors and snapshot.
+        index.insert(NodeId(1), axis_vector(0, 4)); // [1,0,0,0]
+        index.insert(NodeId(2), axis_vector(1, 4)); // [0,1,0,0]
+        index.snapshot();
+
+        // Insert more vectors without snapshot.
+        index.insert(NodeId(3), axis_vector(2, 4)); // [0,0,1,0]
+        index.insert(NodeId(4), axis_vector(3, 4)); // [0,0,0,1]
+
+        assert!(index.has_pending_mutations());
+
+        // Search should find vectors from both snapshot and write_graph.
+        let results = index.search(&[0.5, 0.5, 0.5, 0.5], 4, None, None);
+        let ids: Vec<NodeId> = results.iter().map(|(id, _)| *id).collect();
+
+        assert_eq!(results.len(), 4, "should find all 4 vectors");
+        assert!(ids.contains(&NodeId(1)));
+        assert!(ids.contains(&NodeId(2)));
+        assert!(ids.contains(&NodeId(3)));
+        assert!(ids.contains(&NodeId(4)));
+    }
+
+    #[test]
+    fn remove_excludes_from_search() {
+        let index = HnswIndex::new(HnswParams::default(), 3);
+
+        index.insert(NodeId(1), axis_vector(0, 3));
+        index.insert(NodeId(2), axis_vector(1, 3));
+        index.insert(NodeId(3), axis_vector(2, 3));
+
+        // Remove NodeId(1).
+        index.remove(NodeId(1));
+
+        let results = index.search(&[1.0, 0.0, 0.0], 5, None, None);
+        let ids: Vec<NodeId> = results.iter().map(|(id, _)| *id).collect();
+
+        assert!(
+            !ids.contains(&NodeId(1)),
+            "removed node must not appear in results"
+        );
+        assert!(ids.contains(&NodeId(2)));
+        assert!(ids.contains(&NodeId(3)));
+    }
+
+    #[test]
+    fn tombstone_ratio_calculation() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+
+        // Empty graph: ratio is 0.
+        assert_eq!(index.tombstone_ratio(), 0.0);
+
+        // Insert 10 vectors.
+        for i in 1..=10u64 {
+            index.insert(NodeId(i), pseudo_unit_vector(i, 4));
+        }
+
+        // Remove 2: ratio should be ~0.2.
+        index.remove(NodeId(1));
+        index.remove(NodeId(2));
+
+        let ratio = index.tombstone_ratio();
+        assert!((ratio - 0.2).abs() < 1e-6, "expected ~0.2, got {ratio}");
+    }
+
+    #[test]
+    fn generation_tracking() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+
+        assert_eq!(index.pending_count(), 0);
+        assert!(!index.has_pending_mutations());
+
+        index.insert(NodeId(1), axis_vector(0, 4));
+        assert_eq!(index.pending_count(), 1);
+        assert!(index.has_pending_mutations());
+
+        index.insert(NodeId(2), axis_vector(1, 4));
+        assert_eq!(index.pending_count(), 2);
+
+        // Remove also bumps generation.
+        index.remove(NodeId(1));
+        assert_eq!(index.pending_count(), 3);
+    }
+
+    #[test]
+    fn snapshot_resets_generation_gap() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+
+        index.insert(NodeId(1), axis_vector(0, 4));
+        index.insert(NodeId(2), axis_vector(1, 4));
+        assert_eq!(index.pending_count(), 2);
+
+        index.snapshot();
+        assert_eq!(index.pending_count(), 0);
+        assert!(!index.has_pending_mutations());
+
+        // New mutations should create a new gap.
+        index.insert(NodeId(3), axis_vector(2, 4));
+        assert_eq!(index.pending_count(), 1);
+        assert!(index.has_pending_mutations());
+    }
+
+    #[test]
+    fn has_pending_mutations_tracking() {
+        let index = HnswIndex::new(HnswParams::default(), 4);
+
+        assert!(!index.has_pending_mutations());
+
+        // Insert triggers pending.
+        index.insert(NodeId(1), axis_vector(0, 4));
+        assert!(index.has_pending_mutations());
+
+        // Snapshot clears pending.
+        index.snapshot();
+        assert!(!index.has_pending_mutations());
+
+        // Remove triggers pending.
+        index.remove(NodeId(1));
+        assert!(index.has_pending_mutations());
+
+        // Rebuild clears pending.
+        index.rebuild(vec![(NodeId(2), axis_vector(1, 4))]);
+        assert!(!index.has_pending_mutations());
+    }
+
+    #[test]
+    fn remove_reconnects_mutual_neighbors() {
+        // Build a small graph: nodes 1-5 in a 4D space.
+        let vectors: Vec<(NodeId, Arc<[f32]>)> = (1..=5)
+            .map(|i| (NodeId(i), axis_vector(((i - 1) % 4) as usize, 4)))
+            .collect();
+        let index = HnswIndex::new(HnswParams::new(4), 4);
+        for (id, vec) in &vectors {
+            index.insert(*id, Arc::clone(vec));
+        }
+        index.snapshot();
+
+        // Before deletion: node 3 should have neighbors.
+        let wg = index.write_graph.read();
+        let idx3 = *wg.node_id_to_idx.get(&3).unwrap();
+        let neighbors_of_3: Vec<u32> = wg.nodes[idx3 as usize].neighbors[0].clone();
+        assert!(!neighbors_of_3.is_empty(), "node 3 should have neighbors");
+        drop(wg);
+
+        // Delete node 3. MN-RU should reconnect its neighbors.
+        index.remove(NodeId(3));
+
+        // After deletion: node 3's former neighbors should no longer reference
+        // node 3 in their adjacency lists (in the write graph).
+        let wg = index.write_graph.read();
+        let idx3_after = *wg.node_id_to_idx.get(&3).unwrap();
+        for &neighbor_idx in &neighbors_of_3 {
+            let nb = &wg.nodes[neighbor_idx as usize];
+            assert!(
+                !nb.neighbors[0].contains(&idx3_after),
+                "neighbor {neighbor_idx} should not reference deleted node {idx3_after}"
+            );
+        }
+        drop(wg);
     }
 }

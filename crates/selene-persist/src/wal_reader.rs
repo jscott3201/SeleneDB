@@ -103,10 +103,16 @@ pub fn read_entries_after(
             crate::wal::xxh3_lo32(&payload)
         };
         if computed_xxh3 != stored_xxh3 {
-            return Err(PersistError::CrcMismatch {
-                expected: stored_xxh3,
-                actual: computed_xxh3,
-            });
+            // Treat CRC mismatch like a truncated tail entry: stop replay
+            // with a warning instead of failing. Crash-induced corruption
+            // nearly always affects only the last entry (partial write).
+            tracing::warn!(
+                offset = pos,
+                expected = stored_xxh3,
+                actual = computed_xxh3,
+                "WAL entry CRC mismatch, stopping replay (likely crash artifact)"
+            );
+            break;
         }
 
         if seq > after_seq {
@@ -223,10 +229,13 @@ pub fn read_local_entries_after(
             crate::wal::xxh3_lo32(&payload)
         };
         if computed_xxh3 != stored_xxh3 {
-            return Err(PersistError::CrcMismatch {
-                expected: stored_xxh3,
-                actual: computed_xxh3,
-            });
+            tracing::warn!(
+                offset = pos,
+                expected = stored_xxh3,
+                actual = computed_xxh3,
+                "WAL entry CRC mismatch, stopping replay (likely crash artifact)"
+            );
+            break;
         }
 
         if seq > after_seq {

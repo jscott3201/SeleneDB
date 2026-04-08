@@ -3,41 +3,23 @@
 # Uses the official Rust image on Alpine for musl-static builds.
 # The resulting binary has zero runtime dependencies.
 
-# TODO: pin by digest in CI (e.g., rust:alpine@sha256:<digest>)
-FROM rust:alpine AS builder
+FROM rust:alpine@sha256:7f752ee8ea5deb9f4863d8c3f228a216a6466619882f09a44b9eda9617dc7770 AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig
 
 WORKDIR /build
-
-# Compile-time feature flags (default: all).
-#
-# Most services are always compiled in and toggled at runtime via config
-# or environment variables (SELENE_PROFILE, SELENE_VECTOR_ENABLED, etc.).
-# Features that gate actual dependencies:
-#   vector         - candle (BERT embedding inference)
-#   search         - tantivy (full-text BM25 indexes)
-#   cloud-storage  - object_store (S3/GCS/Azure cloud offload)
-#   rdf            - oxrdf/oxttl (RDF import/export)
-#   rdf-sparql     - spareval (SPARQL query, implies rdf)
-#
-# The `federation` flag is retained for compatibility but compiles
-# unconditionally.
-#
-# To build a minimal image without search/vector:
-#   docker build --build-arg FEATURES=federation .
-ARG FEATURES=federation,vector,search,cloud-storage,rdf,rdf-sparql
 
 COPY . .
 
 # BuildKit cache mounts: cargo registry, git index, and target directory
 # persist across builds. No fragile dummy-file dependency caching.
 # The cp at the end extracts binaries — cache mounts are not in the layer.
-# Server and CLI are built separately because --features only applies to -p target.
+# All product features are always compiled. Services are toggled at runtime
+# via SELENE_PROFILE or environment variables (see Runtime Configuration below).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p selene-server --features "${FEATURES}" \
+    cargo build --release -p selene-server --features dev-tls \
     && cargo build --release -p selene-cli \
     && mkdir -p /tmp/out \
     && cp target/release/selene-server target/release/selene /tmp/out/
@@ -47,8 +29,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # No shell, no package manager, near-zero CVE surface.
 # The Rust binary is statically linked (musl) and runs as PID 1.
 
-# TODO: pin by digest in CI (e.g., gcr.io/distroless/static@sha256:<digest>)
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
 
 COPY --from=builder /tmp/out/selene-server /selene-server
 COPY --from=builder /tmp/out/selene /selene
@@ -77,6 +58,6 @@ EXPOSE 8080/tcp
 ENTRYPOINT ["/selene-server"]
 
 # Default: start the server with /data as the data directory.
-# When overriding CMD (e.g., --dev), include /data explicitly:
-#   docker run selene:latest --dev /data
-CMD ["/data"]
+# When overriding CMD (e.g., --dev), include --data-dir explicitly:
+#   docker run selene:latest --dev --data-dir /data
+CMD ["--data-dir", "/data"]
