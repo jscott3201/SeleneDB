@@ -433,6 +433,12 @@ impl DataChunk {
     /// Build a DataChunk from pre-built columns.
     pub fn from_columns(columns: SmallVec<[Column; 8]>, schema: ChunkSchema, len: usize) -> Self {
         debug_assert!(
+            columns.len() == schema.len(),
+            "column count ({}) must match schema count ({})",
+            columns.len(),
+            schema.len()
+        );
+        debug_assert!(
             columns.iter().all(|c| c.len() == len),
             "all columns must have the same length"
         );
