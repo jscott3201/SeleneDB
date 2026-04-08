@@ -335,7 +335,9 @@ pub async fn serve_router(
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
-            Arc::new(rate_limit::EndpointRateLimiter::from_config(&config.rate_limit)),
+            Arc::new(rate_limit::EndpointRateLimiter::from_config(
+                &config.rate_limit,
+            )),
             rate_limit::rate_limit_middleware,
         ))
         .layer(tower::limit::ConcurrencyLimitLayer::new(128));

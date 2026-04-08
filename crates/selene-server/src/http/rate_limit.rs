@@ -256,7 +256,10 @@ mod tests {
         assert!(!bucket.try_acquire());
         // Wait 50ms: should refill ~5 tokens (100/sec * 0.05s).
         std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(bucket.try_acquire(), "bucket should have refilled after sleep");
+        assert!(
+            bucket.try_acquire(),
+            "bucket should have refilled after sleep"
+        );
     }
 
     #[test]
