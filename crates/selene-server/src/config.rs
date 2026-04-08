@@ -38,6 +38,56 @@ pub struct HttpConfig {
     /// Set to true only if a TLS-terminating reverse proxy is in front.
     #[serde(default)]
     pub allow_plaintext: bool,
+    /// Per-endpoint rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Per-endpoint rate limiting (token bucket, requests per second).
+///
+/// Requests are classified into tiers by path and method. Each tier has
+/// an independent token bucket. Excess requests receive 429 Too Many
+/// Requests. System endpoints (health, ready) are never rate-limited.
+///
+/// Set any tier to 0 to disable rate limiting for that tier.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Requests/sec for read endpoints: GET nodes, edges, stats, ts queries.
+    #[serde(default = "default_rate_read")]
+    pub read_per_sec: u32,
+    /// Requests/sec for write endpoints: POST/PUT/DELETE nodes, edges, schemas.
+    #[serde(default = "default_rate_write")]
+    pub write_per_sec: u32,
+    /// Requests/sec for query endpoints: GQL, SPARQL, graph slice.
+    #[serde(default = "default_rate_query")]
+    pub query_per_sec: u32,
+    /// Requests/sec for heavy data endpoints: CSV/RDF import/export.
+    #[serde(default = "default_rate_data")]
+    pub data_per_sec: u32,
+}
+
+fn default_rate_read() -> u32 {
+    200
+}
+fn default_rate_write() -> u32 {
+    100
+}
+fn default_rate_query() -> u32 {
+    50
+}
+fn default_rate_data() -> u32 {
+    20
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            read_per_sec: default_rate_read(),
+            write_per_sec: default_rate_write(),
+            query_per_sec: default_rate_query(),
+            data_per_sec: default_rate_data(),
+        }
+    }
 }
 
 impl std::fmt::Debug for HttpConfig {
@@ -51,6 +101,7 @@ impl std::fmt::Debug for HttpConfig {
                 &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
             )
             .field("allow_plaintext", &self.allow_plaintext)
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -63,6 +114,7 @@ impl Default for HttpConfig {
             cors_origins: Vec::new(),
             metrics_token: None,
             allow_plaintext: false,
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -730,6 +782,26 @@ impl SeleneConfig {
         }
         if let Ok(token) = std::env::var("SELENE_METRICS_TOKEN") {
             http.metrics_token = Some(token);
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_READ")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.read_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_WRITE")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.write_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_QUERY")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.query_per_sec = n;
+        }
+        if let Ok(v) = std::env::var("SELENE_RATE_LIMIT_DATA")
+            && let Ok(n) = v.parse()
+        {
+            http.rate_limit.data_per_sec = n;
         }
 
         // MCP: env override
