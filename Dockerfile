@@ -20,7 +20,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p selene-server \
+    cargo build --release -p selene-server --features dev-tls \
     && cargo build --release -p selene-cli \
     && mkdir -p /tmp/out \
     && cp target/release/selene-server target/release/selene /tmp/out/

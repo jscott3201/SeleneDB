@@ -313,12 +313,10 @@ pub struct SeleneAuthMetadata {
 }
 
 pub async fn oauth_metadata(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let scheme = if state.config.dev_mode {
-        "http"
-    } else {
-        "https"
-    };
-    let base = format!("{scheme}://{}", state.config.http.listen_addr);
+    let base = state
+        .config
+        .mcp
+        .resolve_public_url(state.config.http.listen_addr, state.config.dev_mode);
     let metadata = SeleneAuthMetadata {
         issuer: base.clone(),
         authorization_endpoint: format!("{base}/oauth/authorize"),

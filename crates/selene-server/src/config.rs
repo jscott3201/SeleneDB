@@ -113,6 +113,21 @@ pub struct McpConfig {
     #[serde(default)]
     pub registration_token: Option<String>,
 
+    /// Public base URL for OAuth discovery and MCP metadata.
+    ///
+    /// Used by `/.well-known/oauth-authorization-server` to build endpoint
+    /// URLs that external clients can reach. Required when the server binds
+    /// to `0.0.0.0` inside a container but clients connect via
+    /// `localhost` or a reverse proxy hostname.
+    ///
+    /// Example: `public_url = "http://localhost:8080"`
+    /// Env: `SELENE_PUBLIC_URL`
+    ///
+    /// When absent, derived from `http.listen_addr` with `0.0.0.0`
+    /// replaced by `localhost`.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
     /// MCP session idle timeout in seconds (default: 300 = 5 minutes).
     /// Sessions with no activity beyond this threshold are cleaned up.
     #[serde(default = "default_mcp_session_timeout")]
@@ -152,6 +167,7 @@ impl std::fmt::Debug for McpConfig {
                 "registration_token",
                 &self.registration_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("public_url", &self.public_url)
             .field("session_timeout_secs", &self.session_timeout_secs)
             .field("max_sessions", &self.max_sessions)
             .finish()
@@ -169,8 +185,30 @@ impl Default for McpConfig {
             refresh_token_ttl_secs: 604_800,
             registration_token: None,
             session_timeout_secs: default_mcp_session_timeout(),
+            public_url: None,
             max_sessions: default_mcp_max_sessions(),
         }
+    }
+}
+
+impl McpConfig {
+    /// Resolve the public base URL for OAuth discovery endpoints.
+    ///
+    /// Priority: explicit `public_url` > derived from `http_addr` with
+    /// `0.0.0.0` replaced by `localhost` (unreachable bind addresses
+    /// break MCP clients running outside the container).
+    pub fn resolve_public_url(&self, http_addr: std::net::SocketAddr, dev_mode: bool) -> String {
+        if let Some(url) = &self.public_url {
+            return url.trim_end_matches('/').to_string();
+        }
+        let scheme = if dev_mode { "http" } else { "https" };
+        let addr_str = http_addr.to_string();
+        let host = if addr_str.starts_with("0.0.0.0:") {
+            addr_str.replacen("0.0.0.0", "localhost", 1)
+        } else {
+            addr_str
+        };
+        format!("{scheme}://{host}")
     }
 }
 
@@ -698,6 +736,9 @@ impl SeleneConfig {
         let mut mcp = file_config.mcp.unwrap_or_default();
         if let Some(enabled) = env_bool("SELENE_MCP_ENABLED") {
             mcp.enabled = enabled;
+        }
+        if let Ok(url) = std::env::var("SELENE_PUBLIC_URL") {
+            mcp.public_url = Some(url);
         }
 
         let performance = file_config.performance.unwrap_or_default();
