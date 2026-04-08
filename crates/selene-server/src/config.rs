@@ -342,6 +342,10 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
+    /// Defer model loading until first embed() call (default: false).
+    /// When false, the model is loaded eagerly at server startup.
+    #[serde(default)]
+    pub lazy_load: bool,
 }
 
 impl Default for VectorConfig {
@@ -356,6 +360,7 @@ impl Default for VectorConfig {
             hnsw_m0: None,
             hnsw_ef_construction: None,
             hnsw_ef_search: None,
+            lazy_load: false,
         }
     }
 }

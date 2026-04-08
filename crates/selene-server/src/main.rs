@@ -126,6 +126,14 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
             model_path,
             config.vector.dimensions,
         );
+        if !config.vector.lazy_load {
+            match selene_gql::runtime::embed::initialize() {
+                Ok(model_id) => tracing::info!(model = %model_id, "embedding model loaded"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding model not available (semantic search disabled)");
+                }
+            }
+        }
     }
 
     let mut state = bootstrap::bootstrap(config, vault_passphrase).await?;
