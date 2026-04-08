@@ -1,4 +1,4 @@
-//! Data import/export handlers: CSV, RDF, SPARQL, ReactFlow, time-series.
+//! Data import/export handlers: CSV, RDF, SPARQL, ReactFlow, time-series, snapshots.
 
 use std::sync::Arc;
 
@@ -574,4 +574,54 @@ fn execute_sparql_handler(
         bytes,
     )
         .into_response())
+}
+
+// ── Snapshot export ────────────────────────────────────────────────
+
+/// Export the graph as a portable binary snapshot.
+///
+/// Returns the snapshot as an `application/octet-stream` download with a
+/// `Content-Disposition` header for the filename. The snapshot is self-contained
+/// (nodes, edges, schemas, triggers, HNSW indexes, views) and can be used to
+/// restore the graph on another instance by placing it in the data directory.
+pub(in crate::http) async fn snapshot_export(
+    State(state): State<Arc<ServerState>>,
+    _auth: HttpAuth,
+) -> Result<impl IntoResponse, HttpError> {
+    let tmp_path = std::env::temp_dir().join(format!("selene-export-{}.snap", std::process::id()));
+
+    let st = Arc::clone(&state);
+    let export_path = tmp_path.clone();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, OpError> {
+        crate::tasks::export_snapshot_to_path(&st, &export_path)
+            .map_err(|e| OpError::Internal(format!("snapshot export: {e}")))?;
+        let data = std::fs::read(&export_path)
+            .map_err(|e| OpError::Internal(format!("read snapshot: {e}")))?;
+        let _ = std::fs::remove_file(&export_path);
+        Ok(data)
+    })
+    .await
+    .map_err(|e| HttpError(OpError::Internal(format!("spawn: {e}"))))??;
+
+    let filename = format!("selene-snapshot-{}.snap", chrono_filename());
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+fn chrono_filename() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
