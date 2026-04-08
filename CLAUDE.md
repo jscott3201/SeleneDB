@@ -2,7 +2,7 @@
 
 Lightweight, in-memory property graph runtime for IoT, smart buildings, and domains requiring a living graph of connected entities with real-time state. Written in pure Rust (zero C/C++ dependencies).
 
-v0.2.0 release candidate. 13 crates, ~141K LOC, ~2,828 unit tests + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization). Eight rounds of agent usability testing (90+ issues fixed).
+v0.2.0 release candidate. 13 crates, ~141K LOC, ~2,828 unit tests + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization). Eight rounds of agent usability testing (90+ issues fixed). 56 MCP tools with read/write/destructive annotations.
 
 ## Build and test
 
@@ -125,17 +125,30 @@ Stress profile: `SELENE_BENCH_PROFILE=stress SELENE_MAX_BINDINGS=500000 cargo be
 ```bash
 docker build -t selene .                       # distroless, ~14 MB compressed
 docker compose up -d                           # hardened: read_only, cap_drop ALL
+curl -o backup.snap http://localhost:8080/snapshot  # portable graph backup
 ```
 
 ## Workflow graph (SeleneDB MCP)
 
-**All project knowledge lives in the running SeleneDB graph instance.** Query via MCP tools (`gql_query`, `graph_stats`, `related`, `semantic_search`) before reading files. The graph contains 610+ nodes across 4 projects (SeleneDB, Helios, rusty-bacnet, rusty-modbus) with 680+ edges.
+**All project knowledge lives in the running SeleneDB graph instance.** Query via MCP tools (`gql_query`, `graph_stats`, `related`, `semantic_search`) before reading files. The graph contains 639+ nodes across 4 projects (SeleneDB, Helios, rusty-bacnet, rusty-modbus) with 718+ edges. Snapshots saved to `~/Development/SeleneSnapshots/`.
 
 Key entity types: `project`, `crate`, `module`, `dependency`, `convention`, `preference`, `design_decision`, `topic`, `document`, `work_item`, `milestone`, `deferred_work`, `upstream_proposal`, `best_practice`, `code_pitfall`, `research`, `session_summary`, `skill`, `agent`.
 
 Key edge types: `depends_on`, `relates_to`, `belongs_to_project`, `contains`, `used_by`, `flows_to`, `produced`, `touches`, `informs`, `preloads`, `applies_to`.
 
-**Start every session** by querying `graph_stats` for current state, then query conventions, open work, and recent sessions for context. Update the graph throughout the session: session summaries, work item status, notes, findings.
+**Start every session** by querying `graph_stats` for current state, then the current sprint, open work, and recent sessions. Update the graph throughout the session: session summaries, work item status, notes, findings.
+
+**Session start queries:**
+```gql
+-- Current sprint backlog
+MATCH (u)-[r:relates_to]->(m:milestone) WHERE m.status = 'next' RETURN m.name, u.title, r.sprint_order ORDER BY r.sprint_order
+
+-- What changed since last session
+CALL graph.diff($sinceNanos) YIELD entity_type, change_type, label, count
+
+-- Structural health check
+CALL graph.validate() YIELD check, status, count, details
+```
 
 **Common queries:**
 ```gql
