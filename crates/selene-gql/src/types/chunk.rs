@@ -317,8 +317,23 @@ impl ChunkSchema {
     }
 
     /// Look up the column slot index for a variable name.
+    ///
+    /// Tries exact match first, then falls back to case-insensitive comparison.
+    /// This handles the mismatch between backtick-escaped identifiers (which
+    /// preserve case per ISO GQL §21.3) and undelimited identifiers (which are
+    /// case-folded to uppercase). Users forced to backtick-escape reserved
+    /// keywords like `count` in RETURN still match YIELD bindings stored as
+    /// uppercase COUNT.
     pub fn slot_of(&self, var: &IStr) -> Option<usize> {
-        self.slots.iter().position(|(name, _)| name == var)
+        self.slots
+            .iter()
+            .position(|(name, _)| name == var)
+            .or_else(|| {
+                let upper = var.as_str().to_uppercase();
+                self.slots
+                    .iter()
+                    .position(|(name, _)| name.as_str().eq_ignore_ascii_case(&upper))
+            })
     }
 
     /// Add a new variable-column mapping. Returns the slot index.

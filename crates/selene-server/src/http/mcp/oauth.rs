@@ -432,21 +432,44 @@ pub async fn oauth_register(
         }
     }
 
-    // Validate scope is a recognized role.
+    // Validate scope: OAuth 2.0 (RFC 6749 §3.3) uses space-delimited scope
+    // tokens. Each token must be a recognized role. When multiple roles are
+    // requested, the highest-privilege role is selected (SeleneDB uses
+    // single-role authorization).
     let scope = if req.scope.is_empty() {
-        "reader"
+        "reader".to_owned()
     } else {
-        &req.scope
+        let role_priority = |r: &crate::auth::Role| match r {
+            crate::auth::Role::Admin => 4,
+            crate::auth::Role::Service => 3,
+            crate::auth::Role::Operator => 2,
+            crate::auth::Role::Reader => 1,
+            crate::auth::Role::Device => 0,
+        };
+        let mut best: Option<crate::auth::Role> = None;
+        for token in req.scope.split_whitespace() {
+            match token.parse::<crate::auth::Role>() {
+                Ok(role) => {
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| role_priority(&role) > role_priority(b))
+                    {
+                        best = Some(role);
+                    }
+                }
+                Err(_) => {
+                    return oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_scope",
+                        &format!(
+                            "scope must be a valid role (admin/service/operator/reader/device), got '{token}'"
+                        ),
+                    );
+                }
+            }
+        }
+        best.unwrap_or(crate::auth::Role::Reader).to_string()
     };
-    if scope.parse::<crate::auth::Role>().is_err() {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_scope",
-            &format!(
-                "scope must be a valid role (admin/service/operator/reader/device), got '{scope}'"
-            ),
-        );
-    }
 
     let client_id = format!("mcp-{}", uuid_v4());
     let client_secret = generate_secret();
@@ -478,7 +501,7 @@ pub async fn oauth_register(
     // Build GQL INSERT for the principal node.
     let identity = gql_escape(&client_id);
     let hash_escaped = gql_escape(&credential_hash);
-    let role = gql_escape(scope);
+    let role = gql_escape(&scope);
     let name = gql_escape(&req.client_name);
     let uri = gql_escape(&req.redirect_uris[0]);
 
@@ -1059,27 +1082,38 @@ fn handle_client_credentials_grant(
     // Validate requested scope against the principal's actual role. If a scope
     // is requested, it must match the principal's role exactly; privilege
     // escalation via scope parameter is not allowed.
+    // OAuth 2.0 (RFC 6749 §3.3) scope is space-delimited. Accept if any
+    // requested scope matches the principal's authorized role.
     let scope_str = if req.scope.is_empty() {
         auth.role.as_str().to_string()
     } else {
-        let requested: Result<crate::auth::Role, _> = req.scope.parse();
-        match requested {
-            Ok(role) if role == auth.role => role.as_str().to_string(),
-            Ok(_) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_scope",
-                    "requested scope does not match the client's authorized role",
-                );
-            }
-            Err(_) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_scope",
-                    "scope must be a valid role (admin/service/operator/reader/device)",
-                );
+        let mut matched = false;
+        for token in req.scope.split_whitespace() {
+            match token.parse::<crate::auth::Role>() {
+                Ok(role) if role == auth.role => {
+                    matched = true;
+                    break;
+                }
+                Ok(_) => {} // valid role but doesn't match — skip
+                Err(_) => {
+                    return oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_scope",
+                        &format!(
+                            "scope must be a valid role (admin/service/operator/reader/device), got '{token}'"
+                        ),
+                    );
+                }
             }
         }
+        if !matched {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope does not match the client's authorized role",
+            );
+        }
+        auth.role.as_str().to_string()
     };
 
     match token_svc.issue(&req.client_id, auth.role.as_str()) {
