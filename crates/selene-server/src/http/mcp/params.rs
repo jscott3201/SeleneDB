@@ -145,6 +145,47 @@ pub(crate) struct CreateEdgeParams {
     pub(crate) upsert: Option<bool>,
 }
 
+/// Single node entry for batch creation.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchNodeEntry {
+    /// Labels to assign.
+    pub(crate) labels: Vec<String>,
+    /// Key-value properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchCreateNodesParams {
+    /// Array of nodes to create. Each entry has labels and optional properties.
+    pub(crate) nodes: Vec<BatchNodeEntry>,
+}
+
+/// Single edge entry for batch creation.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchEdgeEntry {
+    /// Source node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) source: u64,
+    /// Target node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) target: u64,
+    /// Edge label.
+    pub(crate) label: String,
+    /// Key-value properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// Deduplicate on (source, target, label).
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchCreateEdgesParams {
+    /// Array of edges to create. Each entry has source, target, label, and optional properties.
+    pub(crate) edges: Vec<BatchEdgeEntry>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyEdgeParams {
     /// Edge ID to modify.

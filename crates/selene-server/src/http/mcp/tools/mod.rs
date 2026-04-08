@@ -450,6 +450,96 @@ impl SeleneTools {
     }
 
     #[tool(
+        name = "batch_create_nodes",
+        description = "Create multiple nodes in a single call. Each entry specifies labels and optional properties. Returns array of created node IDs. Much faster than individual create_node calls for bulk operations.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_create_nodes(
+        &self,
+        params: Parameters<BatchCreateNodesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.nodes;
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label_strs: Vec<&str> = entry.labels.iter().map(|s| s.as_str()).collect();
+                    let labels = selene_core::LabelSet::from_strs(&label_strs);
+                    let schema = st.graph.read(|g| {
+                        let label = entry.labels.first().map_or("", |s| s.as_str());
+                        g.schema().node_schema(label).cloned()
+                    });
+                    let props = ops::json_props_with_schema(entry.properties, schema.as_ref())
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let node = ops::nodes::create_node(&st, &auth, labels, props, None)?;
+                    created_ids.push(node.id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
+        name = "batch_create_edges",
+        description = "Create multiple edges in a single call. Each entry specifies source, target, label, and optional properties. Supports per-edge upsert flag. Returns array of created/matched edge IDs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_create_edges(
+        &self,
+        params: Parameters<BatchCreateEdgesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.edges;
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label = selene_core::IStr::new(&entry.label);
+                    let props = ops::json_props_with_edge_schema(entry.properties, &st, label)
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let upsert = entry.upsert.unwrap_or(false);
+                    let edge = ops::edges::create_edge(
+                        &st,
+                        &auth,
+                        entry.source,
+                        entry.target,
+                        label,
+                        props,
+                        upsert,
+                    )?;
+                    created_ids.push(edge.id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
         name = "list_edges",
         description = "List edges, optionally filtered by label. Use limit/offset for pagination.",
         annotations(
