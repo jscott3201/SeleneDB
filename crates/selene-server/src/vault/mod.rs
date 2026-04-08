@@ -196,6 +196,66 @@ impl VaultHandle {
 
         Ok(key.to_vec())
     }
+
+    /// Save the token deny list to the vault graph.
+    ///
+    /// Replaces all existing `revoked_token` nodes with the current deny list.
+    /// Called periodically from the prune cycle and on graceful shutdown.
+    pub fn save_deny_list(
+        &self,
+        master: &MasterKey,
+        entries: &[(String, u64)],
+    ) -> Result<(), VaultError> {
+        // Remove all existing revoked_token nodes
+        let existing_ids: Vec<selene_core::NodeId> = self.graph.read(|g| {
+            g.nodes_by_label("revoked_token").collect()
+        });
+
+        if !existing_ids.is_empty() || !entries.is_empty() {
+            self.graph
+                .write(|m| {
+                    for nid in &existing_ids {
+                        m.delete_node(*nid)?;
+                    }
+                    for (jti, exp) in entries {
+                        m.create_node(
+                            LabelSet::from_strs(&["revoked_token"]),
+                            PropertyMap::from_pairs(vec![
+                                (IStr::new("jti"), Value::str(jti)),
+                                (IStr::new("expires_at"), Value::UInt(*exp)),
+                            ]),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| {
+                    VaultError::InvalidFormat(format!("vault deny list write failed: {e}"))
+                })?;
+            self.flush(master)?;
+        }
+
+        Ok(())
+    }
+
+    /// Load the token deny list from the vault graph.
+    ///
+    /// Returns `(jti, expires_at)` pairs for all `revoked_token` nodes.
+    pub fn load_deny_list(&self) -> Vec<(String, u64)> {
+        self.graph.read(|g| {
+            g.nodes_by_label("revoked_token")
+                .filter_map(|nid| {
+                    let node = g.get_node(nid)?;
+                    let jti = node.property("jti").and_then(|v| v.as_str())?.to_owned();
+                    let exp = match node.property("expires_at") {
+                        Some(Value::UInt(n)) => *n,
+                        Some(Value::Int(n)) if *n >= 0 => *n as u64,
+                        _ => return None,
+                    };
+                    Some((jti, exp))
+                })
+                .collect()
+        })
+    }
 }
 
 /// Seed the default admin principal in a fresh vault.
@@ -564,5 +624,41 @@ mod tests {
         });
 
         assert!(crate::auth::credential::verify_credential(&password, &hash).unwrap());
+    }
+
+    #[test]
+    fn deny_list_save_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("secure.vault");
+        let master = MasterKey::dev_key();
+
+        let (handle, _) =
+            VaultHandle::open_or_create(vault_path.clone(), &master, KeySource::Raw, [0u8; 16])
+                .unwrap();
+
+        // Save some deny list entries
+        let entries = vec![
+            ("jti-abc-123".to_string(), 9_999_999_999_u64),
+            ("jti-def-456".to_string(), 9_999_999_998_u64),
+        ];
+        handle.save_deny_list(&master, &entries).unwrap();
+
+        // Load them back
+        let loaded = handle.load_deny_list();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|(jti, _)| jti == "jti-abc-123"));
+        assert!(loaded.iter().any(|(jti, _)| jti == "jti-def-456"));
+
+        drop(handle);
+
+        // Reopen vault — deny list survives restart
+        let (handle2, _) =
+            VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
+        let reloaded = handle2.load_deny_list();
+        assert_eq!(reloaded.len(), 2);
+
+        // Saving empty list clears all entries
+        handle2.save_deny_list(&master, &[]).unwrap();
+        assert_eq!(handle2.load_deny_list().len(), 0);
     }
 }

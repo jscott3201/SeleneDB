@@ -304,6 +304,7 @@ pub struct SeleneAuthMetadata {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
+    revocation_endpoint: String,
     registration_endpoint: String,
     scopes_supported: Vec<String>,
     response_types_supported: Vec<String>,
@@ -321,6 +322,7 @@ pub async fn oauth_metadata(State(state): State<Arc<ServerState>>) -> impl IntoR
         issuer: base.clone(),
         authorization_endpoint: format!("{base}/oauth/authorize"),
         token_endpoint: format!("{base}/oauth/token"),
+        revocation_endpoint: format!("{base}/oauth/revoke"),
         registration_endpoint: format!("{base}/oauth/register"),
         scopes_supported: vec![
             "admin".into(),
@@ -897,6 +899,47 @@ pub async fn oauth_token(
             &format!("unsupported grant_type: {}", req.grant_type),
         ),
     }
+}
+
+// -- Token revocation (RFC 7009) -------------------------------------------
+
+/// `POST /oauth/revoke` — revoke an access token.
+///
+/// Accepts `application/x-www-form-urlencoded` with a `token` field containing
+/// the JWT access token to revoke. Per RFC 7009, this endpoint always returns
+/// 200 OK regardless of whether the token was valid or already revoked.
+pub async fn oauth_revoke(
+    State(state): State<Arc<ServerState>>,
+    Form(req): Form<RevokeRequest>,
+) -> Response {
+    let Some(token_svc) = get_token_service(&state) else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "OAuth token service is not initialized",
+        );
+    };
+
+    if req.token.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token is required",
+        );
+    }
+
+    // Per RFC 7009 §2.1: the server responds with 200 OK even if the token
+    // is invalid, expired, or already revoked — to prevent token scanning.
+    if let Err(e) = token_svc.revoke_token(&req.token) {
+        tracing::debug!("revoke request for invalid token: {e}");
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "revoked"}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevokeRequest {
+    token: String,
 }
 
 // -- Grant handlers --------------------------------------------------------

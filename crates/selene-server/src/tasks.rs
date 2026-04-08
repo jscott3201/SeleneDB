@@ -227,6 +227,20 @@ pub fn shutdown_snapshot(state: &ServerState) {
             tracing::error!("final snapshot failed: {e}");
         }
     }
+
+    // Flush deny list to vault on shutdown (revoked tokens survive restarts)
+    if let Some(oauth_svc) = state
+        .services
+        .get::<crate::http::mcp::oauth::OAuthService>()
+        && let Some(vs) = state.services.get::<crate::vault::VaultService>()
+    {
+        let (_, denied) = oauth_svc.token_service.snapshot_state();
+        if let Err(e) = vs.handle.save_deny_list(&vs.master_key, &denied) {
+            tracing::error!("failed to persist deny list on shutdown: {e}");
+        } else {
+            tracing::info!(count = denied.len(), "deny list persisted to vault");
+        }
+    }
 }
 
 /// Periodically snapshot the graph and truncate WAL.
@@ -720,11 +734,24 @@ async fn metrics_update_loop(state: Arc<ServerState>, cancel: CancellationToken)
                     prune_counter = 0;
                     state.auth_rate_limiter.prune_expired();
 
-                    // Prune expired OAuth refresh tokens and deny-list entries.
+                    // Prune expired OAuth refresh tokens and deny-list entries,
+                    // then persist the deny list to vault.
                     if let Some(oauth_svc) =
                         state.services.get::<crate::http::mcp::oauth::OAuthService>()
                     {
                         oauth_svc.token_service.prune_expired();
+
+                        // Persist deny list to vault (revoked tokens survive restarts)
+                        if let Some(vs) =
+                            state.services.get::<crate::vault::VaultService>()
+                        {
+                            let (_, denied) = oauth_svc.token_service.snapshot_state();
+                            if let Err(e) =
+                                vs.handle.save_deny_list(&vs.master_key, &denied)
+                            {
+                                tracing::warn!("failed to persist deny list to vault: {e}");
+                            }
+                        }
                     }
 
                     // Prune expired authorization codes and CSRF nonces.

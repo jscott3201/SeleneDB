@@ -790,6 +790,15 @@ pub async fn bootstrap(
             std::time::Duration::from_secs(config.mcp.access_token_ttl_secs),
             std::time::Duration::from_secs(config.mcp.refresh_token_ttl_secs),
         ));
+
+        // Restore deny list from vault (revoked tokens survive restarts)
+        if let Some(vs) = services.get::<crate::vault::VaultService>() {
+            let deny_entries = vs.handle.load_deny_list();
+            if !deny_entries.is_empty() {
+                oauth_svc.load_deny_list(deny_entries);
+            }
+        }
+
         services.register(crate::http::mcp::oauth::OAuthService::new(oauth_svc));
         services.register(crate::http::mcp::oauth::AuthCodeStore::new());
     }
