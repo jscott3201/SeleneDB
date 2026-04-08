@@ -5,6 +5,26 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// Accept both `123` (number) and `"123"` (string) for u64 ID fields.
+/// MCP transports may serialize integer IDs as strings depending on the
+/// client implementation.
+fn deserialize_u64_or_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match &v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| D::Error::custom(format!("expected u64, got {v}"))),
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
+        _ => Err(D::Error::custom(format!("expected number or string, got {v}"))),
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn default_true_opt() -> Option<bool> {
     Some(true)
@@ -31,12 +51,14 @@ pub(crate) struct GqlExplainParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct NodeIdParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct NodeEdgesParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Filter by direction: "outgoing", "incoming", or "both" (default).
     #[serde(default)]
@@ -67,6 +89,7 @@ pub(crate) struct CreateNodeParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyNodeParams {
     /// Node ID to modify.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Properties to set or update.
     #[serde(default)]
@@ -96,14 +119,17 @@ pub(crate) struct ListNodesParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct EdgeIdParams {
     /// Numeric edge ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct CreateEdgeParams {
     /// Source node ID (the "from" end).
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) source: u64,
     /// Target node ID (the "to" end).
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) target: u64,
     /// Relationship type (e.g., "contains", "feeds", "isPointOf", "monitors").
     pub(crate) label: String,
@@ -115,6 +141,7 @@ pub(crate) struct CreateEdgeParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyEdgeParams {
     /// Edge ID to modify.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Properties to set or update.
     #[serde(default)]
@@ -288,6 +315,7 @@ pub(crate) struct SemanticSearchParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct SimilarNodesParams {
     /// Reference node ID to find similar nodes for.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) node_id: u64,
     /// Vector property name to compare (e.g., "embedding").
     pub(crate) property: String,
@@ -450,6 +478,7 @@ pub(crate) struct ResolveParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct RelatedParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Filter to specific edge label(s). Omit for all labels.
     #[serde(default)]
@@ -540,6 +569,7 @@ pub(crate) struct ProposeActionParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ProposalIdParams {
     /// Numeric proposal node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) proposal_id: u64,
     /// Optional reason for the action.
     #[serde(default)]
