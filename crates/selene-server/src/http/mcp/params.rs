@@ -27,6 +27,30 @@ where
     }
 }
 
+/// Accept both a single string `"sensor"` and an array `["sensor", "temperature"]`
+/// for label fields. MCP clients often pass a single label as a bare string.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::String(s) => Ok(vec![s]),
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| match item {
+                serde_json::Value::String(s) => Ok(s),
+                other => Err(serde::de::Error::custom(format!(
+                    "expected string in labels array, got {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string or array for labels, got {other}"
+        ))),
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn default_true_opt() -> Option<bool> {
     Some(true)
@@ -79,6 +103,7 @@ pub(crate) struct NodeEdgesParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct CreateNodeParams {
     /// Labels to assign (e.g., ["sensor", "temperature"]). At least one required.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub(crate) labels: Vec<String>,
     /// Key-value properties (e.g., {"unit": "°F", "threshold": 72.5}).
     #[serde(default)]
@@ -149,6 +174,7 @@ pub(crate) struct CreateEdgeParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct BatchNodeEntry {
     /// Labels to assign.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub(crate) labels: Vec<String>,
     /// Key-value properties.
     #[serde(default)]
@@ -704,4 +730,38 @@ pub(crate) struct RotateCredentialParams {
     pub(crate) identity: String,
     /// The new password.
     pub(crate) new_password: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_node_accepts_array_labels() {
+        let json = serde_json::json!({
+            "labels": ["sensor", "temperature"],
+            "properties": {}
+        });
+        let params: CreateNodeParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.labels, vec!["sensor", "temperature"]);
+    }
+
+    #[test]
+    fn create_node_accepts_single_string_label() {
+        let json = serde_json::json!({
+            "labels": "sensor",
+            "properties": {}
+        });
+        let params: CreateNodeParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.labels, vec!["sensor"]);
+    }
+
+    #[test]
+    fn batch_node_entry_accepts_single_string_label() {
+        let json = serde_json::json!({
+            "labels": "equipment"
+        });
+        let entry: BatchNodeEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.labels, vec!["equipment"]);
+    }
 }
