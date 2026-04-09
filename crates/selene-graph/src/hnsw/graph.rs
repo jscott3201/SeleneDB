@@ -13,6 +13,8 @@ use smallvec::SmallVec;
 
 use selene_core::NodeId;
 
+use super::quantize::QuantizedStorage;
+
 /// A single node in the HNSW graph.
 ///
 /// `neighbors` is a per-layer adjacency list. `neighbors[0]` holds the
@@ -50,6 +52,8 @@ pub struct HnswGraph {
     pub(crate) node_id_to_idx: HashMap<u64, u32>,
     /// Dimensionality of all vectors stored in this graph.
     pub(crate) dimensions: u16,
+    /// Optional quantized vector storage for compressed search.
+    pub(crate) quantized: Option<QuantizedStorage>,
 }
 
 impl HnswGraph {
@@ -61,6 +65,7 @@ impl HnswGraph {
             max_layer: 0,
             node_id_to_idx: HashMap::new(),
             dimensions,
+            quantized: None,
         }
     }
 
@@ -98,6 +103,11 @@ impl HnswGraph {
     /// algorithm.
     pub fn get(&self, idx: u32) -> &HnswNode {
         &self.nodes[idx as usize]
+    }
+
+    /// Return a reference to the quantized storage, if present.
+    pub fn quantized(&self) -> Option<&QuantizedStorage> {
+        self.quantized.as_ref()
     }
 
     /// Return the neighbors of node `idx` on the given `layer`.
@@ -183,6 +193,7 @@ impl HnswGraph {
             max_layer: new_max_layer,
             node_id_to_idx: new_node_id_to_idx,
             dimensions: self.dimensions,
+            quantized: self.quantized.as_ref().map(|qs| qs.remap(&old_to_new)),
         }
     }
 

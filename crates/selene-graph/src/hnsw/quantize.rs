@@ -649,6 +649,82 @@ impl PolarQuantizer {
     }
 }
 
+// ─── QuantizedStorage ───────────────────────────────────────────────
+
+/// Quantized vector storage: a `PolarQuantizer` paired with per-node codes.
+///
+/// Lives alongside `HnswGraph` as an optional compression layer. When present,
+/// search can use `asymmetric_dot()` for fast approximate distance instead of
+/// full f32 cosine similarity at layer 0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantizedStorage {
+    /// Shared quantizer for all vectors in this graph.
+    quantizer: PolarQuantizer,
+    /// Per-node packed codes, indexed by HNSW internal index.
+    /// `codes[i]` is the quantized representation of `nodes[i].vector`.
+    codes: Vec<Vec<u8>>,
+}
+
+impl QuantizedStorage {
+    /// Build quantized storage by encoding all vectors in the graph.
+    ///
+    /// Call after the graph is fully built. O(N × d²) for the rotation step
+    /// (dominated by d=768 at typical embedding sizes).
+    pub fn build<'a>(
+        config: &QuantizationConfig,
+        dim: usize,
+        vectors: impl Iterator<Item = &'a [f32]>,
+    ) -> Self {
+        let quantizer = PolarQuantizer::new(dim, config);
+        let codes = vectors.map(|v| quantizer.encode(v)).collect();
+        Self { quantizer, codes }
+    }
+
+    /// Encode and append a single vector (for incremental insert).
+    ///
+    /// The caller must ensure the HNSW internal index of the new node matches
+    /// `self.codes.len()` before this call.
+    pub fn encode_and_push(&mut self, vector: &[f32]) {
+        self.codes.push(self.quantizer.encode(vector));
+    }
+
+    /// Get the packed codes for the node at internal HNSW index `idx`.
+    pub fn codes(&self, idx: u32) -> &[u8] {
+        &self.codes[idx as usize]
+    }
+
+    /// Reference to the underlying quantizer.
+    pub fn quantizer(&self) -> &PolarQuantizer {
+        &self.quantizer
+    }
+
+    /// Number of encoded vectors.
+    pub fn len(&self) -> usize {
+        self.codes.len()
+    }
+
+    /// Returns `true` when no vectors are stored.
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+
+    /// Remap internal indices for `clone_without()`.
+    ///
+    /// Produces a new `QuantizedStorage` containing only the nodes in
+    /// `old_to_new` (mapping from old internal index → new internal index),
+    /// reordered to match the new dense array.
+    pub(crate) fn remap(&self, old_to_new: &std::collections::HashMap<u32, u32>) -> Self {
+        let mut new_codes = vec![Vec::new(); old_to_new.len()];
+        for (&old_idx, &new_idx) in old_to_new {
+            new_codes[new_idx as usize] = self.codes[old_idx as usize].clone();
+        }
+        Self {
+            quantizer: self.quantizer.clone(),
+            codes: new_codes,
+        }
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
