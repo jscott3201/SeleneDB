@@ -934,7 +934,11 @@ pub async fn oauth_revoke(
         tracing::debug!("revoke request for invalid token: {e}");
     }
 
-    (StatusCode::OK, Json(serde_json::json!({"status": "revoked"}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "revoked"})),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]

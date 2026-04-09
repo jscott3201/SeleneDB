@@ -10,9 +10,7 @@ use crate::http::mcp::params::{
 };
 use crate::ops;
 
-pub(super) async fn list_principals_impl(
-    tools: &SeleneTools,
-) -> Result<CallToolResult, McpError> {
+pub(super) async fn list_principals_impl(tools: &SeleneTools) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     let principals = ops::principals::list_principals(&tools.state, &auth).map_err(op_err)?;
     Ok(CallToolResult::success(vec![Content::text(format_json(

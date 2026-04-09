@@ -165,7 +165,11 @@ impl VaultHandle {
                     })
                 })
                 .and_then(|nid| g.get_node(nid))
-                .and_then(|n| n.property("value").and_then(|v| v.as_str()).map(str::to_owned))
+                .and_then(|n| {
+                    n.property("value")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
         });
 
         if let Some(b64_str) = existing {
@@ -207,9 +211,9 @@ impl VaultHandle {
         entries: &[(String, u64)],
     ) -> Result<(), VaultError> {
         // Remove all existing revoked_token nodes
-        let existing_ids: Vec<selene_core::NodeId> = self.graph.read(|g| {
-            g.nodes_by_label("revoked_token").collect()
-        });
+        let existing_ids: Vec<selene_core::NodeId> = self
+            .graph
+            .read(|g| g.nodes_by_label("revoked_token").collect());
 
         if !existing_ids.is_empty() || !entries.is_empty() {
             self.graph

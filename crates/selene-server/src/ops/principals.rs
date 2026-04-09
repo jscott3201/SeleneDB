@@ -136,8 +136,14 @@ pub fn create_principal(
 
     // Build properties
     let mut props = vec![
-        (selene_core::IStr::new("identity"), selene_core::Value::str(identity)),
-        (selene_core::IStr::new("role"), selene_core::Value::str(role)),
+        (
+            selene_core::IStr::new("identity"),
+            selene_core::Value::str(identity),
+        ),
+        (
+            selene_core::IStr::new("role"),
+            selene_core::Value::str(role),
+        ),
         (
             selene_core::IStr::new("enabled"),
             selene_core::Value::Bool(true),
@@ -204,7 +210,11 @@ pub fn update_principal(
         .graph
         .write(|m| {
             if let Some(r) = role {
-                m.set_property(node_id, selene_core::IStr::new("role"), selene_core::Value::str(r))?;
+                m.set_property(
+                    node_id,
+                    selene_core::IStr::new("role"),
+                    selene_core::Value::str(r),
+                )?;
             }
             if let Some(en) = enabled {
                 m.set_property(
