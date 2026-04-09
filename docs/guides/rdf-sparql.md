@@ -1,6 +1,6 @@
 # RDF and SPARQL Guide
 
-Selene provides RDF import/export and SPARQL query support for interoperability with semantic web tools, building ontologies (Brick, ASHRAE 223P), and linked data workflows. The implementation uses oxrdf and oxttl for RDF data modeling and serialization, and spareval for SPARQL query evaluation.
+SeleneDB provides RDF import/export and SPARQL query support for interoperability with semantic web tools, building ontologies (Brick, ASHRAE 223P), and linked data workflows. The implementation uses oxrdf and oxttl for RDF data modeling and serialization, and spareval for SPARQL query evaluation.
 
 RDF support is feature-gated:
 
@@ -9,7 +9,7 @@ RDF support is feature-gated:
 
 ## Property Graph to RDF Mapping
 
-Selene maps its property graph to RDF using a configurable namespace prefix. The default namespace is `selene:`.
+SeleneDB maps its property graph to RDF using a configurable namespace prefix. The default namespace is `selene:`.
 
 ### Nodes
 
@@ -117,7 +117,7 @@ CALL graph.exportRdf('nquads', true) YIELD data, format
 
 ## Ontology Store
 
-Selene maintains a separate ontology store for TBox data (class hierarchies, property definitions). This is used for Brick Schema, ASHRAE 223P, or any OWL/RDFS ontology.
+SeleneDB maintains a separate ontology store for TBox data (class hierarchies, property definitions). This is used for Brick Schema, ASHRAE 223P, or any OWL/RDFS ontology.
 
 Import ontology triples by adding `graph=ontology` to the HTTP query string or passing `'ontology'` as the third argument to `graph.importRdf`:
 
@@ -138,7 +138,7 @@ Ontology triples are persisted in snapshot extra sections and survive restarts. 
 
 ## SOSA Observations
 
-When `materialize_observations` is enabled in the RDF configuration, Selene maintains one `sosa:Observation` node per sensor-property pair. Each Observation node carries:
+When `materialize_observations` is enabled in the RDF configuration, SeleneDB maintains one `sosa:Observation` node per sensor-property pair. Each Observation node carries:
 
 - `observedProperty` -- the property name (string)
 - `simpleResult` -- the latest reading (float)
@@ -154,7 +154,7 @@ observation_debounce_ms = 1000
 
 ## SPARQL Queries
 
-SPARQL query evaluation requires `--features rdf-sparql`. Selene evaluates SPARQL against the property graph viewed as an RDF dataset, routing triple patterns to label bitmaps, CSR adjacency, and TypedIndex for efficient evaluation without materializing quads.
+SPARQL query evaluation requires `--features rdf-sparql`. SeleneDB evaluates SPARQL against the property graph viewed as an RDF dataset, routing triple patterns to label bitmaps, CSR adjacency, and TypedIndex for efficient evaluation without materializing quads.
 
 ### HTTP API
 

@@ -2,9 +2,9 @@
 
 ## What is GQL?
 
-GQL (Graph Query Language) is a declarative query language for property graphs, defined by the ISO/IEC 39075:2024 standard. Selene implements GQL as the sole query and mutation interface. Every transport -- HTTP, QUIC, and MCP -- routes through the same GQL engine. There is no separate SQL or Cypher path.
+GQL (Graph Query Language) is a declarative query language for property graphs, defined by the ISO/IEC 39075:2024 standard. SeleneDB implements GQL as the sole query and mutation interface. Every transport -- HTTP, QUIC, and MCP -- routes through the same GQL engine. There is no separate SQL or Cypher path.
 
-This design means that a query written for the HTTP API works identically over QUIC or MCP. The engine parses GQL text into an AST, plans it, optimizes it, and executes it against Selene's in-memory graph. Results are returned as Arrow RecordBatches.
+This design means that a query written for the HTTP API works identically over QUIC or MCP. The engine parses GQL text into an AST, plans it, optimizes it, and executes it against SeleneDB's in-memory graph. Results are returned as Arrow RecordBatches.
 
 ```
 GQL text --> Parser --> AST --> Planner --> Optimizer --> Executor --> Arrow RecordBatch
@@ -12,7 +12,7 @@ GQL text --> Parser --> AST --> Planner --> Optimizer --> Executor --> Arrow Rec
 
 ## The property graph model
 
-Selene stores data as a property graph consisting of nodes and edges.
+SeleneDB stores data as a property graph consisting of nodes and edges.
 
 **Nodes** represent entities. Each node has:
 
@@ -71,7 +71,7 @@ RETURN b.name AS building, s.name AS sensor
 
 ## Value types
 
-Selene supports 14 value types. Every type maps to an Arrow data type for columnar output.
+SeleneDB supports 14 value types. Every type maps to an Arrow data type for columnar output.
 
 | Type | Rust variant | GQL literal syntax | Description |
 |------|-------------|-------------------|-------------|
@@ -96,7 +96,7 @@ Strings use single quotes in GQL. Double quotes are reserved for delimited ident
 
 ## Executing GQL
 
-There are three ways to run a GQL query against Selene.
+There are three ways to run a GQL query against SeleneDB.
 
 **CLI** -- the `selene` command communicates with the server over QUIC:
 
@@ -122,7 +122,7 @@ All three methods produce the same results. The CLI uses QUIC (Arrow IPC by defa
 
 ## Plan cache
 
-Selene caches parsed GQL statements to avoid re-parsing identical queries. The cache is keyed by query text hash and stores the parsed AST as an `Arc<GqlStatement>`.
+SeleneDB caches parsed GQL statements to avoid re-parsing identical queries. The cache is keyed by query text hash and stores the parsed AST as an `Arc<GqlStatement>`.
 
 **Cache hit latency:** approximately 19 ns (compared to 7 us for a full parse).
 

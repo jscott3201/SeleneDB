@@ -1,8 +1,8 @@
 # HTTP API Reference
 
-Selene exposes a JSON-over-HTTP API for graph operations, time-series data, GQL queries, schema management, and more. All transports (HTTP, QUIC, MCP) share the same ops layer, so behavior is identical regardless of how you connect.
+SeleneDB exposes a JSON-over-HTTP API for graph operations, time-series data, GQL queries, schema management, and more. All transports (HTTP, QUIC, MCP) share the same ops layer, so behavior is identical regardless of how you connect.
 
-The HTTP server listens on port **8080** by default (configurable via `[http] listen_addr`). In dev mode, the server starts without TLS and with permissive defaults. In production, Selene requires either TLS termination through a reverse proxy (`[http] allow_plaintext = true`) or disabling HTTP entirely in favor of QUIC.
+The HTTP server listens on port **8080** by default (configurable via `[http] listen_addr`). In dev mode, the server starts without TLS and with permissive defaults. In production, SeleneDB requires either TLS termination through a reverse proxy (`[http] allow_plaintext = true`) or disabling HTTP entirely in favor of QUIC.
 
 ## Authentication
 
@@ -46,7 +46,7 @@ curl http://localhost:8080/
 
 ```json
 {
-  "name": "Selene",
+  "name": "SeleneDB",
   "description": "Lightweight in-memory property graph runtime — domain-agnostic",
   "endpoints": { "..." },
   "notes": { "..." }
@@ -383,7 +383,7 @@ curl -X DELETE -H "Authorization: Bearer admin:secret" \
 
 ### Time-Series
 
-Selene has a built-in multi-tier time-series engine. The HTTP API writes samples and queries ranges.
+SeleneDB has a built-in multi-tier time-series engine. The HTTP API writes samples and queries ranges.
 
 #### POST /ts/write
 
@@ -448,7 +448,7 @@ curl -H "Authorization: Bearer admin:secret" \
 
 ### GQL
 
-GQL (ISO 39075) is the primary query and mutation interface for Selene. The HTTP endpoint accepts a query string and optional parameters.
+GQL (ISO 39075) is the primary query and mutation interface for SeleneDB. The HTTP endpoint accepts a query string and optional parameters.
 
 #### POST /gql
 
@@ -630,7 +630,7 @@ curl -H "Authorization: Bearer admin:secret" \
 
 #### POST /graph/reactflow
 
-Import a React Flow graph, creating nodes and edges. Returns a mapping of React Flow IDs to Selene IDs.
+Import a React Flow graph, creating nodes and edges. Returns a mapping of React Flow IDs to SeleneDB IDs.
 
 **Request body:**
 
@@ -1128,7 +1128,7 @@ Unmatched routes return `404` with a hint directing to the API index.
 
 ## Replica Behavior
 
-When Selene runs as a read-only replica (`--replica-of <addr>`), all mutation endpoints return `405 Method Not Allowed` with the body `{"error": "read-only replica"}`. This applies to:
+When SeleneDB runs as a read-only replica (`--replica-of <addr>`), all mutation endpoints return `405 Method Not Allowed` with the body `{"error": "read-only replica"}`. This applies to:
 
 - `POST /nodes`, `PUT /nodes/{id}`, `DELETE /nodes/{id}`
 - `POST /edges`, `PUT /edges/{id}`, `DELETE /edges/{id}`
@@ -1155,6 +1155,6 @@ Send property values as plain JSON:
 {"name": "HQ Building", "floor": 3, "active": true, "rating": 4.5}
 ```
 
-Selene maps JSON types to its internal value types: strings, integers, floats, booleans, and null. Nested JSON objects are stored as JSON strings -- use flat key-value pairs for best results.
+SeleneDB maps JSON types to its internal value types: strings, integers, floats, booleans, and null. Nested JSON objects are stored as JSON strings -- use flat key-value pairs for best results.
 
 When a node schema with `dictionary: true` on a property is active, string values written to that property are automatically interned for memory efficiency. This is transparent to the API.

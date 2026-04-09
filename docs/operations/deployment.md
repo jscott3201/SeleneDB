@@ -1,6 +1,6 @@
 # Deployment
 
-Selene ships as a single statically-linked binary. It runs on bare metal, in Docker containers, or as an embedded library. This guide covers all deployment modes from development to production.
+SeleneDB ships as a single statically-linked binary. It runs on bare metal, in Docker containers, or as an embedded library. This guide covers all deployment modes from development to production.
 
 ## Docker single-node (production)
 
@@ -92,38 +92,33 @@ The `--seed` flag populates an empty graph with a demo building hierarchy (site,
 
 ## Building from source
 
-Selene requires Rust 1.94+ and has zero C/C++ dependencies:
+SeleneDB requires Rust 1.94+ and has zero C/C++ dependencies:
 
 ```bash
-# Default build (no optional features)
-cargo build --release -p selene-server
+# Standard build (all product features compiled unconditionally)
+cargo build --release -p selene-server --features dev-tls
 
-# With optional features
-cargo build --release -p selene-server --features "federation,vector,search,temporal,cloud-storage"
+# With GPU acceleration (NVIDIA CUDA)
+cargo build --release -p selene-server --features cuda,dev-tls
+
+# With GPU acceleration (Apple Metal)
+cargo build --release -p selene-server --features metal,dev-tls
 
 # CLI tool (built separately)
 cargo build --release -p selene-cli
 ```
 
-**Feature flags:**
+**Compile-time feature flags:**
 
-| Flag | Dependency | Purpose |
-|------|-----------|---------|
-| `federation` | (no-op, compiles unconditionally) | Retained for compatibility |
-| `vector` | candle | BERT embedding inference |
-| `search` | tantivy | Full-text BM25 indexes |
-| `temporal` | (no-op, compiles unconditionally) | Retained for compatibility |
-| `cloud-storage` | object_store | S3/GCS/Azure Parquet offload |
-| `rdf` | oxrdf, oxttl | RDF import/export |
-| `rdf-sparql` | spareval, spargebra | SPARQL query support (requires `rdf`) |
+| Flag | Purpose |
+|------|---------|
+| `dev-tls` | Self-signed TLS certificates for development (rcgen) |
+| `cuda` | NVIDIA GPU-accelerated embeddings (candle CUDA kernels) |
+| `metal` | Apple Silicon GPU-accelerated embeddings (candle Metal) |
+| `bench` | Criterion benchmarks |
+| `insecure` | Client TLS bypass (testing only) |
 
-Most services compile unconditionally and are toggled at runtime via profiles and environment variables. Only `vector`, `search`, and `cloud-storage` gate actual dependencies.
-
-For a minimal image without search or vector:
-
-```bash
-cargo build --release -p selene-server --features "federation,temporal"
-```
+All product features — HTTP, MCP, QUIC, vector search, semantic search, GraphRAG, time-series, federation, RDF/SPARQL, agent memory, cloud storage — are always compiled. Enable or disable at runtime via `ServicesConfig` profiles (Edge/Cloud/Standalone) or environment variables.
 
 ## Multi-architecture Docker builds
 
@@ -242,7 +237,7 @@ The positional argument is the data directory (equivalent to `--data-dir`).
 
 ## Health checks
 
-Selene exposes a health endpoint at `GET /health` on the HTTP listener. The CLI tool wraps this for Docker and Kubernetes probes:
+SeleneDB exposes a health endpoint at `GET /health` on the HTTP listener. The CLI tool wraps this for Docker and Kubernetes probes:
 
 ```bash
 /selene health --http
@@ -283,7 +278,7 @@ readinessProbe:
 
 ## Graceful shutdown
 
-Selene handles SIGINT and SIGTERM for graceful shutdown. The shutdown sequence:
+SeleneDB handles SIGINT and SIGTERM for graceful shutdown. The shutdown sequence:
 
 1. Cancel background tasks (snapshot, TS flush, retention, compaction)
 2. Write a final snapshot to disk

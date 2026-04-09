@@ -3,7 +3,7 @@
 ## Overview
 
 Schemas define the expected shape of nodes and edges in the property graph. They are
-optional -- Selene accepts any data without schemas registered. When a schema is present,
+optional -- SeleneDB accepts any data without schemas registered. When a schema is present,
 it validates properties on write and can either warn on mismatches (the default) or reject
 them outright.
 
@@ -29,7 +29,7 @@ property definitions are checked on every write (INSERT, SET, SET ALL, HTTP crea
 | `properties` | PropertyDef[] | [] | Property definitions (see below) |
 | `valid_edge_labels` | string[] | [] | Allowed outgoing edge labels from nodes with this label |
 | `description` | string | "" | Human-readable description |
-| `annotations` | map | {} | Application-defined metadata. Selene stores and persists these but never interprets them. |
+| `annotations` | map | {} | Application-defined metadata. SeleneDB stores and persists these but never interprets them. |
 | `version` | semver | 1.0.0 | Schema version for evolution tracking |
 | `validation_mode` | enum | (global default) | Override validation mode for this schema: `Warn` or `Strict` |
 | `key_properties` | string[] | [] | Composite node key. These properties together must be unique across all nodes with this label. |
@@ -216,7 +216,7 @@ curl -X POST http://localhost:8080/schemas/nodes \
 ## Schema Evolution
 
 Every schema carries a `SchemaVersion` with semver semantics (major.minor.patch,
-defaulting to 1.0.0). When a schema is replaced with a new definition, Selene
+defaulting to 1.0.0). When a schema is replaced with a new definition, SeleneDB
 classifies each change by severity and enforces version bump rules.
 
 ### Change Classification
@@ -231,9 +231,9 @@ classifies each change by severity and enforces version bump rules.
 
 When replacing a schema:
 
-- **No explicit bump** (new version equals old version): Selene auto-bumps the version
+- **No explicit bump** (new version equals old version): SeleneDB auto-bumps the version
   based on the highest severity change detected.
-- **Explicit bump provided**: Selene checks that the bump is sufficient. For example,
+- **Explicit bump provided**: SeleneDB checks that the bump is sufficient. For example,
   a minor bump is rejected if the changes include a major-severity change. The
   replacement fails with a `CompatibilityError` listing all detected changes.
 - **Import path** (snapshot recovery): Bypasses compatibility checking entirely.
@@ -266,7 +266,7 @@ Node types are defined under `[types.<label>]` with `fields`, `description`, `ex
 
 ### Built-in Packs
 
-Selene ships with a `common` pack embedded at compile time. Load it via
+SeleneDB ships with a `common` pack embedded at compile time. Load it via
 `selene_packs::builtin("common")` in Rust or the `import_schema_pack` MCP tool.
 
 ### Example: common.toml
