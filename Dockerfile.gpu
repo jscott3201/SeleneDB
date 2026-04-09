@@ -100,11 +100,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder --chown=selene:selene /tmp/out/selene-server /selene-server
 COPY --from=builder --chown=selene:selene /tmp/out/selene /selene
-COPY --from=model --chown=selene:selene /models /data/models
+COPY --from=model --chown=selene:selene /models /models
 
 USER selene
 VOLUME /data
 WORKDIR /data
+
+# Models live at /models (outside /data volume) so image updates
+# always bring fresh model files without volume shadowing.
+ENV SELENE_MODEL_PATH=/models/embeddinggemma-300m
 
 EXPOSE 4510/udp
 EXPOSE 8080/tcp

@@ -43,13 +43,14 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - SELENE_CUDA=1
+      - SELENE_MODEL_PATH=/models/embeddinggemma-300m
       - SELENE_PROFILE=standalone
       - SELENE_MCP_ENABLED=true
       - SELENE_MCP_API_KEY=${SELENE_MCP_API_KEY}
       - SELENE_MCP_SIGNING_KEY=${SELENE_MCP_SIGNING_KEY}
       - SELENE_MCP_REGISTRATION_TOKEN=${SELENE_MCP_REGISTRATION_TOKEN}
       - SELENE_MCP_PUBLIC_URL=http://selene-gcp:8080
-      - SELENE_MEMORY_BUDGET_MB=12288
+      - SELENE_MEMORY_BUDGET_MB=20480
       - RUST_LOG=selene_server=info,selene_gql=info
     command: ["--dev", "--config", "/data/config.toml", "--data-dir", "/data"]
     security_opt:
