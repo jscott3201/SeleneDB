@@ -29,13 +29,12 @@ services:
       - TS_USERSPACE=false
       - TS_EXTRA_ARGS=--advertise-tags=tag:server
     restart: unless-stopped
-    network_mode: host
 
   selene:
     image: ${SELENE_IMAGE:-us-central1-docker.pkg.dev/cs-poc-3yawesacflnh7gct7rszujy/selene/selene-server:gpu-latest}
     depends_on:
       - tailscale
-    network_mode: host
+    network_mode: service:tailscale
     runtime: nvidia
     volumes:
       - selene-data:/data
