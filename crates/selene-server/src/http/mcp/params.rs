@@ -216,6 +216,62 @@ pub(crate) struct BatchCreateEdgesParams {
     pub(crate) upsert: Option<bool>,
 }
 
+/// A single node-with-edges entry for batch ingest.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct IngestEntry {
+    /// Labels to assign to the created node.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
+    pub(crate) labels: Vec<String>,
+    /// Key-value properties for the node.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// Edges to create FROM this node TO existing nodes.
+    #[serde(default)]
+    pub(crate) connect_to: Vec<IngestEdge>,
+    /// Edges to create FROM existing nodes TO this node.
+    #[serde(default)]
+    pub(crate) connect_from: Vec<IngestEdge>,
+}
+
+/// An edge reference within an ingest entry.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct IngestEdge {
+    /// Target (or source) node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) node_id: u64,
+    /// Edge label.
+    pub(crate) label: String,
+    /// Optional edge properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchIngestParams {
+    /// Array of nodes to create, each with optional edges to existing nodes.
+    pub(crate) entries: Vec<IngestEntry>,
+}
+
+/// Parameters for bulk-updating node status and linking to a commit.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct MarkFixedParams {
+    /// Node IDs to mark as fixed.
+    pub(crate) node_ids: Vec<u64>,
+    /// Status to set (default: "fixed").
+    #[serde(default = "default_fixed_status")]
+    pub(crate) status: String,
+    /// Optional commit SHA to record.
+    #[serde(default)]
+    pub(crate) commit_sha: Option<String>,
+    /// Optional note or resolution description.
+    #[serde(default)]
+    pub(crate) note: Option<String>,
+}
+
+fn default_fixed_status() -> String {
+    "fixed".to_string()
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyEdgeParams {
     /// Edge ID to modify.

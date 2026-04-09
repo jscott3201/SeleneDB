@@ -542,6 +542,145 @@ impl SeleneTools {
     }
 
     #[tool(
+        name = "batch_ingest",
+        description = "Create multiple nodes with edges in a single call. Each entry specifies labels, properties, and edges to connect to/from existing nodes. Returns created node IDs. Use for bulk-ingesting findings, concerns, or any connected entities.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_ingest(
+        &self,
+        params: Parameters<BatchIngestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.entries;
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label_strs: Vec<&str> = entry.labels.iter().map(|s| s.as_str()).collect();
+                    let labels = selene_core::LabelSet::from_strs(&label_strs);
+                    let schema = st.graph.read(|g| {
+                        let label = entry.labels.first().map_or("", |s| s.as_str());
+                        g.schema().node_schema(label).cloned()
+                    });
+                    let props = ops::json_props_with_schema(entry.properties, schema.as_ref())
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let node = ops::nodes::create_node(&st, &auth, labels, props, None)?;
+                    let node_id = node.id;
+
+                    for edge in &entry.connect_to {
+                        let label = selene_core::IStr::new(&edge.label);
+                        let props =
+                            ops::json_props_with_edge_schema(edge.properties.clone(), &st, label)
+                                .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                        ops::edges::create_edge(
+                            &st,
+                            &auth,
+                            node_id,
+                            edge.node_id,
+                            label,
+                            props,
+                            false,
+                        )?;
+                    }
+
+                    for edge in &entry.connect_from {
+                        let label = selene_core::IStr::new(&edge.label);
+                        let props =
+                            ops::json_props_with_edge_schema(edge.properties.clone(), &st, label)
+                                .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                        ops::edges::create_edge(
+                            &st,
+                            &auth,
+                            edge.node_id,
+                            node_id,
+                            label,
+                            props,
+                            false,
+                        )?;
+                    }
+
+                    created_ids.push(node_id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
+        name = "mark_fixed",
+        description = "Bulk-update node status to 'fixed' (or custom status) and optionally link to a commit SHA. Use for resolving findings, security concerns, or work items after a fix is applied.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn mark_fixed(
+        &self,
+        params: Parameters<MarkFixedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let p = params.0;
+        let st = Arc::clone(&self.state);
+        let count: usize = self
+            .submit_mut(move || {
+                let mut updated = 0usize;
+                for node_id in &p.node_ids {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "status".to_string(),
+                        serde_json::Value::String(p.status.clone()),
+                    );
+                    if let Some(sha) = &p.commit_sha {
+                        props.insert(
+                            "fixed_by_commit".to_string(),
+                            serde_json::Value::String(sha.clone()),
+                        );
+                    }
+                    if let Some(note) = &p.note {
+                        props.insert(
+                            "resolution_note".to_string(),
+                            serde_json::Value::String(note.clone()),
+                        );
+                    }
+                    let set_props: Vec<(selene_core::IStr, selene_core::Value)> = props
+                        .into_iter()
+                        .map(|(k, v)| (selene_core::IStr::new(&k), json_to_value(v)))
+                        .collect();
+                    ops::nodes::modify_node(
+                        &st,
+                        &auth,
+                        *node_id,
+                        set_props,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )?;
+                    updated += 1;
+                }
+                Ok(updated)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"updated\":{count}}}",
+        ))]))
+    }
+
+    #[tool(
         name = "list_edges",
         description = "List edges, optionally filtered by label. Use limit/offset for pagination.",
         annotations(
