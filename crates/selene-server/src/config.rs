@@ -180,7 +180,7 @@ pub struct McpConfig {
     #[serde(default)]
     pub public_url: Option<String>,
 
-    /// MCP session idle timeout in seconds (default: 300 = 5 minutes).
+    /// MCP session idle timeout in seconds (default: 3600 = 1 hour).
     /// Sessions with no activity beyond this threshold are cleaned up.
     #[serde(default = "default_mcp_session_timeout")]
     pub session_timeout_secs: u64,
@@ -197,7 +197,7 @@ fn default_refresh_ttl() -> u64 {
     604_800
 }
 fn default_mcp_session_timeout() -> u64 {
-    300
+    3600
 }
 fn default_mcp_max_sessions() -> usize {
     32
