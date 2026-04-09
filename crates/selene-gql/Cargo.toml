@@ -37,6 +37,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["fancy-re
 [features]
 default = []
 metal = ["candle-core/metal"]
+cuda = ["candle-core/cuda"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["bench"] }

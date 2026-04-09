@@ -122,6 +122,8 @@ selene-rdf.workspace = true
 [features]
 default = []
 dev-tls = ["dep:rcgen"]
+cuda = ["selene-gql/cuda"]
+metal = ["selene-gql/metal"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["tls"] }

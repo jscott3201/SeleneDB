@@ -23,7 +23,7 @@ cargo doc --workspace --all-features --no-deps
 cargo run -p selene-server --features selene-server/dev-tls -- --dev
 ```
 
-Use `--all-features` locally on macOS. CI (Linux) uses explicit features excluding `metal` (requires Apple frameworks): `--features selene-server/dev-tls,selene-testing/bench`.
+Use `--all-features` locally on macOS (excludes `cuda`). CI (Linux) uses explicit features excluding `metal` (requires Apple frameworks) and `cuda` (requires NVIDIA toolkit): `--features selene-server/dev-tls,selene-testing/bench`. GPU builds use `--features selene-server/cuda` on NVIDIA hosts.
 
 ## Architecture
 
@@ -51,7 +51,7 @@ Cargo workspace with 13 crates:
 - MSRV: 1.94
 - `-D warnings` on clippy, zero warnings required
 - `--all-targets` on all CI clippy steps (catches lint in integration test files that incremental builds miss)
-- CI uses `--features selene-server/dev-tls,selene-testing/bench` (not `--all-features`) to exclude `metal` on Linux
+- CI uses `--features selene-server/dev-tls,selene-testing/bench` (not `--all-features`) to exclude `metal` on Linux and `cuda` (requires NVIDIA toolkit)
 - All product features (AI, vector, search, federation, RDF, cloud-storage) are always compiled. Enable/disable at runtime via `ServicesConfig` profiles (Edge/Cloud/Standalone) or environment variables.
 - Remaining compile-time feature flags (build variants only): `dev-tls` (rcgen), `insecure` (client TLS bypass), `bench` (criterion)
 - Arrow `Array` trait must be in scope for `is_null()`/`value()`

@@ -168,7 +168,13 @@ impl GemmaProvider {
         let dense1 = Self::load_dense_layer(&dense1_path, 3072, 768, &device)?;
         let dense2 = Self::load_dense_layer(&dense2_path, 768, 3072, &device)?;
 
-        let device_name = if device.is_metal() { "Metal" } else { "CPU" };
+        let device_name = if device.is_metal() {
+            "Metal"
+        } else if device.is_cuda() {
+            "CUDA"
+        } else {
+            "CPU"
+        };
         tracing::info!(
             model_dir = %model_dir.display(),
             hidden_size = config.hidden_size,
@@ -332,11 +338,22 @@ impl EmbeddingProvider for GemmaProvider {
 
 /// Select the compute device for embedding inference.
 ///
-/// Metal GPU is available when compiled with `--features metal` and enabled
-/// at runtime via `SELENE_METAL=1`. Defaults to CPU because candle 0.10's
-/// Metal backend lacks a rotary-emb kernel required by the Gemma 3 encoder.
-/// Enable when a future candle release adds the missing kernel.
+/// CUDA GPU is available when compiled with `--features cuda` and enabled
+/// at runtime via `SELENE_CUDA=1`. Metal GPU is available with `--features metal`
+/// and `SELENE_METAL=1`. Defaults to CPU.
 fn select_device() -> Device {
+    #[cfg(feature = "cuda")]
+    if std::env::var("SELENE_CUDA").is_ok_and(|v| v == "1") {
+        match Device::new_cuda(0) {
+            Ok(device) => {
+                tracing::info!("EmbeddingGemma using CUDA GPU acceleration");
+                return device;
+            }
+            Err(e) => {
+                tracing::warn!("CUDA requested but not available, falling back to CPU: {e}");
+            }
+        }
+    }
     #[cfg(feature = "metal")]
     if std::env::var("SELENE_METAL").is_ok_and(|v| v == "1") {
         match Device::new_metal(0) {

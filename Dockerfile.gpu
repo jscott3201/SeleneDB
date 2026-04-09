@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1
+# ── Selene GPU Image with CUDA + EmbeddingGemma ─────────────────────────
+#
+# Builds a CUDA-enabled image for NVIDIA GPUs (T4, L4, A100, etc.)
+# with the GGUF-quantized EmbeddingGemma model baked in.
+#
+# Must be built on a system with glibc (not musl) for CUDA support.
+# Use Cloud Build for remote builds:
+#
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_HF_TOKEN=$(cat .hf_token)
+#
+# Or build locally on a Linux/glibc host:
+#   echo "hf_xxx" > .hf_token
+#   docker build -f Dockerfile.gpu --secret id=hf_token,src=.hf_token \
+#     -t selene:gpu .
+#   rm .hf_token
+#
+# Run:
+#   docker run --gpus all -e SELENE_CUDA=1 \
+#     -p 8080:8080 -p 4510:4510/udp selene:gpu
+
+# ── Stage 1: Build (glibc for CUDA compatibility) ───────────────────────
+FROM rust:1.87-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p selene-server --features cuda \
+    && cargo build --release -p selene-cli \
+    && mkdir -p /tmp/out \
+    && cp target/release/selene-server target/release/selene /tmp/out/
+
+# ── Stage 2: Download EmbeddingGemma GGUF ────────────────────────────────
+FROM debian:bookworm-slim AS model
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG MODEL_VARIANT=gguf-q8
+
+ENV MODEL_DIR=/models/embeddinggemma-300m
+RUN mkdir -p "${MODEL_DIR}/2_Dense" "${MODEL_DIR}/3_Dense"
+
+RUN --mount=type=secret,id=hf_token \
+    set -e; \
+    HF_TOKEN=$(cat /run/secrets/hf_token); \
+    AUTH="Authorization: Bearer ${HF_TOKEN}"; \
+    BASE_URL="https://huggingface.co/google/embeddinggemma-300m/resolve/main"; \
+    if [ "${MODEL_VARIANT}" = "gguf-q8" ]; then \
+        GGUF_URL="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"; \
+        echo "Downloading GGUF Q8_0 backbone (~329MB)..."; \
+        curl -fSL -H "${AUTH}" "${GGUF_URL}" -o "${MODEL_DIR}/model.gguf"; \
+    else \
+        echo "Downloading base safetensors (~1.1GB)..."; \
+        curl -fSL -H "${AUTH}" "${BASE_URL}/model.safetensors" -o "${MODEL_DIR}/model.safetensors"; \
+    fi; \
+    echo "Downloading config and tokenizer..."; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/config.json" -o "${MODEL_DIR}/config.json"; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/tokenizer.json" -o "${MODEL_DIR}/tokenizer.json"; \
+    echo "Downloading Dense projection layers..."; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/2_Dense/model.safetensors" -o "${MODEL_DIR}/2_Dense/model.safetensors"; \
+    curl -fSL -H "${AUTH}" "${BASE_URL}/3_Dense/model.safetensors" -o "${MODEL_DIR}/3_Dense/model.safetensors"; \
+    echo "Model downloaded: $(du -sh ${MODEL_DIR} | cut -f1)"
+
+# ── Stage 3: Runtime (NVIDIA CUDA runtime, minimal) ─────────────────────
+FROM nvidia/cuda:12.9.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 65532 -d /data -s /sbin/nologin selene \
+    && mkdir -p /data && chown selene:selene /data
+
+COPY --from=builder --chown=selene:selene /tmp/out/selene-server /selene-server
+COPY --from=builder --chown=selene:selene /tmp/out/selene /selene
+COPY --from=model --chown=selene:selene /models /data/models
+
+USER selene
+VOLUME /data
+WORKDIR /data
+
+EXPOSE 4510/udp
+EXPOSE 8080/tcp
+
+# CUDA device selection: SELENE_CUDA=1 enables GPU inference.
+# NVIDIA_VISIBLE_DEVICES=all is required for the container runtime.
+ENV SELENE_CUDA=1
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+ENTRYPOINT ["/selene-server"]
+CMD ["--data-dir", "/data"]
