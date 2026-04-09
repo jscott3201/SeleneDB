@@ -2,7 +2,13 @@
 # ── Selene GPU Image with CUDA + EmbeddingGemma ─────────────────────────
 #
 # Builds a CUDA-enabled image for NVIDIA GPUs (T4, L4, A100, etc.)
-# with the GGUF-quantized EmbeddingGemma model baked in.
+# with EmbeddingGemma model baked in. Default variant "gpu" downloads
+# both safetensors (for CUDA acceleration) and GGUF (CPU fallback).
+#
+# MODEL_VARIANT options:
+#   gpu      - safetensors + GGUF (~1.4GB total, default for GPU images)
+#   gguf-q8  - GGUF only (~329MB, CPU inference)
+#   base     - safetensors only (~1.1GB)
 #
 # Must be built on a system with glibc (not musl) for CUDA support.
 # Use Cloud Build for remote builds:
@@ -51,7 +57,7 @@ FROM debian:bookworm-slim AS model
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG MODEL_VARIANT=gguf-q8
+ARG MODEL_VARIANT=gpu
 
 ENV MODEL_DIR=/models/embeddinggemma-300m
 RUN mkdir -p "${MODEL_DIR}/2_Dense" "${MODEL_DIR}/3_Dense"
@@ -61,7 +67,13 @@ RUN --mount=type=secret,id=hf_token \
     HF_TOKEN=$(cat /run/secrets/hf_token); \
     AUTH="Authorization: Bearer ${HF_TOKEN}"; \
     BASE_URL="https://huggingface.co/google/embeddinggemma-300m/resolve/main"; \
-    if [ "${MODEL_VARIANT}" = "gguf-q8" ]; then \
+    if [ "${MODEL_VARIANT}" = "gpu" ]; then \
+        echo "Downloading safetensors backbone for GPU acceleration (~1.1GB)..."; \
+        curl -fSL -H "${AUTH}" "${BASE_URL}/model.safetensors" -o "${MODEL_DIR}/model.safetensors"; \
+        GGUF_URL="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"; \
+        echo "Downloading GGUF Q8_0 backbone as CPU fallback (~329MB)..."; \
+        curl -fSL -H "${AUTH}" "${GGUF_URL}" -o "${MODEL_DIR}/model.gguf"; \
+    elif [ "${MODEL_VARIANT}" = "gguf-q8" ]; then \
         GGUF_URL="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"; \
         echo "Downloading GGUF Q8_0 backbone (~329MB)..."; \
         curl -fSL -H "${AUTH}" "${GGUF_URL}" -o "${MODEL_DIR}/model.gguf"; \
