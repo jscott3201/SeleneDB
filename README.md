@@ -12,7 +12,7 @@ SeleneDB is a property graph database designed from the ground up for AI workloa
 
 Where traditional databases bolt AI features onto existing architectures, SeleneDB treats AI as a first-class citizen. Every feature — from the query optimizer to the wire protocol — is designed to work seamlessly with AI agents, LLM-powered applications, and intelligent edge devices.
 
-**Status:** v0.2.0 release candidate. 13 crates, ~2,800 tests, zero clippy warnings. Battle-tested through 8 rounds of blind AI agent testing with 90+ issues found and fixed.
+SeleneDB is built with SeleneDB. The project's own development workflow — conventions, design decisions, session continuity, work tracking, and code review — runs on a live SeleneDB graph that AI agents query and update every session. This isn't a demo workload: it's the primary development infrastructure for a multi-crate Rust project with 2,800+ tests across 13 crates, and it has been the daily driver through dozens of collaborative AI development sessions.
 
 ## Why SeleneDB?
 
@@ -20,7 +20,7 @@ Where traditional databases bolt AI features onto existing architectures, Selene
 
 AI agents spend enormous context windows re-establishing what they already know. SeleneDB turns that linear cost into constant-time graph lookups.
 
-In production use across 32+ collaborative development sessions, SeleneDB's graph memory delivered:
+These numbers come from real production use — SeleneDB developing itself across 30+ collaborative AI sessions, not synthetic benchmarks:
 
 - **80-85% token reduction** — expensive context re-establishment (~10-20K tokens/session) replaced by O(1) graph lookups (~200-500 tokens)
 - **95% savings on decision lookups** — "why did we choose X?" is a single query, not a document re-read
@@ -28,7 +28,7 @@ In production use across 32+ collaborative development sessions, SeleneDB's grap
 - **85-90% savings on session continuity** — prior decisions, open work items, and conventions are instantly queryable
 - **130+ conventions** stored as graph nodes, eliminating per-session re-learning entirely
 
-The compounding effect is the key insight: every fact stored makes all future sessions cheaper. The graph gets smarter over time, not just bigger.
+The compounding effect is the key insight: every fact stored makes all future sessions cheaper. After a few dozen sessions the graph carries enough context that agents can pick up complex multi-session work without any warm-up preamble — they query the graph, see what's in progress, and start contributing immediately.
 
 ### AI-Native MCP Integration
 
@@ -156,7 +156,7 @@ See the [GQL guide](docs/guides/gql/overview.md) for the full language reference
 
 ### AI & Search
 - **Vector search** — mutable HNSW index, cosine/euclidean, auto-embedding on ingest
-- **On-device embedding** — EmbeddingGemma-300M via candle, GGUF quantization (Q4/Q8), Metal GPU acceleration
+- **On-device embedding** — EmbeddingGemma-300M via candle, GGUF quantization (Q4/Q8), Metal and CUDA GPU acceleration
 - **GraphRAG** — local, global, and hybrid search modes combining vectors, BFS expansion, and community context
 - **Full-text search** — tantivy BM25, hybrid BM25+cosine via reciprocal rank fusion
 - **Agent memory** — remember/recall/forget with namespaces, TTL, confidence, entity linking, eviction policies
@@ -227,6 +227,16 @@ docker run ghcr.io/jscott3201/selenedb --profile cloud       # VMs, full service
 docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510  # read replica
 ```
 
+GPU-accelerated deployment for faster embedding inference:
+
+```bash
+# Build with CUDA support via Cloud Build
+gcloud builds submit --config=cloudbuild.yaml --substitutions=_TAG=latest
+
+# Run with NVIDIA GPU
+docker compose -f docker-compose.gpu.yml up -d
+```
+
 Bidirectional sync for offline-first edge nodes:
 
 ```toml
@@ -236,7 +246,7 @@ upstream = "hub.example.com:4510"
 peer_name = "building-42"
 ```
 
-The Docker image is distroless (`gcr.io/distroless/static:nonroot`) — no shell, no package manager, minimal attack surface. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
+The CPU Docker image is distroless (`gcr.io/distroless/static:nonroot`) — no shell, no package manager, minimal attack surface. The GPU image uses NVIDIA's CUDA runtime base for T4/A100 acceleration. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
 
 ## Documentation
 
@@ -256,11 +266,16 @@ The Docker image is distroless (`gcr.io/distroless/static:nonroot`) — no shell
 ## Building and Testing
 
 ```bash
-cargo test --workspace --all-features          # ~2,800 tests
+cargo fmt --all                                # format
+cargo clippy --workspace --all-features -- -D warnings  # lint (zero warnings enforced)
+cargo test --workspace --all-features          # ~2,800 tests across 13 crates
 cargo test -p selene-gql                       # GQL engine only
 cargo test -p selene-server --all-features     # server + sync + federation
 cargo bench -p selene-gql                      # benchmarks (run sequentially)
+cargo doc --workspace --all-features --no-deps # docs (zero warnings required)
 ```
+
+CI runs on every push with `clippy --all-targets -- -D warnings` to catch lint in all build targets including integration tests.
 
 ## Contributing
 
