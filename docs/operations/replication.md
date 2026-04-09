@@ -1,10 +1,10 @@
 # Replication and Federation
 
-Selene supports two forms of multi-node deployment: CDC replicas for read scaling and high availability, and federation mesh for distributed graph queries across peers.
+SeleneDB supports two forms of multi-node deployment: CDC replicas for read scaling and high availability, and federation mesh for distributed graph queries across peers.
 
 ## CDC Replicas
 
-A Selene node can start as a read-only replica of another node (the primary). The replica maintains a synchronized copy of the primary's graph state and serves read queries locally.
+A SeleneDB node can start as a read-only replica of another node (the primary). The replica maintains a synchronized copy of the primary's graph state and serves read queries locally.
 
 ### Starting a Replica
 
@@ -124,10 +124,10 @@ The replica waits for the primary's healthcheck to pass before starting replicat
 
 ## Federation Mesh
 
-Federation allows multiple Selene nodes to form a query mesh. A GQL query on one node can transparently execute against a remote peer's graph using the `USE <graph>` directive. This feature requires the `federation` compile-time flag.
+Federation allows multiple SeleneDB nodes to form a query mesh. A GQL query on one node can transparently execute against a remote peer's graph using the `USE <graph>` directive. Federation is always compiled — enable it at runtime via `[federation] enabled = true` in `selene.toml`.
 
 ```bash
-cargo run -p selene-server --features federation,http
+cargo run -p selene-server --features dev-tls
 ```
 
 ### Graph Name Resolution

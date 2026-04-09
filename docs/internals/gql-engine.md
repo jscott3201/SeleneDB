@@ -49,7 +49,7 @@ Keywords use Pest's case-insensitive syntax (`^"MATCH"`, `^"RETURN"`). This avoi
 
 ### Keyword Word Boundaries
 
-A common PEG pitfall is matching keywords as prefixes of longer identifiers -- "MATCH" accidentally matching inside "MATCHING". Selene's grammar prevents this by structuring rules so that keywords are followed by required structural elements (whitespace, parentheses, or end-of-input) rather than bare identifier characters. The `ident` rule explicitly excludes reserved words.
+A common PEG pitfall is matching keywords as prefixes of longer identifiers -- "MATCH" accidentally matching inside "MATCHING". SeleneDB's grammar prevents this by structuring rules so that keywords are followed by required structural elements (whitespace, parentheses, or end-of-input) rather than bare identifier characters. The `ident` rule explicitly excludes reserved words.
 
 ### AST Builder
 

@@ -1,10 +1,10 @@
 # Security
 
-Selene is secure by default. Production mode requires TLS certificates, enforces Cedar authorization, and rejects plaintext HTTP. Dev mode relaxes these constraints for local development only.
+SeleneDB is secure by default. Production mode requires TLS certificates, enforces Cedar authorization, and rejects plaintext HTTP. Dev mode relaxes these constraints for local development only.
 
 ## TLS
 
-Selene uses QUIC (which mandates TLS 1.3) for its primary transport and supports optional HTTPS for the HTTP API. The ALPN protocol identifier is `selene/1`.
+SeleneDB uses QUIC (which mandates TLS 1.3) for its primary transport and supports optional HTTPS for the HTTP API. The ALPN protocol identifier is `selene/1`.
 
 ### Server certificate setup
 
@@ -70,11 +70,11 @@ key = "/etc/selene/certs/node.key"
 
 ### Dev mode TLS
 
-In dev mode (`--dev` flag or `dev_mode = true`), Selene generates a self-signed certificate for `localhost` at startup. This certificate is ephemeral and changes on every restart. Dev mode is logged with a prominent warning and should never be used in production.
+In dev mode (`--dev` flag or `dev_mode = true`), SeleneDB generates a self-signed certificate for `localhost` at startup. This certificate is ephemeral and changes on every restart. Dev mode is logged with a prominent warning and should never be used in production.
 
 ## Authentication
 
-Selene supports three authentication types, selected during the connection handshake.
+SeleneDB supports three authentication types, selected during the connection handshake.
 
 ### Bearer token format
 
@@ -111,11 +111,11 @@ Credentials are never stored in plaintext. The `credential_hash` property contai
 
 ## Cedar authorization
 
-Selene uses [Cedar](https://www.cedarpolicy.com/) for fine-grained authorization. Cedar policies define which roles can perform which actions on which resources.
+SeleneDB uses [Cedar](https://www.cedarpolicy.com/) for fine-grained authorization. Cedar policies define which roles can perform which actions on which resources.
 
 ### How it works
 
-1. On first startup, Selene writes a default Cedar schema (`schema.cedarschema`) and default policies (`default.cedar`) to the `{data_dir}/policies/` directory
+1. On first startup, SeleneDB writes a default Cedar schema (`schema.cedarschema`) and default policies (`default.cedar`) to the `{data_dir}/policies/` directory
 2. On connection, the principal's role and scope are resolved from the graph
 3. Each operation maps to a Cedar action (see table below)
 4. The Cedar engine evaluates the request against all loaded policies
@@ -124,7 +124,7 @@ Selene uses [Cedar](https://www.cedarpolicy.com/) for fine-grained authorization
 
 ### Cedar entity model
 
-Selene maps its authorization model to Cedar entities:
+SeleneDB maps its authorization model to Cedar entities:
 
 - **Principal:** `Selene::Principal` with a `role` attribute
 - **Action:** `Selene::Action` with names like `"entity:read"` or `"gql:query"`
@@ -169,7 +169,7 @@ Scope is resolved as a RoaringBitmap at connection time. Checking scope is O(1) 
 
 ### Custom policies
 
-Add custom `.cedar` files to `{data_dir}/policies/`. Selene loads all `.cedar` files from this directory at startup. The default policies are written only if they do not already exist, so they can be modified freely.
+Add custom `.cedar` files to `{data_dir}/policies/`. SeleneDB loads all `.cedar` files from this directory at startup. The default policies are written only if they do not already exist, so they can be modified freely.
 
 Example custom policy granting a specific principal read access to federation management:
 
@@ -279,7 +279,7 @@ The token comparison uses constant-time equality to prevent timing attacks. When
 - [ ] CORS origins are restricted to known dashboards (`http.cors_origins`)
 - [ ] Plaintext HTTP is disabled unless behind a TLS-terminating reverse proxy
 - [ ] Docker container runs with `read_only`, `cap_drop: ALL`, and `no-new-privileges`
-- [ ] Data directory permissions restrict access to the Selene process user
+- [ ] Data directory permissions restrict access to the SeleneDB process user
 - [ ] Vault file permissions are `0600` (set automatically on Unix)
 - [ ] Log level is `info` or `warn` (debug/trace may log sensitive data)
 - [ ] Inter-node TLS is configured for replicas and federation peers (`[node_tls]`)

@@ -1,6 +1,6 @@
 # Configuration
 
-Selene uses a layered configuration system. Every setting has a sensible default, so the server starts with zero configuration in dev mode and requires only TLS paths for production.
+SeleneDB uses a layered configuration system. Every setting has a sensible default, so the server starts with zero configuration in dev mode and requires only TLS paths for production.
 
 ## Configuration priority
 
@@ -20,7 +20,7 @@ Pass a TOML config file at startup:
 selene-server --config /etc/selene/selene.toml /data
 ```
 
-When no `--config` flag is provided, Selene uses built-in defaults for all settings. The data directory defaults to `/tmp/selene-data` (a warning is logged if this path is used in production mode).
+When no `--config` flag is provided, SeleneDB uses built-in defaults for all settings. The data directory defaults to `/tmp/selene-data` (a warning is logged if this path is used in production mode).
 
 ## Runtime profiles
 

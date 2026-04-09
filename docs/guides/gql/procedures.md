@@ -1,6 +1,6 @@
 # GQL Procedures Reference
 
-Selene provides 56 built-in CALL procedures that produce streaming result rows. Each procedure accepts typed arguments and yields named columns that you select with YIELD.
+SeleneDB provides 56 built-in CALL procedures that produce streaming result rows. Each procedure accepts typed arguments and yields named columns that you select with YIELD.
 
 ## Syntax
 
@@ -20,7 +20,7 @@ RETURN s.name, value
 
 ## 1. Time-Series (12 procedures)
 
-Time-series procedures read from Selene's multi-tier storage: hot (in-memory, multi-encoding), warm (pre-computed aggregates), and cold (Parquet on disk). Duration parameters accept nanosecond integers or ISO duration values.
+Time-series procedures read from SeleneDB's multi-tier storage: hot (in-memory, multi-encoding), warm (pre-computed aggregates), and cold (Parquet on disk). Duration parameters accept nanosecond integers or ISO duration values.
 
 ### ts.range
 

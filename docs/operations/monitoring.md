@@ -1,6 +1,6 @@
 # Monitoring
 
-Selene exposes Prometheus metrics, a health endpoint, and WebSocket change subscriptions for real-time observability.
+SeleneDB exposes Prometheus metrics, a health endpoint, and WebSocket change subscriptions for real-time observability.
 
 ## Prometheus Metrics
 
@@ -16,7 +16,7 @@ Without a configured token (dev mode only), the endpoint is unauthenticated.
 
 ### Metrics Tiers
 
-Selene exposes two tiers of metrics, selected by the runtime profile:
+SeleneDB exposes two tiers of metrics, selected by the runtime profile:
 
 | Profile | Tier |
 |---------|------|
@@ -221,7 +221,7 @@ The server spawns several background tasks at startup. All tasks share `ServerSt
 
 ## Logging
 
-Selene uses the `tracing` framework with `tracing-subscriber`. Log levels are controlled via the `RUST_LOG` environment variable.
+SeleneDB uses the `tracing` framework with `tracing-subscriber`. Log levels are controlled via the `RUST_LOG` environment variable.
 
 ### Filter Syntax
 
