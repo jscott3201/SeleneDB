@@ -779,8 +779,8 @@ impl Procedure for GraphDiff {
         node_entries.sort_by(|a, b| b.1.cmp(&a.1));
         for ((change, label), count) in node_entries {
             rows.push(smallvec::smallvec![
-                (entity_type_key, GqlValue::String(change.into())),
-                (change_type_key, GqlValue::String("node".into())),
+                (entity_type_key, GqlValue::String("node".into())),
+                (change_type_key, GqlValue::String(change.into())),
                 (label_key, GqlValue::String(label.into())),
                 (count_key, GqlValue::Int(count)),
             ]);
@@ -790,8 +790,8 @@ impl Procedure for GraphDiff {
         edge_entries.sort_by(|a, b| b.1.cmp(&a.1));
         for (label, count) in edge_entries {
             rows.push(smallvec::smallvec![
-                (entity_type_key, GqlValue::String("created".into())),
-                (change_type_key, GqlValue::String("edge".into())),
+                (entity_type_key, GqlValue::String("edge".into())),
+                (change_type_key, GqlValue::String("created".into())),
                 (label_key, GqlValue::String(label.into())),
                 (count_key, GqlValue::Int(count)),
             ]);

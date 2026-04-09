@@ -21,7 +21,7 @@ use selene_ts::HotTier;
 use smallvec::smallvec;
 use smol_str::SmolStr;
 
-use super::{Procedure, ProcedureParam, ProcedureRow, ProcedureSignature, YieldColumn};
+use super::{Procedure, ProcedureRow, ProcedureSignature, YieldColumn};
 use crate::types::error::GqlError;
 use crate::types::value::{GqlType, GqlValue};
 
@@ -34,20 +34,11 @@ impl Procedure for SchemaDump {
 
     fn signature(&self) -> ProcedureSignature {
         ProcedureSignature {
-            params: vec![
-                ProcedureParam {
-                    name: "includeSystem",
-                    typ: GqlType::Bool,
-                },
-                ProcedureParam {
-                    name: "compact",
-                    typ: GqlType::Bool,
-                },
-                ProcedureParam {
-                    name: "label",
-                    typ: GqlType::String,
-                },
-            ],
+            // All arguments are optional and parsed positionally in `execute()`.
+            // Keep the required signature arity at 0 so existing calls like
+            // `CALL graph.schemaDump()` and `CALL graph.schemaDump(false)`
+            // remain valid.
+            params: vec![],
             yields: vec![YieldColumn {
                 name: "schema",
                 typ: GqlType::String,

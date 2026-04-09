@@ -27,6 +27,34 @@ where
     }
 }
 
+/// Accept a Vec of u64 IDs where each element may be a number or string.
+fn deserialize_vec_u64_or_string<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| match &item {
+                serde_json::Value::Number(n) => n
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom(format!("expected u64, got {item}"))),
+                serde_json::Value::String(s) => s
+                    .parse::<u64>()
+                    .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
+                _ => Err(D::Error::custom(format!(
+                    "expected number or string, got {item}"
+                ))),
+            })
+            .collect(),
+        _ => Err(D::Error::custom(format!(
+            "expected array of IDs, got {v}"
+        ))),
+    }
+}
+
 /// Accept both a single string `"sensor"` and an array `["sensor", "temperature"]`
 /// for label fields. MCP clients often pass a single label as a bare string.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -256,6 +284,7 @@ pub(crate) struct BatchIngestParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct MarkFixedParams {
     /// Node IDs to mark as fixed.
+    #[serde(deserialize_with = "deserialize_vec_u64_or_string")]
     pub(crate) node_ids: Vec<u64>,
     /// Status to set (default: "fixed").
     #[serde(default = "default_fixed_status")]

@@ -741,9 +741,10 @@ async fn metrics_update_loop(state: Arc<ServerState>, cancel: CancellationToken)
                     {
                         oauth_svc.token_service.prune_expired();
 
-                        // Persist deny list to vault (revoked tokens survive restarts)
-                        if let Some(vs) =
-                            state.services.get::<crate::vault::VaultService>()
+                        // Persist deny list to vault only if modified since last save
+                        if oauth_svc.token_service.deny_list_dirty()
+                            && let Some(vs) =
+                                state.services.get::<crate::vault::VaultService>()
                         {
                             let (_, denied) = oauth_svc.token_service.snapshot_state();
                             if let Err(e) =

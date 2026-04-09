@@ -15,11 +15,14 @@ substitutions:
   _REGION: us-central1
   _REPO: selene
   _IMAGE: selene-server
+  _TAG: latest
 
 options:
   machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY
   diskSizeGb: '100'
+  env:
+    - DOCKER_BUILDKIT=1
 
 availableSecrets:
   secretManager:
@@ -37,7 +40,7 @@ steps:
         docker build \
           -f Dockerfile.gpu \
           --secret id=hf_token,src=/workspace/.hf_token \
-          -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-${SHORT_SHA} \
+          -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-${_TAG} \
           -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-latest \
           .
         rm -f /workspace/.hf_token
@@ -45,7 +48,7 @@ steps:
       - HF_TOKEN
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-${_TAG}
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-latest
 
 timeout: 3600s

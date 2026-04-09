@@ -146,7 +146,8 @@ deploy_to_vm() {
                 sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,discard \"\${DISK_DEV}\"
             fi
             sudo mount -o discard,defaults \"\${DISK_DEV}\" /mnt/disks/selene-data
-            sudo chmod 777 /mnt/disks/selene-data
+            sudo chown 65532:65532 /mnt/disks/selene-data
+            sudo chmod 750 /mnt/disks/selene-data
         fi
 
         # Authenticate to Artifact Registry

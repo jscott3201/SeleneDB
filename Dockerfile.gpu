@@ -20,12 +20,19 @@
 #   docker run --gpus all -e SELENE_CUDA=1 \
 #     -p 8080:8080 -p 4510:4510/udp selene:gpu
 
-# ── Stage 1: Build (glibc for CUDA compatibility) ───────────────────────
-FROM rust:1.87-bookworm AS builder
+# ── Stage 1: Build (NVIDIA CUDA dev image + Rust for nvcc) ──────────────
+FROM nvidia/cuda:12.9.0-devel-ubuntu24.04 AS builder
 
+# Install Rust toolchain and build deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+    curl build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.87.0
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# T4 = compute capability 7.5. Set explicitly since no GPU is present at build time.
+ENV CUDA_COMPUTE_CAP=75
 
 WORKDIR /build
 COPY . .

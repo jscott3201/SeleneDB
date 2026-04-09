@@ -5,6 +5,7 @@
 //! contains no HTTP or QUIC awareness.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -99,6 +100,8 @@ pub struct OAuthTokenService {
     /// than `now` are safe to prune because the corresponding JWTs have
     /// already expired.
     deny_list: RwLock<HashMap<String, u64>>,
+    /// Whether the deny list has been modified since the last persistence.
+    deny_dirty: AtomicBool,
     /// Cache: principal identity to (NodeId, graph generation).
     /// Avoids O(P) label scan on every validation. Invalidated when graph
     /// generation changes.
@@ -126,6 +129,7 @@ impl OAuthTokenService {
             refresh_ttl,
             refresh_store: RwLock::new(HashMap::new()),
             deny_list: RwLock::new(HashMap::new()),
+            deny_dirty: AtomicBool::new(false),
             principal_cache: RwLock::new(HashMap::new()),
         }
     }
@@ -302,6 +306,7 @@ impl OAuthTokenService {
             return;
         }
         deny.insert(jti.to_string(), original_exp);
+        self.deny_dirty.store(true, Ordering::Release);
     }
 
     /// Remove expired refresh tokens and deny-list entries whose original
@@ -324,11 +329,19 @@ impl OAuthTokenService {
 
     // -- State persistence ----------------------------------------------------
 
+    /// Check whether the deny list has been modified since the last snapshot.
+    pub(crate) fn deny_list_dirty(&self) -> bool {
+        self.deny_dirty.load(Ordering::Acquire)
+    }
+
     /// Snapshot the current deny list for vault persistence.
     ///
     /// Returns `(unused, deny_list_entries)` where each deny entry is
     /// `(jti, expires_at)`. The first element is empty (reserved for future
     /// refresh token persistence if a non-hashed approach is adopted).
+    ///
+    /// Clears the dirty flag — the next snapshot will only persist if new
+    /// revocations have been added since this call.
     pub(crate) fn snapshot_state(&self) -> ((), Vec<(String, u64)>) {
         let denied: Vec<(String, u64)> = self
             .deny_list
@@ -337,6 +350,7 @@ impl OAuthTokenService {
             .map(|(jti, exp)| (jti.clone(), *exp))
             .collect();
 
+        self.deny_dirty.store(false, Ordering::Release);
         ((), denied)
     }
 

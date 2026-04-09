@@ -32,7 +32,7 @@ rustls-pki-types.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt", "io"] }
 tokio-stream.workspace = true
 futures.workspace = true
 
