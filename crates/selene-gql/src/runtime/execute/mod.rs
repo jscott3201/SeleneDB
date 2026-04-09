@@ -27,6 +27,46 @@ use crate::types::error::{GqlError, GqlStatus, MutationStats};
 use crate::types::result::GqlResult;
 use crate::types::value::GqlValue;
 
+/// Rename Arrow batch schemas from internal (uppercased) names to display
+/// (original-case) names. This is a zero-copy operation at the data level —
+/// only the schema metadata changes.
+fn apply_display_schema(
+    schema: Arc<arrow::datatypes::Schema>,
+    batches: Vec<arrow::record_batch::RecordBatch>,
+    display_schema: &Arc<arrow::datatypes::Schema>,
+) -> (
+    Arc<arrow::datatypes::Schema>,
+    Vec<arrow::record_batch::RecordBatch>,
+) {
+    // Skip rename if schemas already match or have different field counts
+    // (different counts can happen with RETURN */YIELD * expansion at runtime).
+    if schema.fields().len() != display_schema.fields().len()
+        || schema.fields() == display_schema.fields()
+    {
+        return (schema, batches);
+    }
+    // Merge: take display names from the display schema but preserve data types
+    // from the original schema (expression-level inference may default to Utf8
+    // for property access, while the actual columns carry the real types).
+    let merged_fields: Vec<arrow::datatypes::Field> = schema
+        .fields()
+        .iter()
+        .zip(display_schema.fields())
+        .map(|(orig, disp)| {
+            arrow::datatypes::Field::new(disp.name(), orig.data_type().clone(), orig.is_nullable())
+        })
+        .collect();
+    let merged_schema = Arc::new(arrow::datatypes::Schema::new(merged_fields));
+    let new_batches = batches
+        .into_iter()
+        .map(|b| {
+            arrow::record_batch::RecordBatch::try_new(merged_schema.clone(), b.columns().to_vec())
+                .unwrap_or(b)
+        })
+        .collect();
+    (merged_schema, new_batches)
+}
+
 /// Execute a GQL mutation with auto-commit.
 ///
 /// All mutations from the statement are wrapped in a single `SharedGraph::write()`
@@ -145,6 +185,7 @@ fn execute_mut(
                 .collect();
             let schema = infer_schema_from_bindings(&bindings, &aliases);
             let batches = materialize_to_arrow(&bindings, &schema)?;
+            let (schema, batches) = apply_display_schema(schema, batches, &plan.display_schema);
 
             Ok(GqlResult {
                 schema,
@@ -370,6 +411,7 @@ fn execute_in_transaction(
                     .collect();
                 let schema = infer_schema_from_bindings(&bindings, &aliases);
                 let batches = materialize_to_arrow(&bindings, &schema)?;
+                let (schema, batches) = apply_display_schema(schema, batches, &plan.display_schema);
 
                 Ok(GqlResult {
                     schema,
@@ -477,6 +519,7 @@ fn execute_statement_with_csr(
                     .collect();
                 let schema = infer_schema_from_bindings(&bindings, &aliases);
                 let batches = materialize_to_arrow(&bindings, &schema)?;
+                let (schema, batches) = apply_display_schema(schema, batches, &plan.display_schema);
                 prev_bindings = Some(bindings);
                 last_result = Some(GqlResult {
                     schema,
@@ -632,7 +675,7 @@ fn execute_plan_inner(
         && let Some(count) = execute_count_only(plan, graph, scope, &ctx)?
     {
         let count_alias = plan
-            .output_schema
+            .display_schema
             .fields()
             .first()
             .map_or("count(*)", |f| f.name().as_str());
@@ -975,6 +1018,7 @@ fn execute_plan_inner(
         aliases = final_chunk.schema().iter().map(|(name, _)| *name).collect();
     }
     let (schema, batches) = materialize_chunk_to_arrow(&final_chunk, &aliases)?;
+    let (schema, batches) = apply_display_schema(schema, batches, &plan.display_schema);
 
     Ok(GqlResult {
         schema,

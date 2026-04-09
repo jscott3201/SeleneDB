@@ -53,7 +53,7 @@ fn e2e_order_by_desc_limit() {
     // Verify the actual value: should be TempSensor-2 with temp=80.0
     let batch = &result.batches[0];
     let temp_col = batch
-        .column_by_name("TEMP")
+        .column_by_name("temp")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
@@ -79,7 +79,7 @@ fn e2e_order_by_asc_returns_sorted() {
 
     let batch = &result.batches[0];
     let temp_col = batch
-        .column_by_name("TEMP")
+        .column_by_name("temp")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
@@ -103,7 +103,7 @@ fn e2e_order_by_hidden_column() {
 
     let batch = &result.batches[0];
     let name_col = batch
-        .column_by_name("NAME")
+        .column_by_name("name")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -298,8 +298,8 @@ fn e2e_arrow_output_has_schema() {
     .execute()
     .unwrap();
     assert_eq!(result.column_count(), 2);
-    assert_eq!(result.schema.field(0).name(), "SENSOR_NAME");
-    assert_eq!(result.schema.field(1).name(), "TEMPERATURE");
+    assert_eq!(result.schema.field(0).name(), "sensor_name");
+    assert_eq!(result.schema.field(1).name(), "temperature");
     assert_eq!(result.batches.len(), 1);
     assert_eq!(result.batches[0].num_rows(), 2);
 }
@@ -535,7 +535,7 @@ fn labels_function_displays_as_array() {
     assert_eq!(result.row_count(), 2);
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("LBLS")
+        .column_by_name("lbls")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -556,7 +556,7 @@ fn labels_as_alias_name() {
     assert_eq!(result.row_count(), 2);
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("LABELS")
+        .column_by_name("labels")
         .expect("alias 'labels' should be usable as column name");
     let arr = col
         .as_any()
@@ -584,8 +584,8 @@ fn call_yield_where_filters_rows() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("LABEL")
-        .expect("should have LABEL column");
+        .column_by_name("label")
+        .expect("should have label column");
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -718,7 +718,7 @@ fn where_id_function_in_intermediate_filter() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let name = batch
-        .column_by_name("NAME")
+        .column_by_name("name")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -740,7 +740,7 @@ fn where_id_with_multi_match_pushdown() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let aname = batch
-        .column_by_name("ANAME")
+        .column_by_name("aname")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -761,7 +761,7 @@ fn where_labels_function_in_intermediate_filter() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let cnt = batch
-        .column_by_name("CNT")
+        .column_by_name("cnt")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()

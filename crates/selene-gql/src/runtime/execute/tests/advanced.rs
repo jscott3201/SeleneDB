@@ -118,8 +118,8 @@ fn ordered_scan_topk_correct_results() {
 
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("T")
-        .expect("column T")
+        .column_by_name("t")
+        .expect("column t")
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .expect("Float64Array");
@@ -153,8 +153,8 @@ fn ordered_scan_topk_with_filter() {
 
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("T")
-        .expect("column T")
+        .column_by_name("t")
+        .expect("column t")
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .expect("Float64Array");
@@ -186,8 +186,8 @@ fn ordered_scan_topk_asc() {
 
     let batch = &result.batches[0];
     let col = batch
-        .column_by_name("T")
-        .expect("column T")
+        .column_by_name("t")
+        .expect("column t")
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .expect("Float64Array");
@@ -852,7 +852,7 @@ fn subquery_exists_filters_matching_nodes() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 2);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -872,7 +872,7 @@ fn subquery_exists_negated() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 2);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -892,12 +892,12 @@ fn subquery_count_returns_correct_counts() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 4);
-    let name_col = result.batches[0].column_by_name("NAME").unwrap();
+    let name_col = result.batches[0].column_by_name("name").unwrap();
     let names = name_col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
-    let cnt_col = result.batches[0].column_by_name("CNT").unwrap();
+    let cnt_col = result.batches[0].column_by_name("cnt").unwrap();
     let counts = cnt_col
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()
@@ -924,7 +924,7 @@ fn subquery_count_with_threshold() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 1);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -959,7 +959,7 @@ fn subquery_count_zero_when_no_edges() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 1);
-    let col = result.batches[0].column_by_name("CNT").unwrap();
+    let col = result.batches[0].column_by_name("cnt").unwrap();
     let counts = col
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()
@@ -978,7 +978,7 @@ fn subquery_correlated_variable_in_exists() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 2);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -998,12 +998,12 @@ fn subquery_count_with_inner_filter() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 4);
-    let cnt_col = result.batches[0].column_by_name("OLD_FRIENDS").unwrap();
+    let cnt_col = result.batches[0].column_by_name("old_friends").unwrap();
     let counts = cnt_col
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()
         .unwrap();
-    let name_col = result.batches[0].column_by_name("NAME").unwrap();
+    let name_col = result.batches[0].column_by_name("name").unwrap();
     let names = name_col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -1029,7 +1029,7 @@ fn subquery_exists_with_incoming_edge() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 2);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -1049,7 +1049,7 @@ fn subquery_exists_combined_with_property_filter() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 1);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -1068,7 +1068,7 @@ fn subquery_count_equality_check() {
     .execute()
     .unwrap();
     assert_eq!(result.row_count(), 1);
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -1094,7 +1094,7 @@ fn subquery_exists_with_starts_with_filter() {
         "STARTS WITH 'C' inside EXISTS should return 2 (Alice and Bob know Carol), got {}",
         result.row_count()
     );
-    let col = result.batches[0].column_by_name("NAME").unwrap();
+    let col = result.batches[0].column_by_name("name").unwrap();
     let arr = col
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()

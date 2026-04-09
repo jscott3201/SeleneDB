@@ -1278,15 +1278,22 @@ mod tests {
     fn record_constructor_both_forms_same_ast() {
         let with_kw = parse_statement("MATCH (n) RETURN RECORD {x: n.x}").unwrap();
         let bare = parse_statement("MATCH (n) RETURN {x: n.x}").unwrap();
-        // Both produce RecordConstruct with the same field
-        let extract = |stmt: crate::GqlStatement| -> String {
+        // Both produce RecordConstruct with the same expr/alias — only display_hint
+        // differs because it captures source text ("RECORD {x: n.x}" vs "{x: n.x}").
+        let extract_proj = |stmt: crate::GqlStatement| -> String {
             if let crate::GqlStatement::Query(p) = stmt {
-                format!("{:?}", p.statements.last())
+                let ret = p.statements.last().unwrap();
+                if let crate::ast::statement::PipelineStatement::Return(rc) = ret {
+                    let proj = &rc.projections[0];
+                    format!("{:?}|{:?}", proj.expr, proj.alias)
+                } else {
+                    panic!("expected Return")
+                }
             } else {
                 panic!("expected Query")
             }
         };
-        assert_eq!(extract(with_kw), extract(bare));
+        assert_eq!(extract_proj(with_kw), extract_proj(bare));
     }
 
     #[test]

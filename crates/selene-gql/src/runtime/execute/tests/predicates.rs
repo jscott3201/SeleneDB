@@ -81,7 +81,7 @@ fn index_ordered_scan_numeric_sort() {
 
     // Extract the temp values from the result
     let batch = &result.batches[0];
-    let col = batch.column_by_name("TEMP").expect("temp column");
+    let col = batch.column_by_name("temp").expect("temp column");
     let values: Vec<f64> = col
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()

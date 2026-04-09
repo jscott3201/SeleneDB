@@ -53,8 +53,12 @@ pub struct ExecutionPlan {
     pub pipeline: Vec<PipelineOp>,
     /// Mutation operations (executed after pattern, before pipeline).
     pub mutations: Vec<MutationOp>,
-    /// Output schema (derived from RETURN at plan time).
+    /// Internal output schema with uppercased field names (used for binding
+    /// lookup during Arrow materialization).
     pub output_schema: Arc<arrow::datatypes::Schema>,
+    /// Display output schema with original-case field names (used for the
+    /// final Arrow batches exposed to consumers: JSON, MCP, QUIC).
+    pub display_schema: Arc<arrow::datatypes::Schema>,
     /// When true, the query is a pure `MATCH (...) RETURN count(*)` with no
     /// GROUP BY, HAVING, DISTINCT, or other projections. The executor can skip
     /// binding materialization and return bitmap cardinality directly.
@@ -353,5 +357,9 @@ pub enum PipelineOp {
 #[derive(Debug, Clone)]
 pub struct PlannedProjection {
     pub expr: Expr,
+    /// Uppercased alias for internal binding resolution (ISO GQL case folding).
     pub alias: IStr,
+    /// Original-case name for output Arrow schema field naming (JSON keys, etc.).
+    /// Defaults to `alias` when no original-case information is available.
+    pub display_name: IStr,
 }
