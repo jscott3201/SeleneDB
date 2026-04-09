@@ -201,6 +201,7 @@ pub(in crate::parser) fn build_with(pair: Pair<'_, Rule>) -> Result<WithClause, 
 pub(in crate::parser) fn build_projection(pair: Pair<'_, Rule>) -> Result<Projection, GqlError> {
     let mut expr = None;
     let mut alias = None;
+    let mut display_hint = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -209,10 +210,15 @@ pub(in crate::parser) fn build_projection(pair: Pair<'_, Rule>) -> Result<Projec
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::prop_ident)
                     .ok_or_else(|| GqlError::parse_error("expected ident in alias"))?;
+                // Capture original-case text before intern_var uppercases it.
+                display_hint = Some(IStr::new(ident_pair.as_str().trim_matches('"')));
                 alias = Some(intern_var(ident_pair));
             }
             _ => {
                 if expr.is_none() {
+                    // Capture raw expression source text as fallback display hint
+                    // (used when no explicit AS alias is present).
+                    display_hint = Some(IStr::new(inner.as_str().trim()));
                     expr = Some(build_expr(inner)?);
                 }
             }
@@ -222,6 +228,7 @@ pub(in crate::parser) fn build_projection(pair: Pair<'_, Rule>) -> Result<Projec
     Ok(Projection {
         expr: expr.ok_or_else(|| GqlError::parse_error("expected expression in projection"))?,
         alias,
+        display_hint,
     })
 }
 
@@ -279,10 +286,13 @@ pub(in crate::parser) fn build_call(pair: Pair<'_, Rule>) -> Result<ProcedureCal
 pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldItem, GqlError> {
     let mut name = None;
     let mut alias = None;
+    let mut display_hint = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::ident | Rule::prop_ident if name.is_none() => {
+                // Capture original-case text before intern_var uppercases it.
+                display_hint = Some(IStr::new(inner.as_str().trim_matches('"')));
                 name = Some(intern_var(inner));
             }
             Rule::alias => {
@@ -294,6 +304,8 @@ pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldI
                             "unexpected parser state: missing ident in YIELD alias",
                         )
                     })?;
+                // Alias display_hint overrides column name display_hint.
+                display_hint = Some(IStr::new(ident_pair.as_str().trim_matches('"')));
                 alias = Some(intern_var(ident_pair));
             }
             _ => {}
@@ -303,6 +315,7 @@ pub(in crate::parser) fn build_yield_item(pair: Pair<'_, Rule>) -> Result<YieldI
     Ok(YieldItem {
         name: name.ok_or_else(|| GqlError::parse_error("expected name in YIELD item"))?,
         alias,
+        display_hint,
     })
 }
 

@@ -81,7 +81,7 @@ fn index_ordered_scan_numeric_sort() {
 
     // Extract the temp values from the result
     let batch = &result.batches[0];
-    let col = batch.column_by_name("TEMP").expect("temp column");
+    let col = batch.column_by_name("temp").expect("temp column");
     let values: Vec<f64> = col
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
@@ -493,4 +493,31 @@ fn e2e_different_edges_filters_duplicate() {
         r1.row_count(),
         r2.row_count()
     );
+}
+
+#[test]
+fn e2e_insert_boolean_properties() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let result = MutationBuilder::new(
+        "INSERT (n:test {name: 'x', active: true, deleted: false}) RETURN id(n) AS id",
+    )
+    .execute(&shared)
+    .unwrap();
+    assert_eq!(
+        result.row_count(),
+        1,
+        "INSERT with booleans should create one node"
+    );
+
+    shared.read(|graph| {
+        let node = graph.get_node(selene_core::NodeId(1)).unwrap();
+        assert_eq!(
+            node.properties.get(IStr::new("active")),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get(IStr::new("deleted")),
+            Some(&Value::Bool(false))
+        );
+    });
 }

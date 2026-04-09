@@ -16,7 +16,7 @@ services:
       dockerfile: ${DOCKERFILE:-Dockerfile}
       secrets:
         - hf_token
-    command: ["--dev", "--seed", "--data-dir", "/data"]
+    command: ["--dev", "--data-dir", "/data"]
     ports:
       - "4510:4510/udp"
       - "8080:8080"

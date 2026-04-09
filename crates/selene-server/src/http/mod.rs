@@ -31,14 +31,50 @@ tokio::task_local! {
     static MCP_AUTH_CTX: AuthContext;
 }
 
-/// Build a 401 Unauthorized JSON response with the given error message.
-fn unauthorized_response(message: &str) -> axum::response::Response {
+/// Why MCP bearer validation failed — used to build RFC 6750 §3.1 error responses.
+enum AuthFailure {
+    /// No Authorization header present.
+    Missing,
+    /// JWT signature valid but `exp` has passed.
+    Expired,
+    /// JWT is in the deny list (revoked).
+    Revoked,
+    /// Token is malformed, wrong signature, principal not found, etc.
+    Invalid(String),
+}
+
+/// Build a 401 Unauthorized JSON response with RFC 6750 error details.
+fn unauthorized_response(failure: AuthFailure) -> axum::response::Response {
+    let (www_auth, error, description) = match failure {
+        AuthFailure::Missing => (
+            r#"Bearer error="invalid_request", error_description="missing Authorization header""#
+                .to_owned(),
+            "invalid_request",
+            "MCP requires Authorization: Bearer <token>",
+        ),
+        AuthFailure::Expired => (
+            r#"Bearer error="invalid_token", error_description="token expired""#.to_owned(),
+            "invalid_token",
+            "token expired",
+        ),
+        AuthFailure::Revoked => (
+            r#"Bearer error="invalid_token", error_description="token revoked""#.to_owned(),
+            "invalid_token",
+            "token revoked",
+        ),
+        AuthFailure::Invalid(ref msg) => (
+            format!(r#"Bearer error="invalid_token", error_description="{msg}""#),
+            "invalid_token",
+            "invalid token",
+        ),
+    };
+
     axum::response::Response::builder()
         .status(axum::http::StatusCode::UNAUTHORIZED)
         .header("content-type", "application/json")
-        .header("www-authenticate", "Bearer")
+        .header("www-authenticate", www_auth)
         .body(axum::body::Body::from(format!(
-            r#"{{"error":"{message}"}}"#
+            r#"{{"error":"{error}","error_description":"{description}"}}"#
         )))
         .unwrap()
 }
@@ -53,7 +89,7 @@ fn validate_mcp_bearer(
     state: &ServerState,
     expected_key: &str,
     req: &axum::extract::Request,
-) -> Option<AuthContext> {
+) -> Result<AuthContext, AuthFailure> {
     let auth_header = req
         .headers()
         .get("authorization")
@@ -61,16 +97,24 @@ fn validate_mcp_bearer(
 
     let bearer_token = match auth_header {
         Some(header) if header.starts_with("Bearer ") => &header[7..],
-        _ => return None,
+        _ => return Err(AuthFailure::Missing),
     };
 
     // 1. Try JWT validation via OAuthTokenService (returns per-principal AuthContext).
     if let Some(oauth_svc) = state
         .services
         .get::<crate::http::mcp::oauth::OAuthService>()
-        && let Ok(auth_ctx) = oauth_svc.token_service.validate(bearer_token, &state.graph)
     {
-        return Some(auth_ctx);
+        match oauth_svc.token_service.validate(bearer_token, &state.graph) {
+            Ok(auth_ctx) => return Ok(auth_ctx),
+            Err(crate::auth::oauth::OAuthError::TokenExpired) => {
+                return Err(AuthFailure::Expired);
+            }
+            Err(crate::auth::oauth::OAuthError::TokenRevoked) => {
+                return Err(AuthFailure::Revoked);
+            }
+            Err(_) => {} // fall through to API key check
+        }
     }
 
     // 2. Fall back to static API key (constant-time comparison, grants admin).
@@ -81,11 +125,11 @@ fn validate_mcp_bearer(
             .ct_eq(expected_key.as_bytes())
             .into()
         {
-            return Some(AuthContext::dev_admin());
+            return Ok(AuthContext::dev_admin());
         }
     }
 
-    None
+    Err(AuthFailure::Invalid("invalid token".into()))
 }
 
 /// Build the axum router with all routes.
@@ -136,6 +180,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .route("/import/csv", post(routes::csv_import)
             .layer(DefaultBodyLimit::max(4 * 1024 * 1024))) // deprecated alias
         .route("/export/csv", get(routes::csv_export)) // deprecated alias
+        .route("/snapshot", get(routes::snapshot_export))
         .route("/subscribe", get(routes::subscribe::subscribe));
 
     // RDF import/export
@@ -182,6 +227,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
             .route("/oauth/authorize", get(mcp::oauth::oauth_authorize))
             .route("/oauth/approve", post(mcp::oauth::oauth_approve))
             .route("/oauth/token", post(mcp::oauth::oauth_token))
+            .route("/oauth/revoke", post(mcp::oauth::oauth_revoke))
             .layer(axum::Extension(auth_code_store))
             .with_state(state.clone());
         let app = app.merge(oauth_routes);
@@ -246,10 +292,8 @@ pub fn router(state: Arc<ServerState>) -> Router {
                         let key = api_key.clone();
                         async move {
                             match validate_mcp_bearer(&st, &key, &req) {
-                                Some(auth) => MCP_AUTH_CTX.scope(auth, next.run(req)).await,
-                                None => unauthorized_response(
-                                    "MCP requires Authorization: Bearer <token>",
-                                ),
+                                Ok(auth) => MCP_AUTH_CTX.scope(auth, next.run(req)).await,
+                                Err(failure) => unauthorized_response(failure),
                             }
                         }
                     },

@@ -844,6 +844,7 @@ fn execute_return_all(
         .map(|(name, _)| PlannedProjection {
             expr: Expr::Var(*name),
             alias: *name,
+            display_name: *name,
         })
         .collect();
 
@@ -1349,10 +1350,12 @@ mod tests {
             PlannedProjection {
                 expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("name")),
                 alias: IStr::new("sensor_name"),
+                display_name: IStr::new("sensor_name"),
             },
             PlannedProjection {
                 expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("temp")),
                 alias: IStr::new("temperature"),
+                display_name: IStr::new("temperature"),
             },
         ];
         let result =
@@ -1378,6 +1381,7 @@ mod tests {
                 count_star: true,
             }),
             alias: IStr::new("total"),
+            display_name: IStr::new("total"),
         }];
         let result =
             execute_return(bindings, &projections, &[], false, None, &make_ctx(&g)).unwrap();
@@ -1402,6 +1406,7 @@ mod tests {
                 distinct: false,
             }),
             alias: IStr::new("avg_temp"),
+            display_name: IStr::new("avg_temp"),
         }];
         let result =
             execute_return(bindings, &projections, &[], false, None, &make_ctx(&g)).unwrap();
@@ -1433,6 +1438,7 @@ mod tests {
             PlannedProjection {
                 expr: Expr::Var(IStr::new("floor_name")),
                 alias: IStr::new("floor"),
+                display_name: IStr::new("floor"),
             },
             PlannedProjection {
                 expr: Expr::Function(FunctionCall {
@@ -1441,6 +1447,7 @@ mod tests {
                     count_star: true,
                 }),
                 alias: IStr::new("sensor_count"),
+                display_name: IStr::new("sensor_count"),
             },
         ];
         let result = execute_return(
@@ -1484,6 +1491,7 @@ mod tests {
             PlannedProjection {
                 expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("floor")),
                 alias: IStr::new("fl"),
+                display_name: IStr::new("fl"),
             },
             PlannedProjection {
                 expr: Expr::Function(FunctionCall {
@@ -1492,6 +1500,7 @@ mod tests {
                     count_star: true,
                 }),
                 alias: IStr::new("cnt"),
+                display_name: IStr::new("cnt"),
             },
         ];
         // GROUP BY fl (uses the projection alias, not the raw expression)
@@ -1566,6 +1575,7 @@ mod tests {
             PlannedProjection {
                 expr: case_expr,
                 alias: IStr::new("bucket"),
+                display_name: IStr::new("bucket"),
             },
             PlannedProjection {
                 expr: Expr::Function(FunctionCall {
@@ -1574,6 +1584,7 @@ mod tests {
                     count_star: true,
                 }),
                 alias: IStr::new("cnt"),
+                display_name: IStr::new("cnt"),
             },
         ];
         // GROUP BY bucket (alias for the CASE expression)
@@ -1629,6 +1640,7 @@ mod tests {
         let projections = vec![PlannedProjection {
             expr: Expr::Property(Box::new(Expr::Var(IStr::new("s"))), IStr::new("floor")),
             alias: IStr::new("floor"),
+            display_name: IStr::new("floor"),
         }];
         let result =
             execute_return(bindings, &projections, &[], true, None, &make_ctx(&g)).unwrap();

@@ -273,6 +273,7 @@ pub fn plan_query(
     rewrite_sort_after_return(&mut pipeline_ops);
 
     let output_schema = derive_output_schema(&pipeline_ops);
+    let display_schema = derive_display_schema(&pipeline_ops, &output_schema);
     let count_only = is_count_only_query(&pattern_ops, &pipeline_ops);
 
     let plan = ExecutionPlan {
@@ -280,6 +281,7 @@ pub fn plan_query(
         pipeline: pipeline_ops,
         mutations: vec![],
         output_schema,
+        display_schema,
         count_only,
     };
 
@@ -347,12 +349,14 @@ pub fn plan_mutation(
     }
 
     let output_schema = derive_output_schema(&pipeline_ops);
+    let display_schema = derive_display_schema(&pipeline_ops, &output_schema);
 
     let plan = ExecutionPlan {
         pattern_ops,
         pipeline: pipeline_ops,
         mutations: mp.mutations.clone(),
         output_schema,
+        display_schema,
         count_only: false, // mutations never count-only
     };
 
@@ -872,9 +876,13 @@ fn plan_projections(projections: &[Projection]) -> Vec<PlannedProjection> {
                     _ => IStr::new(&format!("col_{i}")),
                 }
             });
+            // display_name: use the parser-captured original-case hint when
+            // available, falling back to the (potentially uppercased) alias.
+            let display_name = p.display_hint.unwrap_or(alias);
             PlannedProjection {
                 expr: p.expr.clone(),
                 alias,
+                display_name,
             }
         })
         .collect()
@@ -965,6 +973,7 @@ fn rewrite_sort_after_return(pipeline: &mut [PipelineOp]) {
             all_projections.push(PlannedProjection {
                 expr: term.expr.clone(),
                 alias: hidden_alias,
+                display_name: hidden_alias,
             });
             rewritten.push(OrderTerm {
                 expr: Expr::Var(hidden_alias),
@@ -1224,6 +1233,53 @@ fn derive_output_schema(ops: &[PipelineOp]) -> Arc<arrow::datatypes::Schema> {
         }
     }
     Arc::new(arrow::datatypes::Schema::empty())
+}
+
+/// Derive the display schema with original-case field names for external consumers.
+/// Uses `display_name` from planned projections and `display_hint` from yield items.
+/// Falls back to the internal `output_schema` when no display information is available.
+fn derive_display_schema(
+    ops: &[PipelineOp],
+    fallback: &Arc<arrow::datatypes::Schema>,
+) -> Arc<arrow::datatypes::Schema> {
+    for op in ops {
+        if let PipelineOp::Return { projections, .. } = op {
+            let fields: Vec<arrow::datatypes::Field> = projections
+                .iter()
+                .filter(|p| !p.alias.as_str().starts_with("_sort_"))
+                .map(|p| {
+                    let dt = gql_type_to_arrow(&p.expr.infer_type());
+                    arrow::datatypes::Field::new(p.display_name.as_str(), dt, true)
+                })
+                .collect();
+            return Arc::new(arrow::datatypes::Schema::new(fields));
+        }
+    }
+    // Standalone CALL/YIELD: use display_hint for original-case column names.
+    for op in ops {
+        if let PipelineOp::Call { procedure } = op {
+            let fields: Vec<arrow::datatypes::Field> = procedure
+                .yields
+                .iter()
+                .map(|yi| {
+                    let col = yi
+                        .display_hint
+                        .as_ref()
+                        .or(yi.alias.as_ref())
+                        .unwrap_or(&yi.name);
+                    arrow::datatypes::Field::new(
+                        col.as_str(),
+                        arrow::datatypes::DataType::Utf8,
+                        true,
+                    )
+                })
+                .collect();
+            if !fields.is_empty() {
+                return Arc::new(arrow::datatypes::Schema::new(fields));
+            }
+        }
+    }
+    fallback.clone()
 }
 
 /// Convert a GqlType to an Arrow DataType for schema derivation.

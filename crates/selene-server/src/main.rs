@@ -126,6 +126,14 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
             model_path,
             config.vector.dimensions,
         );
+        if !config.vector.lazy_load {
+            match selene_gql::runtime::embed::initialize() {
+                Ok(model_id) => tracing::info!(model = %model_id, "embedding model loaded"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding model not available (semantic search disabled)");
+                }
+            }
+        }
     }
 
     let mut state = bootstrap::bootstrap(config, vault_passphrase).await?;
@@ -429,6 +437,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         5,
         selene_core::IStr::new("feeds"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -437,6 +446,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         6,
         selene_core::IStr::new("feeds"),
         selene_core::PropertyMap::new(),
+        false,
     );
 
     // Sensor-to-equipment edges
@@ -447,6 +457,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -455,6 +466,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
     let _ = ops::edges::create_edge(
         state,
@@ -463,6 +475,7 @@ fn seed_demo_data(state: &selene_server::ServerState) {
         7,
         selene_core::IStr::new("isPointOf"),
         selene_core::PropertyMap::new(),
+        false,
     );
 
     // Write some time-series data

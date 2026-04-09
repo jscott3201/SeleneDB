@@ -1,0 +1,65 @@
+# SeleneDB Cloud Production Configuration
+#
+# Designed for Tailscale-secured GCP deployment. All traffic flows over the
+# Tailscale mesh (WireGuard-encrypted), so plaintext HTTP is acceptable —
+# the transport layer is already encrypted.
+#
+# Mount this as: -v ./selene.cloud.toml:/data/config.toml
+# Then run:      /selene-server --config /data/config.toml --data-dir /data
+
+[server]
+profile = "standalone"   # All services enabled (vector, search, MCP, temporal)
+
+[http]
+bind = "0.0.0.0:8080"
+allow_plaintext = true   # Safe: Tailscale provides WireGuard encryption
+cors_origins = []        # Restrict to your Tailscale domains if needed
+rate_limit_read = 200
+rate_limit_write = 100
+rate_limit_query = 50
+rate_limit_data = 20
+
+[quic]
+bind = "0.0.0.0:4510"
+
+[services]
+vector = true
+search = true
+temporal = true
+federation = false
+algorithms = true
+mcp = true
+replicas = false
+
+[mcp]
+# API key for MCP endpoint authentication.
+# Generate with: openssl rand -hex 32
+api_key = ""             # REQUIRED: set via SELENE_MCP_API_KEY env var
+
+# JWT signing key for session tokens.
+# Generate with: openssl rand -hex 64
+signing_key = ""         # REQUIRED: set via SELENE_MCP_SIGNING_KEY env var
+
+# Registration token gates new client onboarding.
+# Generate with: openssl rand -hex 32
+registration_token = ""  # REQUIRED: set via SELENE_MCP_REGISTRATION_TOKEN env var
+
+# Public URL for OAuth discovery (set to Tailscale MagicDNS hostname)
+# Example: http://selene-gcp:8080
+public_url = ""          # Set via SELENE_MCP_PUBLIC_URL env var
+
+session_timeout = 3600
+max_sessions = 50
+
+[memory]
+budget_mb = 12288        # 12GB — leaves ~3GB for OS/CUDA on 15GB n1-standard-4
+
+[embedding]
+enabled = true
+model_dir = "/data/models/embeddinggemma-300m"
+target_dims = 768
+
+[persistence]
+wal_dir = "/data/wal"
+snapshot_dir = "/data/snapshots"
+snapshot_interval_secs = 300

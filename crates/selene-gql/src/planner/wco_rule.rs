@@ -366,6 +366,7 @@ mod tests {
                 projections: vec![PlannedProjection {
                     expr: crate::ast::expr::Expr::Var(a),
                     alias: a,
+                    display_name: a,
                 }],
                 group_by: vec![],
                 distinct: false,
@@ -374,6 +375,7 @@ mod tests {
             }],
             mutations: vec![],
             output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+            display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
             count_only: false,
         }
     }
@@ -478,6 +480,7 @@ mod tests {
             pipeline: vec![],
             mutations: vec![],
             output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+            display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
             count_only: false,
         };
         let g = build_large_triangle_graph(20);
@@ -543,6 +546,7 @@ mod tests {
             pipeline: vec![],
             mutations: vec![],
             output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+            display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
             count_only: false,
         };
         let g = build_large_triangle_graph(20);
@@ -609,6 +613,7 @@ mod tests {
             pipeline: vec![],
             mutations: vec![],
             output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+            display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
             count_only: false,
         };
         let g = build_large_triangle_graph(20);

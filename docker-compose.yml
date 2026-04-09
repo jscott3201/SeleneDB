@@ -15,7 +15,7 @@ services:
       # - SELENE_TEMPORAL_ENABLED=true # enable property versioning
       # - SELENE_MCP_ENABLED=false     # MCP disabled in production by default
       # - SELENE_MEMORY_BUDGET_MB=4096 # memory budget (edge default: 4096)
-    command: ["--dev", "--seed", "--data-dir", "/data"]
+    command: ["--dev", "--data-dir", "/data"]
     restart: unless-stopped
     # Security hardening
     read_only: true

@@ -327,6 +327,7 @@ fn make_index_order_plan(sort_key: &str, descending: bool, limit_n: u64) -> Exec
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     }
 }
@@ -404,6 +405,7 @@ fn index_order_skips_multiple_scans() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = IndexOrderRule;
@@ -433,6 +435,7 @@ fn index_order_skips_no_topk() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = IndexOrderRule;
@@ -472,6 +475,7 @@ fn index_order_skips_multi_term_topk() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = IndexOrderRule;
@@ -510,6 +514,7 @@ fn index_order_skips_inline_props() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = IndexOrderRule;
@@ -575,6 +580,7 @@ fn predicate_reorder_moves_cheap_filter_first() {
         ],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = PredicateReorderRule;
@@ -619,6 +625,7 @@ fn predicate_reorder_no_change_when_already_optimal() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = PredicateReorderRule;
@@ -675,6 +682,7 @@ fn predicate_reorder_non_contiguous_filters_untouched() {
         ],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = PredicateReorderRule;
@@ -712,6 +720,7 @@ fn composite_index_fires_with_two_literal_props() {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = CompositeIndexLookupRule;
@@ -748,6 +757,7 @@ fn composite_index_skips_single_prop() {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = CompositeIndexLookupRule;
@@ -785,6 +795,7 @@ fn composite_index_skips_non_literal_props() {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = CompositeIndexLookupRule;
@@ -820,6 +831,7 @@ fn composite_index_idempotent() {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = CompositeIndexLookupRule;
@@ -855,6 +867,7 @@ fn composite_index_skips_no_label() {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = CompositeIndexLookupRule;
@@ -882,6 +895,7 @@ fn make_range_plan(filters: Vec<PropertyFilter>) -> ExecutionPlan {
         pipeline: vec![],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     }
 }
@@ -1101,6 +1115,7 @@ fn in_list_fires_on_literal_list() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = InListOptimizationRule;
@@ -1157,6 +1172,7 @@ fn in_list_keeps_filter_without_index() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = InListOptimizationRule;
@@ -1207,6 +1223,7 @@ fn in_list_skips_negated() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = InListOptimizationRule;
@@ -1246,6 +1263,7 @@ fn in_list_skips_non_literal_elements() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = InListOptimizationRule;
@@ -1297,6 +1315,7 @@ fn expand_filter_pushes_target_property() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = ExpandFilterPushdownRule;
@@ -1365,6 +1384,7 @@ fn expand_filter_pushes_edge_property() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = ExpandFilterPushdownRule;
@@ -1424,6 +1444,7 @@ fn expand_filter_skips_scan_var() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = ExpandFilterPushdownRule;
@@ -1462,6 +1483,7 @@ fn expand_filter_no_expand_ops() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = ExpandFilterPushdownRule;
@@ -1524,6 +1546,7 @@ fn filter_interleaving_moves_filter_between_ops() {
         ],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = FilterInterleavingRule;
@@ -1593,6 +1616,7 @@ fn filter_interleaving_skips_subquery_filter() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = FilterInterleavingRule;
@@ -1630,6 +1654,7 @@ fn filter_interleaving_skips_single_pattern_op() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = FilterInterleavingRule;
@@ -1689,6 +1714,7 @@ fn filter_interleaving_preserves_pipeline_order_for_late_binding() {
         }],
         mutations: vec![],
         output_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+        display_schema: std::sync::Arc::new(arrow::datatypes::Schema::empty()),
         count_only: false,
     };
     let rule = FilterInterleavingRule;

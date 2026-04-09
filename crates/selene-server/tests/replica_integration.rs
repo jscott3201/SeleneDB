@@ -40,6 +40,7 @@ async fn replica_applies_primary_changes() {
         1,
         selene_core::IStr::new("contains"),
         selene_core::PropertyMap::new(),
+        false,
     );
 
     // Read changelog from primary

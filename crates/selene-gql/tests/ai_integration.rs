@@ -194,13 +194,13 @@ fn vector_search_ranks_by_cosine_similarity() {
 
     let batch = &result.batches[0];
     let id_col = batch
-        .column_by_name("NODEID")
+        .column_by_name("nodeId")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
         .unwrap();
     let score_col = batch
-        .column_by_name("SCORE")
+        .column_by_name("score")
         .unwrap()
         .as_any()
         .downcast_ref::<Float64Array>()
@@ -260,7 +260,7 @@ fn vector_search_uses_hnsw_when_available() {
 
     let batch = &result.batches[0];
     let id_col = batch
-        .column_by_name("NODEID")
+        .column_by_name("nodeId")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -286,7 +286,7 @@ fn memory_nodes_queryable_by_namespace() {
 
     let batch = &result.batches[0];
     let content = batch
-        .column_by_name("CONTENT")
+        .column_by_name("content")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -320,7 +320,7 @@ fn memory_vector_search_ranks_by_similarity() {
 
     let batch = &result.batches[0];
     let id_col = batch
-        .column_by_name("NODEID")
+        .column_by_name("nodeId")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -359,14 +359,14 @@ fn schema_dump_excludes_ai_system_labels() {
         )
         .unwrap();
 
-    let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+    let query = "CALL graph.schemaDump(false, true, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(query, &graph).execute().unwrap();
 
     assert_eq!(result.row_count(), 1);
 
     let batch = &result.batches[0];
     let schema_text = batch
-        .column_by_name("SCHEMA")
+        .column_by_name("schema")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -397,12 +397,12 @@ fn schema_dump_includes_system_labels_when_requested() {
         )
         .unwrap();
 
-    let query = "CALL graph.schemaDump(true) YIELD schema RETURN schema";
+    let query = "CALL graph.schemaDump(true, true, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(query, &graph).execute().unwrap();
 
     let batch = &result.batches[0];
     let schema_text = batch
-        .column_by_name("SCHEMA")
+        .column_by_name("schema")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -432,7 +432,7 @@ fn community_summary_nodes_have_structural_data() {
 
     let batch = &result.batches[0];
     let ldist = batch
-        .column_by_name("LDIST")
+        .column_by_name("ldist")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -441,7 +441,7 @@ fn community_summary_nodes_have_structural_data() {
     assert!(ldist.contains("Sensor:2"), "should contain Sensor:2");
 
     let cnt = batch
-        .column_by_name("CNT")
+        .column_by_name("cnt")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -516,7 +516,7 @@ fn graphrag_local_data_flow_vector_then_bfs() {
 
     let batch = &result.batches[0];
     let seed_id = batch
-        .column_by_name("NODEID")
+        .column_by_name("nodeId")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -537,7 +537,7 @@ fn graphrag_local_data_flow_vector_then_bfs() {
     );
 
     let zone_id = expand_result.batches[0]
-        .column_by_name("ZONEID")
+        .column_by_name("zoneId")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -578,13 +578,13 @@ fn parse_check_validates_schema_derived_query() {
         )
         .unwrap();
 
-    // Step 1: Get schema dump
-    let dump_query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+    // Step 1: Get schema dump (full mode to see property names)
+    let dump_query = "CALL graph.schemaDump(false, false, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(dump_query, &graph).execute().unwrap();
 
     let batch = &result.batches[0];
     let schema_text = batch
-        .column_by_name("SCHEMA")
+        .column_by_name("schema")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -625,7 +625,7 @@ fn memory_config_queryable() {
 
     let batch = &result.batches[0];
     let max_mem = batch
-        .column_by_name("MAX_MEM")
+        .column_by_name("max_mem")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -634,7 +634,7 @@ fn memory_config_queryable() {
     assert_eq!(max_mem, 5);
 
     let policy = batch
-        .column_by_name("POLICY")
+        .column_by_name("policy")
         .unwrap()
         .as_any()
         .downcast_ref::<StringArray>()
@@ -656,7 +656,7 @@ fn cross_feature_memory_and_sensor_counts() {
 
     let batch = &result.batches[0];
     let cnt = batch
-        .column_by_name("CNT")
+        .column_by_name("cnt")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -669,7 +669,7 @@ fn cross_feature_memory_and_sensor_counts() {
 
     let batch2 = &result2.batches[0];
     let sensor_cnt = batch2
-        .column_by_name("CNT")
+        .column_by_name("cnt")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -711,7 +711,7 @@ fn parameters_propagate_through_subquery_call() {
 
     let batch = &result.batches[0];
     let mem_count = batch
-        .column_by_name("MEM_COUNT")
+        .column_by_name("mem_count")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()

@@ -103,10 +103,24 @@ pub(super) async fn enrich_communities_impl(
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
 
+    // Pre-flight: verify embedding model is loaded before starting work
+    let embed_status = selene_gql::runtime::embed::embedding_status();
+    if !embed_status.loaded {
+        let detail = embed_status
+            .error
+            .as_deref()
+            .unwrap_or("model not initialized");
+        return Ok(CallToolResult::success(vec![Content::text(format!(
+            "Error: Embedding model not loaded ({detail}). \
+             Set SELENE_MODEL_PATH or place model files in {} and restart the server.",
+            embed_status.model_path
+        ))]));
+    }
+
     // 1. MATCH all __CommunitySummary nodes
     let query = "MATCH (c:__CommunitySummary) \
                  RETURN id(c) AS node_id, c.label_distribution AS labels, \
-                 c.key_entities AS entities, c.node_count AS count";
+                 c.key_entities AS entities, c.node_count AS total";
     let result = ops::gql::execute_gql(
         &tools.state,
         &auth,
@@ -149,11 +163,11 @@ pub(super) async fn enrich_communities_impl(
 
         let labels = row.get("labels").and_then(|v| v.as_str()).unwrap_or("");
         let entities = row.get("entities").and_then(|v| v.as_str()).unwrap_or("");
-        let count = row.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total = row.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Compose text for embedding
         let text =
-            format!("Community with {count} nodes. Labels: {labels}. Key entities: {entities}.");
+            format!("Community with {total} nodes. Labels: {labels}. Key entities: {entities}.");
 
         // SET embedding via embed() function
         let mut params_map = HashMap::new();
@@ -222,6 +236,14 @@ pub(super) async fn graphrag_search_impl(
         ops::gql::ResultFormat::Json,
     )
     .map_err(op_err)?;
+
+    // Surface embedding errors instead of reporting "0 results"
+    if !result.status_code.starts_with("00") && !result.status_code.starts_with("02") {
+        return Ok(CallToolResult::success(vec![Content::text(format!(
+            "Error: {}",
+            result.message
+        ))]));
+    }
 
     let data = result.data_json.unwrap_or_else(|| "[]".to_string());
     let text = format!(

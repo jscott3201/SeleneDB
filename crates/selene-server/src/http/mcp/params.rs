@@ -5,6 +5,78 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// Accept both `123` (number) and `"123"` (string) for u64 ID fields.
+/// MCP transports may serialize integer IDs as strings depending on the
+/// client implementation.
+fn deserialize_u64_or_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match &v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| D::Error::custom(format!("expected u64, got {v}"))),
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
+        _ => Err(D::Error::custom(format!(
+            "expected number or string, got {v}"
+        ))),
+    }
+}
+
+/// Accept a Vec of u64 IDs where each element may be a number or string.
+fn deserialize_vec_u64_or_string<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| match &item {
+                serde_json::Value::Number(n) => n
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom(format!("expected u64, got {item}"))),
+                serde_json::Value::String(s) => s
+                    .parse::<u64>()
+                    .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
+                _ => Err(D::Error::custom(format!(
+                    "expected number or string, got {item}"
+                ))),
+            })
+            .collect(),
+        _ => Err(D::Error::custom(format!("expected array of IDs, got {v}"))),
+    }
+}
+
+/// Accept both a single string `"sensor"` and an array `["sensor", "temperature"]`
+/// for label fields. MCP clients often pass a single label as a bare string.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::String(s) => Ok(vec![s]),
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| match item {
+                serde_json::Value::String(s) => Ok(s),
+                other => Err(serde::de::Error::custom(format!(
+                    "expected string in labels array, got {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string or array for labels, got {other}"
+        ))),
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn default_true_opt() -> Option<bool> {
     Some(true)
@@ -31,12 +103,14 @@ pub(crate) struct GqlExplainParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct NodeIdParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct NodeEdgesParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Filter by direction: "outgoing", "incoming", or "both" (default).
     #[serde(default)]
@@ -55,6 +129,7 @@ pub(crate) struct NodeEdgesParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct CreateNodeParams {
     /// Labels to assign (e.g., ["sensor", "temperature"]). At least one required.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub(crate) labels: Vec<String>,
     /// Key-value properties (e.g., {"unit": "°F", "threshold": 72.5}).
     #[serde(default)]
@@ -67,6 +142,7 @@ pub(crate) struct CreateNodeParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyNodeParams {
     /// Node ID to modify.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Properties to set or update.
     #[serde(default)]
@@ -96,25 +172,137 @@ pub(crate) struct ListNodesParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct EdgeIdParams {
     /// Numeric edge ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct CreateEdgeParams {
     /// Source node ID (the "from" end).
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) source: u64,
     /// Target node ID (the "to" end).
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) target: u64,
     /// Relationship type (e.g., "contains", "feeds", "isPointOf", "monitors").
     pub(crate) label: String,
     /// Key-value properties for the edge.
     #[serde(default)]
     pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// If true, return existing edge instead of creating a duplicate when an edge
+    /// with the same source, target, and label already exists. Properties on the
+    /// existing edge are updated with any new values provided.
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
+}
+
+/// Single node entry for batch creation.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchNodeEntry {
+    /// Labels to assign.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
+    pub(crate) labels: Vec<String>,
+    /// Key-value properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchCreateNodesParams {
+    /// Array of nodes to create. Each entry has labels and optional properties.
+    pub(crate) nodes: Vec<BatchNodeEntry>,
+}
+
+/// Single edge entry for batch creation.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchEdgeEntry {
+    /// Source node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) source: u64,
+    /// Target node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) target: u64,
+    /// Edge label.
+    pub(crate) label: String,
+    /// Key-value properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// Deduplicate on (source, target, label).
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchCreateEdgesParams {
+    /// Array of edges to create. Each entry has source, target, label, and optional properties.
+    pub(crate) edges: Vec<BatchEdgeEntry>,
+    /// Batch-level upsert default. When true, all edges deduplicate on (source,
+    /// target, label) unless overridden by the per-edge `upsert` flag. Default: false.
+    #[serde(default)]
+    pub(crate) upsert: Option<bool>,
+}
+
+/// A single node-with-edges entry for batch ingest.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct IngestEntry {
+    /// Labels to assign to the created node.
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
+    pub(crate) labels: Vec<String>,
+    /// Key-value properties for the node.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+    /// Edges to create FROM this node TO existing nodes.
+    #[serde(default)]
+    pub(crate) connect_to: Vec<IngestEdge>,
+    /// Edges to create FROM existing nodes TO this node.
+    #[serde(default)]
+    pub(crate) connect_from: Vec<IngestEdge>,
+}
+
+/// An edge reference within an ingest entry.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct IngestEdge {
+    /// Target (or source) node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) node_id: u64,
+    /// Edge label.
+    pub(crate) label: String,
+    /// Optional edge properties.
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct BatchIngestParams {
+    /// Array of nodes to create, each with optional edges to existing nodes.
+    pub(crate) entries: Vec<IngestEntry>,
+}
+
+/// Parameters for bulk-updating node status and linking to a commit.
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct MarkFixedParams {
+    /// Node IDs to mark as fixed.
+    #[serde(deserialize_with = "deserialize_vec_u64_or_string")]
+    pub(crate) node_ids: Vec<u64>,
+    /// Status to set (default: "fixed").
+    #[serde(default = "default_fixed_status")]
+    pub(crate) status: String,
+    /// Optional commit SHA to record.
+    #[serde(default)]
+    pub(crate) commit_sha: Option<String>,
+    /// Optional note or resolution description.
+    #[serde(default)]
+    pub(crate) note: Option<String>,
+}
+
+fn default_fixed_status() -> String {
+    "fixed".to_string()
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ModifyEdgeParams {
     /// Edge ID to modify.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Properties to set or update.
     #[serde(default)]
@@ -213,6 +401,22 @@ pub(crate) struct SchemaLabelParams {
     pub(crate) label: String,
 }
 
+#[derive(Default, Deserialize, JsonSchema)]
+pub(crate) struct SchemaDumpParams {
+    /// Optional label filter. If set, only exports the schema for that specific
+    /// type (returns full detail regardless of compact flag).
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// If true (default), returns a compact summary — type names with property
+    /// counts and edge connectivity. If false, returns full details including
+    /// descriptions and all property definitions.
+    #[serde(default)]
+    pub(crate) compact: Option<bool>,
+    /// If true, include system schemas (__ prefix). Default: false.
+    #[serde(default)]
+    pub(crate) include_system: Option<bool>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ImportPackParams {
     /// Schema pack content in TOML or JSON format. Format is auto-detected.
@@ -261,6 +465,14 @@ pub(crate) struct CreateEdgeSchemaParams {
     /// Restrict target nodes to these labels (empty = any label allowed).
     #[serde(default)]
     pub(crate) target_labels: Vec<String>,
+    /// Minimum outgoing edges of this type per source node. When set, nodes
+    /// with matching source labels are warned at commit time if they have fewer
+    /// than this many outgoing edges of this type.
+    #[serde(default)]
+    pub(crate) min_out_degree: Option<u32>,
+    /// Minimum incoming edges of this type per target node.
+    #[serde(default)]
+    pub(crate) min_in_degree: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -288,6 +500,7 @@ pub(crate) struct SemanticSearchParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct SimilarNodesParams {
     /// Reference node ID to find similar nodes for.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) node_id: u64,
     /// Vector property name to compare (e.g., "embedding").
     pub(crate) property: String,
@@ -450,6 +663,7 @@ pub(crate) struct ResolveParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct RelatedParams {
     /// Numeric node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) id: u64,
     /// Filter to specific edge label(s). Omit for all labels.
     #[serde(default)]
@@ -540,6 +754,7 @@ pub(crate) struct ProposeActionParams {
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ProposalIdParams {
     /// Numeric proposal node ID.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
     pub(crate) proposal_id: u64,
     /// Optional reason for the action.
     #[serde(default)]
@@ -569,4 +784,83 @@ pub(crate) struct ConfigureMemoryParams {
     /// Eviction policy: "clock" (default), "oldest", or "lowest_confidence".
     #[serde(default)]
     pub(crate) eviction_policy: Option<String>,
+}
+
+// ── Principal management params ──────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetPrincipalParams {
+    /// The identity of the principal to retrieve.
+    pub(crate) identity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreatePrincipalParams {
+    /// Unique identity string for the new principal.
+    pub(crate) identity: String,
+    /// Role: admin, service, operator, reader, or device.
+    pub(crate) role: String,
+    /// Optional password. If omitted, the principal has no credential (OAuth-only).
+    #[serde(default)]
+    pub(crate) password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UpdatePrincipalParams {
+    /// Identity of the principal to update.
+    pub(crate) identity: String,
+    /// New role (admin, service, operator, reader, device). Leave unset to keep current.
+    #[serde(default)]
+    pub(crate) role: Option<String>,
+    /// Set to true/false to enable/disable. Leave unset to keep current.
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct DisablePrincipalParams {
+    /// Identity of the principal to disable.
+    pub(crate) identity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RotateCredentialParams {
+    /// Identity of the principal whose credential to rotate.
+    pub(crate) identity: String,
+    /// The new password.
+    pub(crate) new_password: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_node_accepts_array_labels() {
+        let json = serde_json::json!({
+            "labels": ["sensor", "temperature"],
+            "properties": {}
+        });
+        let params: CreateNodeParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.labels, vec!["sensor", "temperature"]);
+    }
+
+    #[test]
+    fn create_node_accepts_single_string_label() {
+        let json = serde_json::json!({
+            "labels": "sensor",
+            "properties": {}
+        });
+        let params: CreateNodeParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.labels, vec!["sensor"]);
+    }
+
+    #[test]
+    fn batch_node_entry_accepts_single_string_label() {
+        let json = serde_json::json!({
+            "labels": "equipment"
+        });
+        let entry: BatchNodeEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.labels, vec!["equipment"]);
+    }
 }

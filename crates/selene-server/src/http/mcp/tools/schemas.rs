@@ -298,8 +298,8 @@ pub(super) async fn create_edge_schema_impl(
         validation_mode: None,
         max_out_degree: None,
         max_in_degree: None,
-        min_out_degree: None,
-        min_in_degree: None,
+        min_out_degree: p.min_out_degree,
+        min_in_degree: p.min_in_degree,
     };
 
     let label = p.label.clone();

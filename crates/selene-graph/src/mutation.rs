@@ -768,11 +768,15 @@ impl<'g> TrackedMutation<'g> {
         // Collect IDs of nodes/edges that were created or modified.
         let mut node_ids: HashSet<NodeId> = HashSet::new();
         let mut edge_ids: HashSet<EdgeId> = HashSet::new();
+        let mut created_node_ids: HashSet<NodeId> = HashSet::new();
 
         for change in &self.changes {
             match change {
-                Change::NodeCreated { node_id }
-                | Change::PropertySet { node_id, .. }
+                Change::NodeCreated { node_id } => {
+                    node_ids.insert(*node_id);
+                    created_node_ids.insert(*node_id);
+                }
+                Change::PropertySet { node_id, .. }
                 | Change::PropertyRemoved { node_id, .. }
                 | Change::LabelAdded { node_id, .. }
                 | Change::LabelRemoved { node_id, .. } => {
@@ -794,6 +798,7 @@ impl<'g> TrackedMutation<'g> {
             match change {
                 Change::NodeDeleted { node_id, .. } => {
                     node_ids.remove(node_id);
+                    created_node_ids.remove(node_id);
                 }
                 Change::EdgeDeleted { edge_id, .. } => {
                     edge_ids.remove(edge_id);
@@ -817,6 +822,33 @@ impl<'g> TrackedMutation<'g> {
             if let Some(edge_ref) = self.graph.get_edge(*eid) {
                 let owned = edge_ref.to_owned_edge();
                 let issues = self.graph.schema.validate_edge(&owned);
+                all_issues.extend(issues);
+            }
+        }
+
+        // Validate minimum edge degree constraints for newly created nodes.
+        // At commit time all edges in the transaction are visible.
+        for nid in &created_node_ids {
+            if let Some(node_ref) = self.graph.get_node(*nid) {
+                let labels: Vec<selene_core::IStr> = node_ref.labels.iter().collect();
+                // Count outgoing edges by label
+                let mut out_by_label = std::collections::HashMap::new();
+                for eid in self.graph.outgoing(*nid) {
+                    if let Some(edge) = self.graph.get_edge(*eid) {
+                        *out_by_label.entry(edge.label).or_insert(0usize) += 1;
+                    }
+                }
+                // Count incoming edges by label
+                let mut in_by_label = std::collections::HashMap::new();
+                for eid in self.graph.incoming(*nid) {
+                    if let Some(edge) = self.graph.get_edge(*eid) {
+                        *in_by_label.entry(edge.label).or_insert(0usize) += 1;
+                    }
+                }
+                let issues =
+                    self.graph
+                        .schema
+                        .check_min_edge_degrees(&labels, &out_by_label, &in_by_label);
                 all_issues.extend(issues);
             }
         }

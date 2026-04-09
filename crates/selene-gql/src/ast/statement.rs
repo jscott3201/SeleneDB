@@ -402,6 +402,13 @@ pub struct WithClause {
 #[derive(Debug, Clone)]
 pub struct Projection {
     pub expr: Expr,
-    /// Optional alias: `expr AS name`.
+    /// Optional alias: `expr AS name`. Uppercased for case-insensitive binding
+    /// resolution per ISO GQL §21.3.
     pub alias: Option<IStr>,
+    /// Original-case text for output column naming. When an explicit `AS alias`
+    /// is present, this is the alias with original casing preserved. When no
+    /// alias is given, this is the raw expression source text (e.g. `"n.name"`).
+    /// Used by the planner to derive display-friendly Arrow schema field names
+    /// while keeping `alias` uppercase for internal binding resolution.
+    pub display_hint: Option<IStr>,
 }

@@ -503,10 +503,13 @@ pub struct ProcedureCall {
 /// A single item in a YIELD clause.
 #[derive(Debug, Clone)]
 pub struct YieldItem {
-    /// Column name from the procedure result.
+    /// Column name from the procedure result (uppercased for binding resolution).
     pub name: IStr,
-    /// Optional alias: YIELD value AS temp.
+    /// Optional alias: YIELD value AS temp (uppercased for binding resolution).
     pub alias: Option<IStr>,
+    /// Original-case text for output column naming. Preserves the user's
+    /// original casing for display in Arrow schema / JSON output.
+    pub display_hint: Option<IStr>,
 }
 
 #[cfg(test)]

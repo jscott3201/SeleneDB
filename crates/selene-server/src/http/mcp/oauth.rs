@@ -304,6 +304,7 @@ pub struct SeleneAuthMetadata {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
+    revocation_endpoint: String,
     registration_endpoint: String,
     scopes_supported: Vec<String>,
     response_types_supported: Vec<String>,
@@ -321,6 +322,7 @@ pub async fn oauth_metadata(State(state): State<Arc<ServerState>>) -> impl IntoR
         issuer: base.clone(),
         authorization_endpoint: format!("{base}/oauth/authorize"),
         token_endpoint: format!("{base}/oauth/token"),
+        revocation_endpoint: format!("{base}/oauth/revoke"),
         registration_endpoint: format!("{base}/oauth/register"),
         scopes_supported: vec![
             "admin".into(),
@@ -432,21 +434,44 @@ pub async fn oauth_register(
         }
     }
 
-    // Validate scope is a recognized role.
+    // Validate scope: OAuth 2.0 (RFC 6749 §3.3) uses space-delimited scope
+    // tokens. Each token must be a recognized role. When multiple roles are
+    // requested, the highest-privilege role is selected (SeleneDB uses
+    // single-role authorization).
     let scope = if req.scope.is_empty() {
-        "reader"
+        "reader".to_owned()
     } else {
-        &req.scope
+        let role_priority = |r: &crate::auth::Role| match r {
+            crate::auth::Role::Admin => 4,
+            crate::auth::Role::Service => 3,
+            crate::auth::Role::Operator => 2,
+            crate::auth::Role::Reader => 1,
+            crate::auth::Role::Device => 0,
+        };
+        let mut best: Option<crate::auth::Role> = None;
+        for token in req.scope.split_whitespace() {
+            match token.parse::<crate::auth::Role>() {
+                Ok(role) => {
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| role_priority(&role) > role_priority(b))
+                    {
+                        best = Some(role);
+                    }
+                }
+                Err(_) => {
+                    return oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_scope",
+                        &format!(
+                            "scope must be a valid role (admin/service/operator/reader/device), got '{token}'"
+                        ),
+                    );
+                }
+            }
+        }
+        best.unwrap_or(crate::auth::Role::Reader).to_string()
     };
-    if scope.parse::<crate::auth::Role>().is_err() {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_scope",
-            &format!(
-                "scope must be a valid role (admin/service/operator/reader/device), got '{scope}'"
-            ),
-        );
-    }
 
     let client_id = format!("mcp-{}", uuid_v4());
     let client_secret = generate_secret();
@@ -478,7 +503,7 @@ pub async fn oauth_register(
     // Build GQL INSERT for the principal node.
     let identity = gql_escape(&client_id);
     let hash_escaped = gql_escape(&credential_hash);
-    let role = gql_escape(scope);
+    let role = gql_escape(&scope);
     let name = gql_escape(&req.client_name);
     let uri = gql_escape(&req.redirect_uris[0]);
 
@@ -876,6 +901,51 @@ pub async fn oauth_token(
     }
 }
 
+// -- Token revocation (RFC 7009) -------------------------------------------
+
+/// `POST /oauth/revoke` — revoke an access token.
+///
+/// Accepts `application/x-www-form-urlencoded` with a `token` field containing
+/// the JWT access token to revoke. Per RFC 7009, this endpoint always returns
+/// 200 OK regardless of whether the token was valid or already revoked.
+pub async fn oauth_revoke(
+    State(state): State<Arc<ServerState>>,
+    Form(req): Form<RevokeRequest>,
+) -> Response {
+    let Some(token_svc) = get_token_service(&state) else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "OAuth token service is not initialized",
+        );
+    };
+
+    if req.token.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token is required",
+        );
+    }
+
+    // Per RFC 7009 §2.1: the server responds with 200 OK even if the token
+    // is invalid, expired, or already revoked — to prevent token scanning.
+    if let Err(e) = token_svc.revoke_token(&req.token) {
+        tracing::debug!("revoke request for invalid token: {e}");
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "revoked"})),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevokeRequest {
+    token: String,
+}
+
 // -- Grant handlers --------------------------------------------------------
 
 fn handle_auth_code_grant(
@@ -1059,27 +1129,38 @@ fn handle_client_credentials_grant(
     // Validate requested scope against the principal's actual role. If a scope
     // is requested, it must match the principal's role exactly; privilege
     // escalation via scope parameter is not allowed.
+    // OAuth 2.0 (RFC 6749 §3.3) scope is space-delimited. Accept if any
+    // requested scope matches the principal's authorized role.
     let scope_str = if req.scope.is_empty() {
         auth.role.as_str().to_string()
     } else {
-        let requested: Result<crate::auth::Role, _> = req.scope.parse();
-        match requested {
-            Ok(role) if role == auth.role => role.as_str().to_string(),
-            Ok(_) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_scope",
-                    "requested scope does not match the client's authorized role",
-                );
-            }
-            Err(_) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_scope",
-                    "scope must be a valid role (admin/service/operator/reader/device)",
-                );
+        let mut matched = false;
+        for token in req.scope.split_whitespace() {
+            match token.parse::<crate::auth::Role>() {
+                Ok(role) if role == auth.role => {
+                    matched = true;
+                    break;
+                }
+                Ok(_) => {} // valid role but doesn't match — skip
+                Err(_) => {
+                    return oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_scope",
+                        &format!(
+                            "scope must be a valid role (admin/service/operator/reader/device), got '{token}'"
+                        ),
+                    );
+                }
             }
         }
+        if !matched {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "requested scope does not match the client's authorized role",
+            );
+        }
+        auth.role.as_str().to_string()
     };
 
     match token_svc.issue(&req.client_id, auth.role.as_str()) {

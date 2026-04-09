@@ -539,7 +539,7 @@ fn schema_default_returned_when_property_missing() {
 
     let batch = &result.batches[0];
     let fw_col = batch
-        .column_by_name("FW")
+        .column_by_name("fw")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -613,7 +613,7 @@ fn explicit_property_wins_over_schema_default() {
 
     let batch = &result.batches[0];
     let fw_col = batch
-        .column_by_name("FW")
+        .column_by_name("fw")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()

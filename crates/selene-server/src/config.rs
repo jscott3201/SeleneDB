@@ -180,7 +180,7 @@ pub struct McpConfig {
     #[serde(default)]
     pub public_url: Option<String>,
 
-    /// MCP session idle timeout in seconds (default: 300 = 5 minutes).
+    /// MCP session idle timeout in seconds (default: 3600 = 1 hour).
     /// Sessions with no activity beyond this threshold are cleaned up.
     #[serde(default = "default_mcp_session_timeout")]
     pub session_timeout_secs: u64,
@@ -197,7 +197,7 @@ fn default_refresh_ttl() -> u64 {
     604_800
 }
 fn default_mcp_session_timeout() -> u64 {
-    300
+    3600
 }
 fn default_mcp_max_sessions() -> usize {
     32
@@ -342,6 +342,10 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
+    /// Defer model loading until first embed() call (default: false).
+    /// When false, the model is loaded eagerly at server startup.
+    #[serde(default)]
+    pub lazy_load: bool,
 }
 
 impl Default for VectorConfig {
@@ -356,6 +360,7 @@ impl Default for VectorConfig {
             hnsw_m0: None,
             hnsw_ef_construction: None,
             hnsw_ef_search: None,
+            lazy_load: false,
         }
     }
 }

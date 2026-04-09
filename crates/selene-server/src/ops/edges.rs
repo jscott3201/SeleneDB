@@ -49,10 +49,48 @@ pub fn create_edge(
     target: u64,
     label: IStr,
     props: PropertyMap,
+    upsert: bool,
 ) -> Result<EdgeDto, OpError> {
     let auth = super::refresh_scope_if_stale(state, auth);
     require_in_scope(&auth, NodeId(source))?;
     require_in_scope(&auth, NodeId(target))?;
+
+    if upsert {
+        // Check for existing edge with same (source, target, label)
+        let existing: Option<EdgeId> = state.graph.read(|g| {
+            g.outgoing(NodeId(source))
+                .iter()
+                .find(|&&eid| {
+                    g.get_edge(eid)
+                        .is_some_and(|e| e.label == label && e.target == NodeId(target))
+                })
+                .copied()
+        });
+
+        if let Some(edge_id) = existing {
+            // Update properties on existing edge
+            if !props.is_empty() {
+                let set_props: Vec<(IStr, Value)> =
+                    props.iter().map(|(k, v)| (*k, v.clone())).collect();
+                let ((), changes) = state
+                    .graph
+                    .write(|m| {
+                        for (key, value) in set_props {
+                            m.set_edge_property(edge_id, key, value)?;
+                        }
+                        Ok(())
+                    })
+                    .map_err(graph_err)?;
+                if !changes.is_empty() {
+                    persist_or_die(state, &changes);
+                }
+            }
+            return state
+                .graph
+                .read(|g| g.get_edge(edge_id).map(edge_to_dto))
+                .ok_or(OpError::Internal("edge disappeared after upsert".into()));
+        }
+    }
 
     let (edge_id, changes) = state
         .graph

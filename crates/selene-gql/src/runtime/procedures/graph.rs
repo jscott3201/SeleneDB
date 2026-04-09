@@ -102,7 +102,7 @@ impl Procedure for GraphNodeCount {
         ProcedureSignature {
             params: vec![],
             yields: vec![YieldColumn {
-                name: "count",
+                name: "total",
                 typ: GqlType::Int,
             }],
         }
@@ -115,7 +115,7 @@ impl Procedure for GraphNodeCount {
         _scope: Option<&roaring::RoaringBitmap>,
     ) -> Result<Vec<ProcedureRow>, GqlError> {
         Ok(vec![smallvec::smallvec![(
-            selene_core::IStr::new("count"),
+            selene_core::IStr::new("total"),
             GqlValue::Int(graph.node_count() as i64)
         )]])
     }
@@ -130,7 +130,7 @@ impl Procedure for GraphEdgeCount {
         ProcedureSignature {
             params: vec![],
             yields: vec![YieldColumn {
-                name: "count",
+                name: "total",
                 typ: GqlType::Int,
             }],
         }
@@ -143,7 +143,7 @@ impl Procedure for GraphEdgeCount {
         _scope: Option<&roaring::RoaringBitmap>,
     ) -> Result<Vec<ProcedureRow>, GqlError> {
         Ok(vec![smallvec![(
-            IStr::new("count"),
+            IStr::new("total"),
             GqlValue::Int(graph.edge_count() as i64)
         )]])
     }
@@ -679,6 +679,419 @@ impl PropDiscovery {
     }
 }
 
+// ── graph.diff ──────────────────────────────────────────────────────────────
+
+/// `CALL graph.diff($sinceNanos) YIELD entity_type, change_type, label, total`
+///
+/// Reports what changed since a given timestamp (nanos since epoch).
+/// Scans all nodes and edges, comparing created_at/updated_at against the
+/// threshold. Returns summary rows grouped by entity type, change type, and
+/// label. Useful for session continuity: "what happened since my last session?"
+pub struct GraphDiff;
+
+impl Procedure for GraphDiff {
+    fn name(&self) -> &'static str {
+        "graph.diff"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![ProcedureParam {
+                name: "sinceNanos",
+                typ: GqlType::Int,
+            }],
+            yields: vec![
+                YieldColumn {
+                    name: "entity_type",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "change_type",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "label",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "total",
+                    typ: GqlType::Int,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        args: &[GqlValue],
+        graph: &SeleneGraph,
+        _ht: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        use std::collections::HashMap;
+
+        if args.is_empty() {
+            return Err(GqlError::InvalidArgument {
+                message: "graph.diff requires 1 argument: sinceNanos (timestamp in nanoseconds)"
+                    .into(),
+            });
+        }
+        let since = args[0].as_int()?;
+
+        let entity_type_key = IStr::new("entity_type");
+        let change_type_key = IStr::new("change_type");
+        let label_key = IStr::new("label");
+        let count_key = IStr::new("total");
+
+        // Count node changes by (change_type, first_label)
+        let mut node_counts: HashMap<(&str, String), i64> = HashMap::new();
+        for node_id in graph.all_node_ids() {
+            if let Some(node) = graph.get_node(node_id) {
+                let first_label = node
+                    .labels
+                    .iter()
+                    .next()
+                    .map_or_else(|| "(unlabeled)".to_string(), |l| l.as_str().to_string());
+                if node.created_at >= since {
+                    *node_counts.entry(("created", first_label)).or_insert(0) += 1;
+                } else if node.updated_at >= since {
+                    *node_counts.entry(("modified", first_label)).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Count edge changes by label (edges only have created_at)
+        let mut edge_counts: HashMap<String, i64> = HashMap::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id)
+                && edge.created_at >= since
+            {
+                *edge_counts
+                    .entry(edge.label.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        // Build result rows sorted by count descending
+        let mut rows = Vec::new();
+
+        let mut node_entries: Vec<_> = node_counts.into_iter().collect();
+        node_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for ((change, label), count) in node_entries {
+            rows.push(smallvec::smallvec![
+                (entity_type_key, GqlValue::String("node".into())),
+                (change_type_key, GqlValue::String(change.into())),
+                (label_key, GqlValue::String(label.into())),
+                (count_key, GqlValue::Int(count)),
+            ]);
+        }
+
+        let mut edge_entries: Vec<_> = edge_counts.into_iter().collect();
+        edge_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (label, count) in edge_entries {
+            rows.push(smallvec::smallvec![
+                (entity_type_key, GqlValue::String("edge".into())),
+                (change_type_key, GqlValue::String("created".into())),
+                (label_key, GqlValue::String(label.into())),
+                (count_key, GqlValue::Int(count)),
+            ]);
+        }
+
+        Ok(rows)
+    }
+}
+
+// ── graph.validate ──────────────────────────────────────────────────────────
+
+/// `CALL graph.validate() YIELD check, status, total, details`
+///
+/// Validates structural integrity of the graph. Checks:
+/// - Dangling edges: edges whose source or target node does not exist
+/// - Duplicate edges: multiple edges with same (source, target, label)
+/// - Orphaned nodes: nodes with zero edges (excluding __ system labels)
+pub struct GraphValidate;
+
+impl Procedure for GraphValidate {
+    fn name(&self) -> &'static str {
+        "graph.validate"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![],
+            yields: vec![
+                YieldColumn {
+                    name: "check",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "status",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "total",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "details",
+                    typ: GqlType::String,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        _args: &[GqlValue],
+        graph: &SeleneGraph,
+        _ht: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        use std::collections::HashMap;
+        let check_key = IStr::new("check");
+        let status_key = IStr::new("status");
+        let count_key = IStr::new("total");
+        let details_key = IStr::new("details");
+
+        let mut rows = Vec::new();
+
+        // Check 1: Dangling edges (source or target node missing)
+        let mut dangling = 0i64;
+        let mut dangling_ids = Vec::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                let src_ok = graph.get_node(edge.source).is_some();
+                let tgt_ok = graph.get_node(edge.target).is_some();
+                if !src_ok || !tgt_ok {
+                    dangling += 1;
+                    if dangling_ids.len() < 10 {
+                        dangling_ids.push(edge_id.0.to_string());
+                    }
+                }
+            }
+        }
+        let dangling_detail = if dangling_ids.is_empty() {
+            String::new()
+        } else {
+            format!("edge_ids: [{}]", dangling_ids.join(", "))
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("dangling_edges".into())),
+            (
+                status_key,
+                GqlValue::String(if dangling == 0 { "pass" } else { "fail" }.into())
+            ),
+            (count_key, GqlValue::Int(dangling)),
+            (details_key, GqlValue::String(dangling_detail.into())),
+        ]);
+
+        // Check 2: Duplicate edges (same source, target, label)
+        let mut edge_keys: HashMap<(u64, u64, IStr), i64> = HashMap::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                *edge_keys
+                    .entry((edge.source.0, edge.target.0, edge.label))
+                    .or_insert(0) += 1;
+            }
+        }
+        let duplicates: i64 = edge_keys.values().filter(|&&c| c > 1).map(|c| c - 1).sum();
+        let dup_detail = if duplicates == 0 {
+            String::new()
+        } else {
+            let examples: Vec<String> = edge_keys
+                .iter()
+                .filter(|&(_, &c)| c > 1)
+                .take(5)
+                .map(|((s, t, l), c)| format!("({s})-[:{l}]->({t}) x{c}"))
+                .collect();
+            examples.join(", ")
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("duplicate_edges".into())),
+            (
+                status_key,
+                GqlValue::String(if duplicates == 0 { "pass" } else { "warn" }.into())
+            ),
+            (count_key, GqlValue::Int(duplicates)),
+            (details_key, GqlValue::String(dup_detail.into())),
+        ]);
+
+        // Check 3: Orphaned nodes (zero edges, excluding system labels)
+        let mut orphans = 0i64;
+        let mut orphan_examples = Vec::new();
+        for node_id in graph.all_node_ids() {
+            if let Some(node) = graph.get_node(node_id) {
+                // Skip system labels (__ prefix)
+                if node.labels.iter().any(|l| l.as_str().starts_with("__")) {
+                    continue;
+                }
+                let out_count = graph.outgoing(node_id).len();
+                let in_count = graph.incoming(node_id).len();
+                if out_count == 0 && in_count == 0 {
+                    orphans += 1;
+                    if orphan_examples.len() < 10 {
+                        let name = node
+                            .properties
+                            .get(IStr::new("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        orphan_examples.push(format!("{}:{}", node_id.0, name));
+                    }
+                }
+            }
+        }
+        let orphan_detail = if orphan_examples.is_empty() {
+            String::new()
+        } else {
+            orphan_examples.join(", ")
+        };
+        rows.push(smallvec::smallvec![
+            (check_key, GqlValue::String("orphaned_nodes".into())),
+            (
+                status_key,
+                GqlValue::String(if orphans == 0 { "pass" } else { "info" }.into())
+            ),
+            (count_key, GqlValue::Int(orphans)),
+            (details_key, GqlValue::String(orphan_detail.into())),
+        ]);
+
+        Ok(rows)
+    }
+}
+
+/// `CALL graph.repair() YIELD action, detail, gql`
+///
+/// Generates repair actions for structural issues found in the graph:
+/// - **dedup_edge**: removes duplicate edges (same source, target, label),
+///   keeping the lowest edge ID
+/// - **delete_dangling_edge**: removes edges whose source or target node
+///   is missing
+///
+/// Returns one row per repair action with a ready-to-execute GQL mutation
+/// in the `gql` column. Use as a dry-run by reading the output, or pipe
+/// the `gql` values through the mutation batcher.
+pub struct GraphRepair;
+
+impl Procedure for GraphRepair {
+    fn name(&self) -> &'static str {
+        "graph.repair"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![],
+            yields: vec![
+                YieldColumn {
+                    name: "action",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "detail",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "gql",
+                    typ: GqlType::String,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        _args: &[GqlValue],
+        graph: &SeleneGraph,
+        _ht: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        use std::collections::HashMap;
+        let action_key = IStr::new("action");
+        let detail_key = IStr::new("detail");
+        let gql_key = IStr::new("gql");
+
+        let mut rows = Vec::new();
+
+        // Repair 1: Delete dangling edges
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                let src_ok = graph.get_node(edge.source).is_some();
+                let tgt_ok = graph.get_node(edge.target).is_some();
+                if !src_ok || !tgt_ok {
+                    rows.push(smallvec::smallvec![
+                        (action_key, GqlValue::String("delete_dangling_edge".into())),
+                        (
+                            detail_key,
+                            GqlValue::String(
+                                format!(
+                                    "edge {} ({})-[:{}]->({}): {} missing",
+                                    edge_id.0,
+                                    edge.source.0,
+                                    edge.label,
+                                    edge.target.0,
+                                    if !src_ok && !tgt_ok {
+                                        "source and target"
+                                    } else if !src_ok {
+                                        "source"
+                                    } else {
+                                        "target"
+                                    }
+                                )
+                                .into()
+                            )
+                        ),
+                        (
+                            gql_key,
+                            GqlValue::String(
+                                format!("MATCH ()-[r]->() WHERE id(r) = {} DELETE r", edge_id.0)
+                                    .into()
+                            )
+                        ),
+                    ]);
+                }
+            }
+        }
+
+        // Repair 2: Deduplicate edges (keep lowest ID per (source, target, label))
+        let mut edge_groups: HashMap<(u64, u64, IStr), Vec<u64>> = HashMap::new();
+        for edge_id in graph.all_edge_ids() {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                edge_groups
+                    .entry((edge.source.0, edge.target.0, edge.label))
+                    .or_default()
+                    .push(edge_id.0);
+            }
+        }
+        for ((src, tgt, label), mut ids) in edge_groups {
+            if ids.len() > 1 {
+                ids.sort_unstable();
+                let keep = ids[0];
+                for &remove in &ids[1..] {
+                    rows.push(smallvec::smallvec![
+                        (action_key, GqlValue::String("dedup_edge".into())),
+                        (
+                            detail_key,
+                            GqlValue::String(
+                                format!(
+                                    "({src})-[:{label}]->({tgt}): keep {keep}, remove {remove}"
+                                )
+                                .into()
+                            )
+                        ),
+                        (
+                            gql_key,
+                            GqlValue::String(
+                                format!("MATCH ()-[r]->() WHERE id(r) = {remove} DELETE r").into()
+                            )
+                        ),
+                    ]);
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,5 +1393,68 @@ mod tests {
         assert_eq!(GraphSchema.name(), "graph.schema");
         assert_eq!(GraphConstraints.name(), "graph.constraints");
         assert_eq!(GraphDiscoverSchema.name(), "graph.discoverSchema");
+        assert_eq!(GraphValidate.name(), "graph.validate");
+        assert_eq!(GraphRepair.name(), "graph.repair");
+        assert_eq!(GraphDiff.name(), "graph.diff");
+    }
+
+    #[test]
+    fn repair_clean_graph_returns_no_actions() {
+        let g = populated_graph();
+        let rows = GraphRepair.execute(&[], &g, None, None).unwrap();
+        assert!(
+            rows.is_empty(),
+            "clean graph should need no repairs, got {} actions",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn repair_detects_duplicate_edges() {
+        let mut g = SeleneGraph::new();
+        let mut m = g.mutate();
+        m.create_node(LabelSet::from_strs(&["a"]), PropertyMap::default())
+            .unwrap();
+        m.create_node(LabelSet::from_strs(&["b"]), PropertyMap::default())
+            .unwrap();
+        // Create two edges with same (source, target, label)
+        m.create_edge(
+            NodeId(1),
+            IStr::new("links"),
+            NodeId(2),
+            PropertyMap::default(),
+        )
+        .unwrap();
+        m.create_edge(
+            NodeId(1),
+            IStr::new("links"),
+            NodeId(2),
+            PropertyMap::default(),
+        )
+        .unwrap();
+        m.commit(0).unwrap();
+
+        let rows = GraphRepair.execute(&[], &g, None, None).unwrap();
+        assert_eq!(rows.len(), 1, "should detect one duplicate to remove");
+        let action = rows[0]
+            .iter()
+            .find(|(k, _)| k.as_str() == "action")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(action, GqlValue::String("dedup_edge".into()));
+        // Verify the GQL column contains a DELETE statement
+        let gql = rows[0]
+            .iter()
+            .find(|(k, _)| k.as_str() == "gql")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        if let GqlValue::String(s) = gql {
+            assert!(
+                s.contains("DELETE r"),
+                "gql should contain DELETE statement"
+            );
+        } else {
+            panic!("gql column should be a string");
+        }
     }
 }

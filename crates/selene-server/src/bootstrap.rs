@@ -447,7 +447,20 @@ fn init_vault(
                     key_source,
                     salt,
                 ) {
-                    Ok(handle) => (Some(Arc::new(handle)), Some(Arc::new(master_key))),
+                    Ok((handle, admin_password)) => {
+                        if let Some(password) = admin_password {
+                            tracing::warn!(
+                                "\n\
+                                ╔══════════════════════════════════════════════════════╗\n\
+                                ║  FIRST-RUN ADMIN CREDENTIAL                         ║\n\
+                                ║  Identity: admin                                    ║\n\
+                                ║  Password: {password:<40} ║\n\
+                                ║  Change this credential immediately.                ║\n\
+                                ╚══════════════════════════════════════════════════════╝"
+                            );
+                        }
+                        (Some(Arc::new(handle)), Some(Arc::new(master_key)))
+                    }
                     Err(e) => {
                         tracing::warn!("failed to open vault: {e} -- secure graph unavailable");
                         (None, None)
@@ -726,6 +739,7 @@ pub async fn bootstrap(
 
     // Register OAuth token service (always registered when MCP is enabled)
     if config.mcp.enabled {
+        // Priority: 1) explicit config, 2) vault-persisted key, 3) ephemeral random
         let signing_key_bytes = config
             .mcp
             .signing_key
@@ -736,21 +750,33 @@ pub async fn bootstrap(
                     Ok(bytes) if bytes.len() >= 32 => Some(bytes),
                     Ok(bytes) => {
                         tracing::error!(
-                            "signing_key must be at least 32 bytes ({} provided); generating ephemeral key",
+                            "signing_key must be at least 32 bytes ({} provided)",
                             bytes.len()
                         );
                         None
                     }
                     Err(e) => {
-                        tracing::error!("invalid base64 in [mcp] signing_key: {e}; generating ephemeral key");
+                        tracing::error!("invalid base64 in [mcp] signing_key: {e}");
                         None
                     }
                 }
             })
+            .or_else(|| {
+                // Try loading from (or generating into) the vault
+                services
+                    .get::<crate::vault::VaultService>()
+                    .and_then(|vs| match vs.handle.resolve_signing_key(&vs.master_key) {
+                        Ok(key) => Some(key),
+                        Err(e) => {
+                            tracing::warn!("failed to resolve signing key from vault: {e}");
+                            None
+                        }
+                    })
+            })
             .unwrap_or_else(|| {
                 if !config.dev_mode {
                     tracing::warn!(
-                        "no [mcp] signing_key configured; JWT tokens will not survive restarts"
+                        "no signing key configured and vault unavailable; JWT tokens will not survive restarts"
                     );
                 }
                 use rand::RngExt;
@@ -764,6 +790,15 @@ pub async fn bootstrap(
             std::time::Duration::from_secs(config.mcp.access_token_ttl_secs),
             std::time::Duration::from_secs(config.mcp.refresh_token_ttl_secs),
         ));
+
+        // Restore deny list from vault (revoked tokens survive restarts)
+        if let Some(vs) = services.get::<crate::vault::VaultService>() {
+            let deny_entries = vs.handle.load_deny_list();
+            if !deny_entries.is_empty() {
+                oauth_svc.load_deny_list(deny_entries);
+            }
+        }
+
         services.register(crate::http::mcp::oauth::OAuthService::new(oauth_svc));
         services.register(crate::http::mcp::oauth::AuthCodeStore::new());
     }

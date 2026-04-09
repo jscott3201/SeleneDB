@@ -32,7 +32,7 @@ rustls-pki-types.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt", "io"] }
 tokio-stream.workspace = true
 futures.workspace = true
 
@@ -122,6 +122,8 @@ selene-rdf.workspace = true
 [features]
 default = []
 dev-tls = ["dep:rcgen"]
+cuda = ["selene-gql/cuda"]
+metal = ["selene-gql/metal"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["tls"] }

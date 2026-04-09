@@ -2,6 +2,7 @@
 
 mod ai;
 mod memory;
+mod principals;
 mod proposals;
 mod schemas;
 mod traces;
@@ -372,9 +373,12 @@ impl SeleneTools {
             ops::json_props_with_edge_schema(p.properties, &self.state, label).map_err(op_err)?;
         let source = p.source;
         let target = p.target;
+        let upsert = p.upsert.unwrap_or(false);
         let st = Arc::clone(&self.state);
         let edge = self
-            .submit_mut(move || ops::edges::create_edge(&st, &auth, source, target, label, props))
+            .submit_mut(move || {
+                ops::edges::create_edge(&st, &auth, source, target, label, props, upsert)
+            })
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format_json(
             &edge,
@@ -443,6 +447,236 @@ impl SeleneTools {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Deleted edge {edge_id}"
+        ))]))
+    }
+
+    #[tool(
+        name = "batch_create_nodes",
+        description = "Create multiple nodes in a single call. Each entry specifies labels and optional properties. Returns array of created node IDs. Much faster than individual create_node calls for bulk operations.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_create_nodes(
+        &self,
+        params: Parameters<BatchCreateNodesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.nodes;
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label_strs: Vec<&str> = entry.labels.iter().map(|s| s.as_str()).collect();
+                    let labels = selene_core::LabelSet::from_strs(&label_strs);
+                    let schema = st.graph.read(|g| {
+                        let label = entry.labels.first().map_or("", |s| s.as_str());
+                        g.schema().node_schema(label).cloned()
+                    });
+                    let props = ops::json_props_with_schema(entry.properties, schema.as_ref())
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let node = ops::nodes::create_node(&st, &auth, labels, props, None)?;
+                    created_ids.push(node.id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
+        name = "batch_create_edges",
+        description = "Create multiple edges in a single call. Each entry specifies source, target, label, and optional properties. Supports per-edge upsert flag. Returns array of created/matched edge IDs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_create_edges(
+        &self,
+        params: Parameters<BatchCreateEdgesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.edges;
+        let batch_upsert = params.0.upsert.unwrap_or(false);
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label = selene_core::IStr::new(&entry.label);
+                    let props = ops::json_props_with_edge_schema(entry.properties, &st, label)
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let upsert = entry.upsert.unwrap_or(batch_upsert);
+                    let edge = ops::edges::create_edge(
+                        &st,
+                        &auth,
+                        entry.source,
+                        entry.target,
+                        label,
+                        props,
+                        upsert,
+                    )?;
+                    created_ids.push(edge.id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
+        name = "batch_ingest",
+        description = "Create multiple nodes with edges in a single call. Each entry specifies labels, properties, and edges to connect to/from existing nodes. Returns created node IDs. Use for bulk-ingesting findings, concerns, or any connected entities.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn batch_ingest(
+        &self,
+        params: Parameters<BatchIngestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let entries = params.0.entries;
+        let st = Arc::clone(&self.state);
+        let ids: Vec<u64> = self
+            .submit_mut(move || {
+                let mut created_ids = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let label_strs: Vec<&str> = entry.labels.iter().map(|s| s.as_str()).collect();
+                    let labels = selene_core::LabelSet::from_strs(&label_strs);
+                    let schema = st.graph.read(|g| {
+                        let label = entry.labels.first().map_or("", |s| s.as_str());
+                        g.schema().node_schema(label).cloned()
+                    });
+                    let props = ops::json_props_with_schema(entry.properties, schema.as_ref())
+                        .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                    let node = ops::nodes::create_node(&st, &auth, labels, props, None)?;
+                    let node_id = node.id;
+
+                    for edge in &entry.connect_to {
+                        let label = selene_core::IStr::new(&edge.label);
+                        let props =
+                            ops::json_props_with_edge_schema(edge.properties.clone(), &st, label)
+                                .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                        ops::edges::create_edge(
+                            &st,
+                            &auth,
+                            node_id,
+                            edge.node_id,
+                            label,
+                            props,
+                            false,
+                        )?;
+                    }
+
+                    for edge in &entry.connect_from {
+                        let label = selene_core::IStr::new(&edge.label);
+                        let props =
+                            ops::json_props_with_edge_schema(edge.properties.clone(), &st, label)
+                                .map_err(|e| ops::OpError::Internal(e.to_string()))?;
+                        ops::edges::create_edge(
+                            &st,
+                            &auth,
+                            edge.node_id,
+                            node_id,
+                            label,
+                            props,
+                            false,
+                        )?;
+                    }
+
+                    created_ids.push(node_id);
+                }
+                Ok(created_ids)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"created\":{},\"ids\":{:?}}}",
+            ids.len(),
+            ids
+        ))]))
+    }
+
+    #[tool(
+        name = "mark_fixed",
+        description = "Bulk-update node status to 'fixed' (or custom status) and optionally link to a commit SHA. Use for resolving findings, security concerns, or work items after a fix is applied.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn mark_fixed(
+        &self,
+        params: Parameters<MarkFixedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        reject_replica(&self.state)?;
+        let p = params.0;
+        let st = Arc::clone(&self.state);
+        let count: usize = self
+            .submit_mut(move || {
+                let mut updated = 0usize;
+                for node_id in &p.node_ids {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "status".to_string(),
+                        serde_json::Value::String(p.status.clone()),
+                    );
+                    if let Some(sha) = &p.commit_sha {
+                        props.insert(
+                            "fixed_by_commit".to_string(),
+                            serde_json::Value::String(sha.clone()),
+                        );
+                    }
+                    if let Some(note) = &p.note {
+                        props.insert(
+                            "resolution_note".to_string(),
+                            serde_json::Value::String(note.clone()),
+                        );
+                    }
+                    let set_props: Vec<(selene_core::IStr, selene_core::Value)> = props
+                        .into_iter()
+                        .map(|(k, v)| (selene_core::IStr::new(&k), json_to_value(v)))
+                        .collect();
+                    ops::nodes::modify_node(
+                        &st,
+                        &auth,
+                        *node_id,
+                        set_props,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )?;
+                    updated += 1;
+                }
+                Ok(updated)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{{\"updated\":{count}}}",
         ))]))
     }
 
@@ -722,11 +956,19 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
+        let embed = selene_gql::runtime::embed::embedding_status();
         Ok(structured_result(serde_json::json!({
             "node_count": stats.node_count,
             "edge_count": stats.edge_count,
             "node_labels": stats.node_labels,
             "edge_labels": stats.edge_labels,
+            "embedding": {
+                "loaded": embed.loaded,
+                "model_id": embed.model_id,
+                "dimensions": embed.dimensions,
+                "model_path": embed.model_path,
+                "error": embed.error,
+            },
         })))
     }
 
@@ -1435,14 +1677,32 @@ impl SeleneTools {
             open_world_hint = false
         )
     )]
-    async fn schema_dump(&self) -> Result<CallToolResult, McpError> {
+    async fn schema_dump(
+        &self,
+        params: Parameters<SchemaDumpParams>,
+    ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
-        let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+        let p = params.0;
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert(
+            "includeSystem".into(),
+            Value::Bool(p.include_system.unwrap_or(false)),
+        );
+        gql_params.insert("compact".into(), Value::Bool(p.compact.unwrap_or(true)));
+        if let Some(label) = &p.label {
+            gql_params.insert("label".into(), Value::from(label.as_str()));
+        } else {
+            gql_params.insert("label".into(), Value::Null);
+        }
+
+        let query =
+            "CALL graph.schemaDump($includeSystem, $compact, $label) YIELD schema RETURN schema";
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
             query,
-            None,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
@@ -1751,6 +2011,120 @@ impl SeleneTools {
         params: Parameters<ProposalIdParams>,
     ) -> Result<CallToolResult, McpError> {
         proposals::execute_proposal_impl(self, params.0).await
+    }
+
+    // ── Principal Management ────────────────────────────────────────
+
+    #[tool(
+        name = "list_principals",
+        description = "List all principals in the secure vault. \
+        Returns identity, role, enabled status, and whether a credential is set. \
+        Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_principals(&self) -> Result<CallToolResult, McpError> {
+        principals::list_principals_impl(self).await
+    }
+
+    #[tool(
+        name = "get_principal",
+        description = "Get a single principal by identity. \
+        Returns identity, role, enabled status, and whether a credential is set. \
+        Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_principal(
+        &self,
+        params: Parameters<GetPrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::get_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "create_principal",
+        description = "Create a new principal with the given identity, role, and optional password. \
+        Roles: admin, service, operator, reader, device. \
+        If no password is provided, the principal can only authenticate via OAuth. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_principal(
+        &self,
+        params: Parameters<CreatePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::create_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "update_principal",
+        description = "Update a principal's role and/or enabled status. \
+        Only specified fields are changed; omitted fields keep their current value. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_principal(
+        &self,
+        params: Parameters<UpdatePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::update_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "disable_principal",
+        description = "Disable a principal (set enabled = false). \
+        The principal's node and credentials are preserved but authentication will fail. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn disable_principal(
+        &self,
+        params: Parameters<DisablePrincipalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::disable_principal_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "rotate_credential",
+        description = "Rotate a principal's credential (set a new password). \
+        The old credential is immediately invalidated. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rotate_credential(
+        &self,
+        params: Parameters<RotateCredentialParams>,
+    ) -> Result<CallToolResult, McpError> {
+        principals::rotate_credential_impl(self, params.0).await
     }
 }
 

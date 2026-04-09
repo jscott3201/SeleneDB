@@ -212,6 +212,7 @@ async fn create_and_get_edge() {
         2,
         IStr::new("feeds"),
         props(&[("medium", Value::String(SmolStr::new("air")))]),
+        false,
     )
     .unwrap();
 
@@ -237,6 +238,7 @@ async fn modify_edge_properties() {
         2,
         IStr::new("feeds"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -266,6 +268,7 @@ async fn delete_edge() {
         2,
         IStr::new("feeds"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -518,6 +521,7 @@ async fn graph_slice_full() {
         2,
         IStr::new("link"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 

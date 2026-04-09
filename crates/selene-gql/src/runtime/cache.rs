@@ -433,7 +433,7 @@ fn parse_yield_list(s: &str) -> Option<(Vec<YieldItem>, &str)> {
         }
 
         // Check for AS alias
-        let alias = if pos + 2 <= bytes.len()
+        let (alias, alias_display) = if pos + 2 <= bytes.len()
             && s[pos..pos + 2].eq_ignore_ascii_case("AS")
             && (pos + 2 >= bytes.len() || bytes[pos + 2].is_ascii_whitespace())
         {
@@ -448,14 +448,21 @@ fn parse_yield_list(s: &str) -> Option<(Vec<YieldItem>, &str)> {
             if pos == alias_start {
                 return None; // expected alias identifier
             }
-            Some(IStr::new(&s[alias_start..pos].to_uppercase()))
+            let raw_alias = &s[alias_start..pos];
+            (
+                Some(IStr::new(&raw_alias.to_uppercase())),
+                Some(IStr::new(raw_alias)),
+            )
         } else {
-            None
+            (None, None)
         };
 
         items.push(YieldItem {
             name: IStr::new(&name.to_uppercase()),
             alias,
+            // Plan cache uses ad-hoc parsing; preserve original case for display.
+            // If there's an alias, use its original case; otherwise use the name.
+            display_hint: Some(alias_display.unwrap_or_else(|| IStr::new(name))),
         });
 
         // Skip whitespace

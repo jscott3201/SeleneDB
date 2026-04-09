@@ -5,6 +5,7 @@
 //! contains no HTTP or QUIC awareness.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -21,7 +22,6 @@ const MAX_REFRESH_TOKENS: usize = 10_000;
 
 /// Maximum number of entries in the revocation deny-list. Prevents unbounded
 /// growth from rapid issue-then-revoke cycles between prune intervals.
-#[allow(dead_code)]
 const MAX_DENY_LIST: usize = 50_000;
 
 // ---------------------------------------------------------------------------
@@ -70,11 +70,11 @@ pub struct McpTokenClaims {
 
 /// Bookkeeping for a single outstanding refresh token.
 #[derive(Debug)]
-struct RefreshRecord {
+pub(crate) struct RefreshRecord {
     /// Principal identity (the `sub` claim).
-    principal: String,
+    pub(crate) principal: String,
     /// Unix timestamp (seconds) at which the refresh token expires.
-    expires_at: u64,
+    pub(crate) expires_at: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +100,8 @@ pub struct OAuthTokenService {
     /// than `now` are safe to prune because the corresponding JWTs have
     /// already expired.
     deny_list: RwLock<HashMap<String, u64>>,
+    /// Whether the deny list has been modified since the last persistence.
+    deny_dirty: AtomicBool,
     /// Cache: principal identity to (NodeId, graph generation).
     /// Avoids O(P) label scan on every validation. Invalidated when graph
     /// generation changes.
@@ -127,6 +129,7 @@ impl OAuthTokenService {
             refresh_ttl,
             refresh_store: RwLock::new(HashMap::new()),
             deny_list: RwLock::new(HashMap::new()),
+            deny_dirty: AtomicBool::new(false),
             principal_cache: RwLock::new(HashMap::new()),
         }
     }
@@ -271,9 +274,24 @@ impl OAuthTokenService {
 
     // -- Revoke / prune ------------------------------------------------------
 
+    /// Revoke an access token by its raw JWT string.
+    ///
+    /// Decodes the token (allowing expired tokens — you can revoke a token
+    /// that has already expired to ensure it stays denied after a restart
+    /// when deny list is persisted). Extracts the `jti` and `exp` claims
+    /// and adds them to the deny list.
+    pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+        // Decode allowing expired tokens (we still want to revoke them)
+        let mut relaxed = self.validation.clone();
+        relaxed.validate_exp = false;
+        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &relaxed)
+            .map_err(|e| OAuthError::InvalidToken(e.to_string()))?;
+        self.revoke(&token_data.claims.jti, token_data.claims.exp);
+        Ok(())
+    }
+
     /// Add a token ID to the deny-list. The `original_exp` timestamp allows
     /// automatic pruning once the token would have expired anyway.
-    #[allow(dead_code)]
     pub fn revoke(&self, jti: &str, original_exp: u64) {
         let mut deny = self.deny_list.write();
         if deny.len() >= MAX_DENY_LIST {
@@ -288,6 +306,7 @@ impl OAuthTokenService {
             return;
         }
         deny.insert(jti.to_string(), original_exp);
+        self.deny_dirty.store(true, Ordering::Release);
     }
 
     /// Remove expired refresh tokens and deny-list entries whose original
@@ -306,6 +325,50 @@ impl OAuthTokenService {
         }
         // Clear principal cache; entries repopulate on next validate().
         self.principal_cache.write().clear();
+    }
+
+    // -- State persistence ----------------------------------------------------
+
+    /// Check whether the deny list has been modified since the last snapshot.
+    pub(crate) fn deny_list_dirty(&self) -> bool {
+        self.deny_dirty.load(Ordering::Acquire)
+    }
+
+    /// Snapshot the current deny list for vault persistence.
+    ///
+    /// Returns `(unused, deny_list_entries)` where each deny entry is
+    /// `(jti, expires_at)`. The first element is empty (reserved for future
+    /// refresh token persistence if a non-hashed approach is adopted).
+    ///
+    /// Clears the dirty flag — the next snapshot will only persist if new
+    /// revocations have been added since this call.
+    pub(crate) fn snapshot_state(&self) -> ((), Vec<(String, u64)>) {
+        let denied: Vec<(String, u64)> = self
+            .deny_list
+            .read()
+            .iter()
+            .map(|(jti, exp)| (jti.clone(), *exp))
+            .collect();
+
+        self.deny_dirty.store(false, Ordering::Release);
+        ((), denied)
+    }
+
+    /// Load persisted deny list entries from the vault into the in-memory store.
+    ///
+    /// Only the deny list is persisted across restarts (security-critical —
+    /// prevents revoked tokens from being reused). Refresh tokens are ephemeral
+    /// and reset on restart; clients re-authenticate via OAuth, and their
+    /// access tokens remain valid via the persisted signing key.
+    pub(crate) fn load_deny_list(&self, entries: Vec<(String, u64)>) {
+        let now = now_secs();
+        let mut deny = self.deny_list.write();
+        for (jti, exp) in entries {
+            if exp >= now {
+                deny.insert(jti, exp);
+            }
+        }
+        tracing::info!(count = deny.len(), "loaded deny list from vault");
     }
 }
 
@@ -573,5 +636,26 @@ mod tests {
         assert_eq!(&id[13..14], "-");
         assert_eq!(&id[18..19], "-");
         assert_eq!(&id[23..24], "-");
+    }
+
+    #[test]
+    fn revoke_token_adds_to_deny_list() {
+        let svc = test_service();
+        let (jwt, _) = svc.issue("frank", "operator").unwrap();
+
+        // Revoke by raw JWT string
+        svc.revoke_token(&jwt).unwrap();
+
+        // Verify the jti is in the deny list
+        let data = jsonwebtoken::dangerous::insecure_decode::<McpTokenClaims>(&jwt).unwrap();
+        let deny = svc.deny_list.read();
+        assert!(deny.contains_key(&data.claims.jti));
+    }
+
+    #[test]
+    fn revoke_token_rejects_invalid_jwt() {
+        let svc = test_service();
+        let result = svc.revoke_token("not-a-valid-jwt");
+        assert!(matches!(result, Err(OAuthError::InvalidToken(_))));
     }
 }

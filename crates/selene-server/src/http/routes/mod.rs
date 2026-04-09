@@ -97,8 +97,8 @@ pub(super) use schemas::{
 
 // Data import/export (CSV, RDF, SPARQL, ReactFlow, time-series)
 pub(super) use data::{
-    csv_export, csv_import, export_rdf, import_rdf, reactflow_export, reactflow_import, sparql_get,
-    sparql_post, ts_query, ts_write,
+    csv_export, csv_import, export_rdf, import_rdf, reactflow_export, reactflow_import,
+    snapshot_export, sparql_get, sparql_post, ts_query, ts_write,
 };
 
 // Cross-module: used by quic::handler and http::mcp::tools

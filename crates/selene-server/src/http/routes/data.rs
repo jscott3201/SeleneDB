@@ -1,4 +1,4 @@
-//! Data import/export handlers: CSV, RDF, SPARQL, ReactFlow, time-series.
+//! Data import/export handlers: CSV, RDF, SPARQL, ReactFlow, time-series, snapshots.
 
 use std::sync::Arc;
 
@@ -574,4 +574,94 @@ fn execute_sparql_handler(
         bytes,
     )
         .into_response())
+}
+
+// ── Snapshot export ────────────────────────────────────────────────
+
+/// Export the graph as a portable binary snapshot.
+///
+/// Returns the snapshot as an `application/octet-stream` download with a
+/// `Content-Disposition` header for the filename. The snapshot is self-contained
+/// (nodes, edges, schemas, triggers, HNSW indexes, views) and can be used to
+/// restore the graph on another instance by placing it in the data directory.
+pub(in crate::http) async fn snapshot_export(
+    State(state): State<Arc<ServerState>>,
+    auth: HttpAuth,
+) -> Result<impl IntoResponse, HttpError> {
+    // Snapshot export is an admin-only operation.
+    if !auth.0.is_admin() {
+        return Err(HttpError(OpError::AuthDenied));
+    }
+
+    // UUID-like temp path prevents race conditions from concurrent exports.
+    let unique_id = format!(
+        "{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let tmp_path = state
+        .config
+        .data_dir
+        .join(format!("export-{unique_id}.snap.tmp"));
+
+    let st = Arc::clone(&state);
+    let export_path = tmp_path.clone();
+    let file_path = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf, OpError> {
+        crate::tasks::export_snapshot_to_path(&st, &export_path)
+            .map_err(|e| OpError::Internal(format!("snapshot export: {e}")))?;
+        Ok(export_path)
+    })
+    .await
+    .map_err(|e| HttpError(OpError::Internal(format!("spawn: {e}"))))??;
+
+    // Stream the file instead of reading it all into memory.
+    let file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|e| HttpError(OpError::Internal(format!("open snapshot: {e}"))))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|e| HttpError(OpError::Internal(format!("stat snapshot: {e}"))))?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    // Schedule cleanup of the temp file after response is sent.
+    let cleanup = file_path.clone();
+    tokio::spawn(async move {
+        // Wait a bit to ensure the stream has been consumed.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let _ = tokio::fs::remove_file(&cleanup).await;
+    });
+
+    let filename = format!("selene-snapshot-{}.snap", chrono_filename());
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+            (
+                axum::http::header::CONTENT_LENGTH,
+                metadata.len().to_string(),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+fn chrono_filename() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }

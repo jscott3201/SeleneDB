@@ -145,6 +145,62 @@ impl SchemaValidator {
         }
         issues
     }
+
+    /// Check minimum edge degree constraints for a node.
+    ///
+    /// For each edge schema with `min_out_degree` set, checks whether the node
+    /// (if its label matches `source_labels`) has at least that many outgoing
+    /// edges of that type. Same for `min_in_degree` with `target_labels`.
+    ///
+    /// Called at commit time for newly created nodes so that all edges in the
+    /// transaction are visible.
+    pub fn check_min_edge_degrees(
+        &self,
+        node_labels: &[IStr],
+        outgoing_by_label: &std::collections::HashMap<IStr, usize>,
+        incoming_by_label: &std::collections::HashMap<IStr, usize>,
+    ) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        for (edge_label, schema) in &self.edge_schemas {
+            // Check min_out_degree: does this node's label appear in source_labels?
+            if let Some(min_out) = schema.min_out_degree {
+                let label_match = schema.source_labels.is_empty()
+                    || node_labels.iter().any(|nl| {
+                        schema
+                            .source_labels
+                            .iter()
+                            .any(|sl| sl.as_ref() == nl.as_str())
+                    });
+                if label_match {
+                    let actual = outgoing_by_label.get(edge_label).copied().unwrap_or(0);
+                    if actual < min_out as usize {
+                        issues.push(ValidationIssue::new(format!(
+                            "node requires at least {min_out} outgoing '{edge_label}' edge(s), has {actual}"
+                        )));
+                    }
+                }
+            }
+            // Check min_in_degree: does this node's label appear in target_labels?
+            if let Some(min_in) = schema.min_in_degree {
+                let label_match = schema.target_labels.is_empty()
+                    || node_labels.iter().any(|nl| {
+                        schema
+                            .target_labels
+                            .iter()
+                            .any(|tl| tl.as_ref() == nl.as_str())
+                    });
+                if label_match {
+                    let actual = incoming_by_label.get(edge_label).copied().unwrap_or(0);
+                    if actual < min_in as usize {
+                        issues.push(ValidationIssue::new(format!(
+                            "node requires at least {min_in} incoming '{edge_label}' edge(s), has {actual}"
+                        )));
+                    }
+                }
+            }
+        }
+        issues
+    }
 }
 
 // ── Free validation helpers ──────────────────────────────────────────────────
@@ -735,5 +791,45 @@ mod tests {
         let issues = v.check_edge_cardinality("feeds", 0, 2);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("max_in_degree"));
+    }
+
+    #[test]
+    fn min_out_degree_warns_when_missing() {
+        let mut v = SchemaValidator::new(ValidationMode::Strict);
+        let mut schema = edge_schema("belongs_to_project", vec![]);
+        schema.source_labels = vec![Arc::from("code_pitfall")];
+        schema.min_out_degree = Some(1);
+        v.register_edge_schema(schema).unwrap();
+
+        let node_labels = vec![selene_core::IStr::new("code_pitfall")];
+
+        // No outgoing edges — should warn
+        let issues = v.check_min_edge_degrees(&node_labels, &HashMap::new(), &HashMap::new());
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("belongs_to_project"));
+        assert!(issues[0].message.contains("at least 1"));
+
+        // Has the required edge — should pass
+        let mut out = HashMap::new();
+        out.insert(selene_core::IStr::new("belongs_to_project"), 1usize);
+        let issues = v.check_min_edge_degrees(&node_labels, &out, &HashMap::new());
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn min_degree_skips_non_matching_labels() {
+        let mut v = SchemaValidator::new(ValidationMode::Strict);
+        let mut schema = edge_schema("belongs_to_project", vec![]);
+        schema.source_labels = vec![Arc::from("code_pitfall")];
+        schema.min_out_degree = Some(1);
+        v.register_edge_schema(schema).unwrap();
+
+        // A "sensor" node should NOT be checked against code_pitfall constraint
+        let node_labels = vec![selene_core::IStr::new("sensor")];
+        let issues = v.check_min_edge_degrees(&node_labels, &HashMap::new(), &HashMap::new());
+        assert!(
+            issues.is_empty(),
+            "non-matching label should skip constraint"
+        );
     }
 }

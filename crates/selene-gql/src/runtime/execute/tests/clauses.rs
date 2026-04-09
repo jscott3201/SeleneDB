@@ -68,7 +68,7 @@ fn e2e_optional_match_inline_prop_filter_matches() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let floor_col = batch
-        .column_by_name("FLOOR")
+        .column_by_name("floor")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -91,13 +91,13 @@ fn e2e_optional_match_inline_prop_filter_no_match_gives_null() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let building_col = batch
-        .column_by_name("BUILDING")
+        .column_by_name("building")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
     assert_eq!(building_col.value(0), "HQ");
-    let floor_col = batch.column_by_name("FLOOR").unwrap();
+    let floor_col = batch.column_by_name("floor").unwrap();
     assert!(
         floor_col.is_null(0),
         "floor column should be NULL when inline filter matches nothing"
@@ -119,7 +119,7 @@ fn e2e_optional_match_where_filters_inner_match_passes() {
     assert_eq!(result.row_count(), 1);
     let batch = &result.batches[0];
     let floor_col = batch
-        .column_by_name("FLOOR")
+        .column_by_name("floor")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -147,13 +147,13 @@ fn e2e_optional_match_where_no_inner_match_gives_null_not_drop() {
     );
     let batch = &result.batches[0];
     let building_col = batch
-        .column_by_name("BUILDING")
+        .column_by_name("building")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
     assert_eq!(building_col.value(0), "HQ");
-    let floor_col = batch.column_by_name("FLOOR").unwrap();
+    let floor_col = batch.column_by_name("floor").unwrap();
     assert!(
         floor_col.is_null(0),
         "floor should be NULL when optional WHERE matches nothing"
@@ -627,8 +627,8 @@ fn e2e_with_then_match_with_count() {
     use arrow::array::{Array, Int64Array};
     let batch = &result.batches[0];
     let cnt_col = batch
-        .column_by_name("CNT")
-        .expect("CNT column should be present");
+        .column_by_name("cnt")
+        .expect("cnt column should be present");
     let cnt_arr = cnt_col.as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(cnt_arr.value(0), 1, "building has 1 floor");
 }

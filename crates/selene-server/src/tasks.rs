@@ -227,6 +227,20 @@ pub fn shutdown_snapshot(state: &ServerState) {
             tracing::error!("final snapshot failed: {e}");
         }
     }
+
+    // Flush deny list to vault on shutdown (revoked tokens survive restarts)
+    if let Some(oauth_svc) = state
+        .services
+        .get::<crate::http::mcp::oauth::OAuthService>()
+        && let Some(vs) = state.services.get::<crate::vault::VaultService>()
+    {
+        let (_, denied) = oauth_svc.token_service.snapshot_state();
+        if let Err(e) = vs.handle.save_deny_list(&vs.master_key, &denied) {
+            tracing::error!("failed to persist deny list on shutdown: {e}");
+        } else {
+            tracing::info!(count = denied.len(), "deny list persisted to vault");
+        }
+    }
 }
 
 /// Periodically snapshot the graph and truncate WAL.
@@ -450,6 +464,123 @@ pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Export a portable snapshot to an arbitrary path without affecting WAL state.
+///
+/// Unlike `take_snapshot`, this does not hold the WAL lock, truncate the WAL,
+/// or update the snapshot history. It writes a self-contained binary snapshot
+/// suitable for backup, migration, or sharing.
+pub fn export_snapshot_to_path(state: &ServerState, path: &std::path::Path) -> anyhow::Result<()> {
+    let (raw_nodes, raw_edges, next_node, next_edge, schemas, triggers) = state.graph.read(|g| {
+        let nodes: Vec<selene_core::Node> = g
+            .all_node_ids()
+            .filter_map(|id| g.get_node(id).map(|n| n.to_owned_node()))
+            .collect();
+        let edges: Vec<selene_core::Edge> = g
+            .all_edge_ids()
+            .filter_map(|id| g.get_edge(id).map(|e| e.to_owned_edge()))
+            .collect();
+        let (node_schemas, edge_schemas) = g.schema().export();
+        let triggers = g.trigger_registry().to_vec();
+        (
+            nodes,
+            edges,
+            g.next_node_id(),
+            g.next_edge_id(),
+            selene_persist::snapshot::SnapshotSchemas {
+                node_schemas,
+                edge_schemas,
+            },
+            triggers,
+        )
+    });
+
+    let mut extra_sections = Vec::new();
+
+    if let Some(vs_svc) = state
+        .services
+        .get::<crate::version_store::VersionStoreService>()
+    {
+        let serializable = vs_svc.store.read().to_serializable();
+        if let Ok(bytes) = postcard::to_allocvec(&serializable) {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x01);
+            tagged.extend_from_slice(&bytes);
+            extra_sections.push(tagged);
+        }
+    }
+
+    if let Some(ontology_arc) = state.rdf_ontology.as_ref() {
+        let ontology = ontology_arc.read();
+        if !ontology.is_empty()
+            && let Ok(bytes) = ontology.to_nquads()
+        {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x02);
+            tagged.extend_from_slice(&bytes);
+            extra_sections.push(tagged);
+        }
+    }
+
+    state.graph.read(|g| {
+        for (ns, hnsw) in g.hnsw_indexes() {
+            let hnsw_graph = hnsw.load_graph();
+            if hnsw_graph.is_empty() {
+                continue;
+            }
+            if let Ok(bytes) = hnsw_graph.to_bytes() {
+                if ns.is_empty() {
+                    let mut tagged = Vec::with_capacity(1 + bytes.len());
+                    tagged.push(0x03);
+                    tagged.extend_from_slice(&bytes);
+                    extra_sections.push(tagged);
+                } else {
+                    let name_bytes = ns.as_bytes();
+                    let mut tagged = Vec::with_capacity(1 + 2 + name_bytes.len() + bytes.len());
+                    tagged.push(0x05);
+                    tagged.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+                    tagged.extend_from_slice(name_bytes);
+                    tagged.extend_from_slice(&bytes);
+                    extra_sections.push(tagged);
+                }
+            }
+        }
+    });
+
+    state.graph.read(|g| {
+        let view_defs = g.view_registry().to_vec();
+        if !view_defs.is_empty()
+            && let Ok(bytes) = postcard::to_allocvec(&view_defs)
+        {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x04);
+            tagged.extend_from_slice(&bytes);
+            extra_sections.push(tagged);
+        }
+    });
+
+    let seq = state.persistence.wal.lock().next_sequence();
+    let snapshot = GraphSnapshot {
+        nodes: raw_nodes.iter().map(SnapshotNode::from_node).collect(),
+        edges: raw_edges.iter().map(SnapshotEdge::from_edge).collect(),
+        next_node_id: next_node,
+        next_edge_id: next_edge,
+        changelog_sequence: seq.saturating_sub(1),
+        schemas,
+        triggers,
+        extra_sections,
+    };
+
+    let bytes = write_snapshot_opts(&snapshot, path, false)?;
+    tracing::info!(
+        path = %path.display(),
+        bytes,
+        nodes = snapshot.nodes.len(),
+        edges = snapshot.edges.len(),
+        "portable snapshot exported"
+    );
+    Ok(())
+}
+
 /// Periodically flush expired hot tier data to Parquet.
 async fn ts_flush_loop(state: Arc<ServerState>, interval: Duration, cancel: CancellationToken) {
     let ts_dir = state.config.data_dir.join("ts");
@@ -603,11 +734,25 @@ async fn metrics_update_loop(state: Arc<ServerState>, cancel: CancellationToken)
                     prune_counter = 0;
                     state.auth_rate_limiter.prune_expired();
 
-                    // Prune expired OAuth refresh tokens and deny-list entries.
+                    // Prune expired OAuth refresh tokens and deny-list entries,
+                    // then persist the deny list to vault.
                     if let Some(oauth_svc) =
                         state.services.get::<crate::http::mcp::oauth::OAuthService>()
                     {
                         oauth_svc.token_service.prune_expired();
+
+                        // Persist deny list to vault only if modified since last save
+                        if oauth_svc.token_service.deny_list_dirty()
+                            && let Some(vs) =
+                                state.services.get::<crate::vault::VaultService>()
+                        {
+                            let (_, denied) = oauth_svc.token_service.snapshot_state();
+                            if let Err(e) =
+                                vs.handle.save_deny_list(&vs.master_key, &denied)
+                            {
+                                tracing::warn!("failed to persist deny list to vault: {e}");
+                            }
+                        }
                     }
 
                     // Prune expired authorization codes and CSRF nonces.

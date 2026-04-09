@@ -655,6 +655,7 @@ async fn csv_export_edges_with_properties() {
         2,
         IStr::new("feeds"),
         props(&[("weight", Value::Float(2.5))]),
+        false,
     )
     .unwrap();
 
@@ -926,6 +927,7 @@ async fn graph_stats_with_nodes_and_edges() {
         2,
         IStr::new("feeds"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -973,6 +975,7 @@ async fn graph_stats_scope_filtered() {
         2,
         IStr::new("feeds"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -1174,8 +1177,26 @@ async fn node_edges_returns_both_directions() {
     ops::nodes::create_node(&state, &admin(), labels(&["c"]), PropertyMap::new(), None).unwrap();
 
     // Edge 1->2 and 3->1
-    ops::edges::create_edge(&state, &admin(), 1, 2, IStr::new("out"), PropertyMap::new()).unwrap();
-    ops::edges::create_edge(&state, &admin(), 3, 1, IStr::new("in"), PropertyMap::new()).unwrap();
+    ops::edges::create_edge(
+        &state,
+        &admin(),
+        1,
+        2,
+        IStr::new("out"),
+        PropertyMap::new(),
+        false,
+    )
+    .unwrap();
+    ops::edges::create_edge(
+        &state,
+        &admin(),
+        3,
+        1,
+        IStr::new("in"),
+        PropertyMap::new(),
+        false,
+    )
+    .unwrap();
 
     let result = ops::edges::node_edges(&state, &admin(), 1, None, None, 0, 100).unwrap();
     assert_eq!(result.total, 2);
@@ -1215,6 +1236,7 @@ async fn node_edges_with_pagination() {
             i,
             IStr::new("link"),
             PropertyMap::new(),
+            false,
         )
         .unwrap();
     }
@@ -1239,6 +1261,7 @@ async fn list_edges_with_label_filter() {
         2,
         IStr::new("feeds"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
     ops::edges::create_edge(
@@ -1248,6 +1271,7 @@ async fn list_edges_with_label_filter() {
         2,
         IStr::new("monitors"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -1416,6 +1440,7 @@ async fn get_edge_denied_when_source_out_of_scope() {
         2,
         IStr::new("link"),
         PropertyMap::new(),
+        false,
     )
     .unwrap();
 
@@ -1436,8 +1461,15 @@ async fn create_edge_denied_when_target_out_of_scope() {
 
     // Scope includes source (1) but not target (2)
     let auth = scoped(&[1]);
-    let result =
-        ops::edges::create_edge(&state, &auth, 1, 2, IStr::new("link"), PropertyMap::new());
+    let result = ops::edges::create_edge(
+        &state,
+        &auth,
+        1,
+        2,
+        IStr::new("link"),
+        PropertyMap::new(),
+        false,
+    );
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), ops::OpError::AuthDenied));
 }

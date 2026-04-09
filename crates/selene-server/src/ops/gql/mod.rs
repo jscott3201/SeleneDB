@@ -8,6 +8,7 @@ mod format;
 mod routing;
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
 
 use super::{OpError, persist_or_die};
@@ -335,7 +336,13 @@ fn execute_read(
     if let Some(p) = parameters {
         qb = qb.with_parameters(p);
     }
-    qb.execute()
+    catch_unwind(AssertUnwindSafe(|| qb.execute())).unwrap_or_else(|panic| {
+        let msg = panic_message(&panic);
+        tracing::error!(message = %msg, "query execution panicked");
+        Err(selene_gql::GqlError::Internal {
+            message: format!("query execution panicked: {msg}"),
+        })
+    })
 }
 
 /// Execute a mutation via SharedGraph, persisting changes to WAL + changelog.
@@ -363,7 +370,14 @@ fn execute_mutation(
     if let Some(p) = parameters {
         mb = mb.with_parameters(p);
     }
-    let result = mb.execute(&state.graph)?;
+    let graph = &state.graph;
+    let result = catch_unwind(AssertUnwindSafe(|| mb.execute(graph))).unwrap_or_else(|panic| {
+        let msg = panic_message(&panic);
+        tracing::error!(message = %msg, "mutation execution panicked");
+        Err(selene_gql::GqlError::Internal {
+            message: format!("mutation execution panicked: {msg}"),
+        })
+    })?;
 
     // Persist changes to WAL + changelog + version archive
     if !result.changes.is_empty() {
@@ -488,6 +502,17 @@ pub(super) fn error_result(code: &str, message: &str) -> GqlQueryResult {
         row_count: 0,
         mutations: None,
         plan: None,
+    }
+}
+
+/// Extract a human-readable message from a panic payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -632,7 +657,7 @@ mod tests {
         // Create a vault with dev key
         let master = crate::vault::crypto::MasterKey::dev_key();
         let vault_path = dir.path().join("secure.vault");
-        let handle = crate::vault::VaultHandle::open_or_create(
+        let (handle, _) = crate::vault::VaultHandle::open_or_create(
             vault_path,
             &master,
             crate::vault::KeySource::Raw,

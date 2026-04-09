@@ -506,7 +506,7 @@ fn mutation_where_set_filters_by_property() {
     .unwrap();
     assert_eq!(result.row_count(), 1);
     let col = result.batches[0]
-        .column_by_name("NAME")
+        .column_by_name("name")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -539,7 +539,7 @@ fn mutation_where_set_filters_by_id() {
     .unwrap();
     assert_eq!(with_val.row_count(), 1);
     let col = with_val.batches[0]
-        .column_by_name("NAME")
+        .column_by_name("name")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
@@ -574,7 +574,7 @@ fn mutation_where_delete_filters_correctly() {
     .unwrap();
     assert_eq!(remaining.row_count(), 2);
     let col = remaining.batches[0]
-        .column_by_name("NAME")
+        .column_by_name("name")
         .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()

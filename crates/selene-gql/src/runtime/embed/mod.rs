@@ -120,6 +120,25 @@ fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Eagerly initialize the embedding provider at startup.
+///
+/// Triggers model loading immediately rather than on first embed call.
+/// Returns the model ID on success, or the error message on failure.
+/// Safe to call multiple times — the `OnceLock` ensures single init.
+pub fn initialize() -> Result<String, String> {
+    let result = PROVIDER.get_or_init(|| match build_provider() {
+        Ok(provider) => Ok(provider),
+        Err(e) => {
+            tracing::error!(error = %e, "embedding provider load failed (restart required to retry)");
+            Err(e)
+        }
+    });
+    match result {
+        Ok(provider) => Ok(provider.model_id().to_string()),
+        Err(e) => Err(e.clone()),
+    }
+}
+
 /// Get or initialize the embedding provider.
 ///
 /// The provider is cached in a static `OnceLock`. If the first load fails,
@@ -134,9 +153,17 @@ fn get_provider() -> Result<&'static dyn EmbeddingProvider, GqlError> {
     });
     match result {
         Ok(provider) => Ok(provider.as_ref()),
-        Err(msg) => Err(GqlError::InvalidArgument {
-            message: format!("embedding engine unavailable (restart to retry): {msg}"),
-        }),
+        Err(msg) => {
+            let model_path = resolve_model_path();
+            Err(GqlError::InvalidArgument {
+                message: format!(
+                    "Embedding model not loaded: {msg}. \
+                     Set SELENE_MODEL_PATH or place model files in '{}'. \
+                     Server restart required to retry.",
+                    model_path.display()
+                ),
+            })
+        }
     }
 }
 
