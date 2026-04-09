@@ -23,13 +23,13 @@ rate_limit_data = 20
 bind = "0.0.0.0:4510"
 
 [services]
-vector = true
-search = true
-temporal = true
-federation = false
-algorithms = true
-mcp = true
-replicas = false
+vector = { enabled = true }
+search = { enabled = true }
+temporal = { enabled = true }
+federation = { enabled = false }
+algorithms = { enabled = true }
+mcp = { enabled = true }
+replicas = { enabled = false }
 
 [mcp]
 # API key for MCP endpoint authentication.
@@ -44,9 +44,8 @@ signing_key = ""         # REQUIRED: set via SELENE_MCP_SIGNING_KEY env var
 # Generate with: openssl rand -hex 32
 registration_token = ""  # REQUIRED: set via SELENE_MCP_REGISTRATION_TOKEN env var
 
-# Public URL for OAuth discovery (set to Tailscale MagicDNS hostname)
-# Example: http://selene-gcp:8080
-public_url = ""          # Set via SELENE_MCP_PUBLIC_URL env var
+# Public URL for OAuth discovery — override via SELENE_MCP_PUBLIC_URL env var
+public_url = ""
 
 session_timeout = 3600
 max_sessions = 50
