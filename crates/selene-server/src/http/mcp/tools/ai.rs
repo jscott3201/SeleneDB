@@ -179,7 +179,7 @@ pub(super) async fn enrich_communities_impl(
 
         let st = Arc::clone(&tools.state);
         let auth2 = auth.clone();
-        tools
+        let result = tools
             .submit_mut(move || {
                 ops::gql::execute_gql(
                     &st,
@@ -192,10 +192,27 @@ pub(super) async fn enrich_communities_impl(
                 )
             })
             .await?;
-        enriched += 1;
+        if result.status_code.starts_with("00") {
+            enriched += 1;
+        } else {
+            tracing::warn!(
+                node_id,
+                status = %result.status_code,
+                message = %result.message,
+                "Failed to embed community summary"
+            );
+        }
     }
 
-    let text = format!("Enriched {enriched} community summaries with embeddings.");
+    let text = if enriched == row_count as u64 {
+        format!("Enriched {enriched} community summaries with embeddings.")
+    } else {
+        format!(
+            "Enriched {enriched}/{row_count} community summaries. \
+             {} failed (check server logs for details).",
+            row_count as u64 - enriched
+        )
+    };
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 

@@ -2,18 +2,27 @@
 
 ## Overview
 
-The Model Context Protocol (MCP) is an open standard that enables AI agents and LLM-based tools
-to interact with external services through a structured tool interface. Selene exposes its full
-graph, time-series, and schema APIs as MCP tools, resources, and prompts, allowing AI assistants
-to query, mutate, and manage the property graph through natural language.
+SeleneDB ships a full [Model Context Protocol](https://modelcontextprotocol.io/) server purpose-built for AI agents. This is not a generic API wrapper — every tool is designed around how agents actually work: progressive disclosure to minimize context tokens, parameterized queries to prevent injection, batch operations to minimize round-trips, and built-in memory for cross-session continuity.
 
-MCP is served over Streamable HTTP at the `/mcp` endpoint (rmcp 1.3, JSON-RPC 2.0). Any
-MCP-compatible client (Claude Desktop, Cursor, custom agents) can connect without a dedicated SDK.
+**64 tools. One endpoint. Zero orchestration overhead.**
 
-Selene declares three MCP capabilities:
-- **Tools** (36): actions that query, mutate, import/export data
+Where a typical agentic workflow orchestrates three separate databases (graph for relationships, vector for similarity, time-series for telemetry), SeleneDB provides all three through a single MCP connection. Agents get graph queries, semantic search, GraphRAG retrieval, time-series analytics, and persistent memory in one place.
+
+MCP is served over Streamable HTTP at the `/mcp` endpoint (rmcp 1.3, JSON-RPC 2.0). Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Copilot, custom agents) can connect without a dedicated SDK.
+
+SeleneDB declares three MCP capabilities:
+- **Tools** (64): query, mutate, search, import/export, agent memory, admin, and AI operations
 - **Resources** (5): read-only data agents can inspect without a tool call round-trip
 - **Prompts** (3): guided workflow templates for common agent tasks
+
+### Agent token economics
+
+These tools are designed to minimize context window consumption:
+
+- **`schema_dump`** serves a compact 2.5 KB summary by default (not the 20 KB full schema) — saving 30-40% of agent context tokens on schema inspection
+- **`resolve`** turns natural language into node lookups in one call — no query construction needed
+- **`related`** returns a node and all its connections in one call — replaces `get_node` + `node_edges` round-trips
+- **`graphrag_search`** combines vector similarity, BFS traversal, and community context — one call instead of three
 
 ## Enabling MCP
 
@@ -82,7 +91,7 @@ If MCP is enabled but neither `signing_key` nor `api_key` is configured (and
 
 ## OAuth Authentication
 
-Selene implements OAuth 2.1 with PKCE for the MCP endpoint. This provides
+SeleneDB implements OAuth 2.1 with PKCE for the MCP endpoint. This provides
 per-client token management, scoped access, and token rotation without sharing
 a static secret.
 
@@ -219,8 +228,9 @@ Prompt templates provide guided workflows for common agent tasks.
 
 ## Tool Reference
 
-Selene exposes 36 MCP tools organized into ten categories. Each tool accepts a JSON
-object of parameters and returns structured text results.
+SeleneDB exposes 64 MCP tools organized into fourteen categories. Each tool accepts a JSON
+object of parameters and returns structured text results. All tools that accept user input
+use parameterized GQL queries (`$param` placeholders) — no string interpolation.
 
 ### GQL (2 tools)
 
@@ -405,7 +415,7 @@ structure with `nodes` and `edges` arrays.
 | Tool | Description |
 |------|-------------|
 | `export_reactflow` | Export the graph in React Flow format. Optionally filter by label. |
-| `import_reactflow` | Import a React Flow graph. Node `type` maps to Selene label, `data` maps to properties. Returns an ID mapping from React Flow IDs to Selene IDs. |
+| `import_reactflow` | Import a React Flow graph. Node `type` maps to SeleneDB label, `data` maps to properties. Returns an ID mapping from React Flow IDs to SeleneDB IDs. |
 
 **export_reactflow parameters:**
 
@@ -524,3 +534,130 @@ definitions, resource URIs, and prompt templates.
 | `update_schema` | Update an existing node schema. Fields are replaced entirely (not merged). |
 | `export_rdf` | Export the graph as RDF (Turtle). Routes through GQL `CALL graph.exportRdf()`. Requires `rdf` feature. |
 | `sparql_query` | Execute a SPARQL query. Routes through GQL `CALL graph.sparql()`. Requires `rdf-sparql` feature. |
+
+### Agent Memory (3 tools)
+
+Persistent memory that survives across sessions. Agents store, recall, and forget facts with semantic search, namespaces, TTL, and automatic eviction.
+
+| Tool | Description |
+|------|-------------|
+| `remember` | Store a memory with vector embedding, optional entity links, and temporal validity. Automatically evicts least-accessed memories when namespace capacity is reached. |
+| `recall` | Search memory by semantic similarity. Returns ranked results from the specified namespace. Frequently recalled memories are retained longer during eviction. |
+| `forget` | Delete memories by node ID or content substring match. |
+
+**remember parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `namespace` | string | yes | Memory namespace (isolates memories by agent or context) |
+| `content` | string | yes | The content to remember |
+| `memory_type` | string | no | Classification: `"fact"` (default), `"preference"`, `"event"` |
+| `entities` | string[] | no | Entity names mentioned. Creates `__Entity` nodes and `__MENTIONS` edges. |
+| `valid_until` | integer | no | Expiry timestamp in milliseconds since epoch. 0 or omit for no expiry. |
+
+**recall parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `namespace` | string | yes | Memory namespace to search |
+| `query` | string | yes | Natural language query for semantic search |
+| `k` | integer | no | Maximum results (default: 10) |
+
+**forget parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `namespace` | string | yes | Memory namespace |
+| `node_id` | integer | no | Specific memory node ID to delete |
+| `query` | string | no | Content substring to match for deletion |
+
+### AI Operations (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `build_communities` | Run Louvain community detection and create `__CommunitySummary` nodes with structural profiles. |
+| `enrich_communities` | Add vector embeddings to community summaries. Enables global and hybrid search modes in `graphrag_search`. |
+| `graphrag_search` | GraphRAG retrieval: combines vector similarity, BFS expansion, and community context. Modes: `local`, `global`, `hybrid`. |
+| `configure_memory` | Configure namespace capacity, TTL, and eviction policy (`clock`, `oldest`, or `lowest_confidence`). |
+
+**graphrag_search parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | Natural language query text |
+| `mode` | string | no | `"local"` (default), `"global"`, or `"hybrid"` |
+| `k` | integer | no | Number of vector results (default: 10) |
+| `max_hops` | integer | no | BFS expansion depth (default: 2) |
+
+### Graph Intelligence (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `resolve` | Resolve a name, alias, or description to a graph node. Tries exact ID, then name match, then semantic search. |
+| `related` | Get a node and all its connections in one call. Returns properties plus edges grouped by direction. |
+| `graph_stats` | Per-label breakdowns of node and edge counts. |
+| `mark_fixed` | Bulk-update node status and optionally link to a commit SHA. |
+
+### Proposals (4 tools)
+
+Human-in-the-loop workflow for sensitive operations.
+
+| Tool | Description |
+|------|-------------|
+| `propose_action` | Create a proposal with a GQL query for human review. Auto-expires after 24 hours. |
+| `approve_proposal` | Approve a pending proposal. |
+| `reject_proposal` | Reject a pending proposal with an optional reason. |
+| `execute_proposal` | Execute an approved proposal's stored GQL query. |
+| `list_proposals` | List proposals filtered by status (pending, approved, executed, rejected, expired). |
+
+### Batch Operations (3 tools)
+
+High-throughput ingestion for bulk data loading.
+
+| Tool | Description |
+|------|-------------|
+| `batch_create_nodes` | Create multiple nodes in a single call. Much faster than individual `create_node` calls. |
+| `batch_create_edges` | Create multiple edges in a single call with per-edge upsert support. |
+| `batch_ingest` | Create nodes with edges in one call. Each entry specifies labels, properties, and connections to existing nodes. |
+
+### CSV Import/Export (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `csv_import` | Import nodes or edges from CSV data. Auto-detects integers, floats, and booleans. |
+| `csv_export` | Export nodes or edges as CSV with optional label filter. |
+
+### Principals (5 tools)
+
+Identity and access management for the secure vault.
+
+| Tool | Description |
+|------|-------------|
+| `create_principal` | Create a new principal with role (admin, service, operator, reader, device). |
+| `get_principal` | Get a principal by identity. |
+| `list_principals` | List all principals in the vault. |
+| `update_principal` | Update role and/or enabled status. |
+| `disable_principal` | Disable a principal (preserves node, blocks authentication). |
+| `rotate_credential` | Set a new password, immediately invalidating the old one. |
+
+### Edge Schemas (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_edge_schema` | Create an edge type schema with field shorthand and source/target label constraints. |
+| `delete_edge_schema` | Delete an edge schema by label. |
+
+### Tracing (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `log_trace` | Log a tool interaction trace for training data collection. |
+| `export_traces` | Export traces as JSONL for fine-tuning. Filter by session, tool, feedback, model, or date range. |
+
+### Server (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `info` | Server metadata: version, runtime profile, dev mode, feature flags. |
+| `gql_parse_check` | Parse a GQL query and return structured errors with repair suggestions. |
+| `schema_dump` | Compact, LLM-optimized graph schema dump. 2.5 KB default vs 20 KB full. |

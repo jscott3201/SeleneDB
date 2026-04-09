@@ -1,6 +1,6 @@
 # Persistence
 
-Selene uses a write-ahead log (WAL) combined with periodic binary snapshots to provide durable storage of the in-memory graph. The design follows SQLite's philosophy: prioritize data integrity over performance, and never silently lose data.
+SeleneDB uses a write-ahead log (WAL) combined with periodic binary snapshots to provide durable storage of the in-memory graph. The design follows SQLite's philosophy: prioritize data integrity over performance, and never silently lose data.
 
 ## Overview
 
@@ -157,7 +157,7 @@ A crash can occur between writing a snapshot and truncating the WAL. In this cas
 
 ## persist_or_die
 
-Every mutation in Selene goes through the `persist_or_die` function, which enforces a strict durability guarantee:
+Every mutation in SeleneDB goes through the `persist_or_die` function, which enforces a strict durability guarantee:
 
 1. Submit changes to the WAL coalescer.
 2. The coalescer attempts a WAL append.
@@ -172,7 +172,7 @@ When the temporal feature is active, `persist_or_die` also archives old property
 
 ## Backup Strategy
 
-Selene's data directory is self-contained. To back up a running instance:
+SeleneDB's data directory is self-contained. To back up a running instance:
 
 1. **Copy the data directory** -- the snapshot files are atomic (write-then-rename), so a file-system-level copy of the `snapshots/` directory yields a consistent point-in-time.
 2. **Use snapshot files directly** -- each snapshot is a complete graph state. Copy the latest `.snap` file for the most recent consistent state.

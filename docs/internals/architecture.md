@@ -1,10 +1,10 @@
 # Architecture Overview
 
-This document describes Selene's internal architecture for contributors who want to understand how the codebase is structured. It covers design philosophy, crate organization, core data structures, concurrency model, server lifecycle, and the runtime extension points.
+This document describes SeleneDB's internal architecture for contributors who want to understand how the codebase is structured. It covers design philosophy, crate organization, core data structures, concurrency model, server lifecycle, and the runtime extension points.
 
 ## Design Philosophy
 
-Selene follows five architectural principles:
+SeleneDB follows five architectural principles:
 
 1. **Single binary.** QUIC, HTTP, and MCP transports run in one process. Feature flags control which subsystems compile in; runtime config toggles control which activate.
 
@@ -12,13 +12,13 @@ Selene follows five architectural principles:
 
 3. **In-memory property graph.** Nodes and edges live in memory, indexed by dense ID slots and secondary bitmap/BTree indexes. Persistence is append-only WAL + periodic snapshots -- the in-memory store is the source of truth at runtime.
 
-4. **Edge-first deployment.** Selene targets Raspberry Pi 5 and equivalent constrained hardware. The binary compiles to a ~14 MB distroless Docker image. Zero C/C++ dependencies -- the entire stack is pure Rust.
+4. **Edge-first deployment.** SeleneDB targets Raspberry Pi 5 and equivalent constrained hardware. The binary compiles to a ~14 MB distroless Docker image. Zero C/C++ dependencies -- the entire stack is pure Rust.
 
 5. **Zero C/C++ dependencies.** Every dependency compiles with `cargo build` alone. No system libraries, no pkg-config, no cmake. This simplifies cross-compilation for ARM64 edge devices.
 
 ## Crate Dependency Map
 
-Selene is organized as a Cargo workspace with 13 crates. The dependency graph flows top-to-bottom:
+SeleneDB is organized as a Cargo workspace with 13 crates. The dependency graph flows top-to-bottom:
 
 ```
                         selene-server
@@ -163,7 +163,7 @@ Key methods:
 
 ## TrackedMutation
 
-`TrackedMutation` is Selene's mutation primitive. It eagerly applies changes to the graph in-place so that subsequent operations within the same mutation see the effects. Each change records two things:
+`TrackedMutation` is SeleneDB's mutation primitive. It eagerly applies changes to the graph in-place so that subsequent operations within the same mutation see the effects. Each change records two things:
 
 1. A forward `Change` event (for WAL persistence and changelog subscribers).
 2. A reverse `RollbackEntry` (for undo on failure).
@@ -231,7 +231,7 @@ Background tasks are spawned by `spawn_background_tasks()` in `crates/selene-ser
 
 ## Feature Flag Matrix
 
-Selene uses Cargo features for compile-time gating and TOML config for runtime toggles.
+SeleneDB uses Cargo features for compile-time gating and TOML config for runtime toggles.
 
 ### Compile-Time Features (Cargo)
 

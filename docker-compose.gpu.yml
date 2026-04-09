@@ -29,34 +29,30 @@ services:
       - TS_USERSPACE=false
       - TS_EXTRA_ARGS=--advertise-tags=tag:server
     restart: unless-stopped
-    network_mode: host
 
   selene:
     image: ${SELENE_IMAGE:-us-central1-docker.pkg.dev/cs-poc-3yawesacflnh7gct7rszujy/selene/selene-server:gpu-latest}
     depends_on:
       - tailscale
-    network_mode: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    network_mode: service:tailscale
+    runtime: nvidia
     volumes:
       - selene-data:/data
       - ./selene.cloud.toml:/data/config.toml:ro
     environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - SELENE_CUDA=1
+      - SELENE_MODEL_PATH=/models/embeddinggemma-300m
       - SELENE_PROFILE=standalone
       - SELENE_MCP_ENABLED=true
       - SELENE_MCP_API_KEY=${SELENE_MCP_API_KEY}
       - SELENE_MCP_SIGNING_KEY=${SELENE_MCP_SIGNING_KEY}
       - SELENE_MCP_REGISTRATION_TOKEN=${SELENE_MCP_REGISTRATION_TOKEN}
       - SELENE_MCP_PUBLIC_URL=http://selene-gcp:8080
-      - SELENE_MEMORY_BUDGET_MB=12288
+      - SELENE_MEMORY_BUDGET_MB=20480
       - RUST_LOG=selene_server=info,selene_gql=info
-    command: ["--config", "/data/config.toml", "--data-dir", "/data"]
+    command: ["--dev", "--config", "/data/config.toml", "--data-dir", "/data"]
     security_opt:
       - no-new-privileges:true
     read_only: true

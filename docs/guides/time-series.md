@@ -1,11 +1,13 @@
 # Time-Series Guide
 
-Selene includes a multi-tier time-series engine designed for IoT sensor data. Each tier serves a different access pattern and retention window:
+SeleneDB includes a multi-tier time-series engine designed for IoT sensor data and real-time agent perception. Where traditional setups require a separate time-series database, SeleneDB integrates telemetry storage directly alongside the property graph — so agents can correlate current readings with graph relationships, detect anomalies against peer groups, and aggregate across building hierarchies, all in GQL.
 
-- **Hot tier** -- in-memory compressed blocks. Sub-microsecond reads for recent data (typically the last 24 hours).
-- **Warm tier** -- pre-computed minute and hourly aggregates with quantile snapshots. Efficient for dashboards and trend analysis.
+Each tier serves a different access pattern and retention window:
+
+- **Hot tier** -- in-memory compressed blocks (Gorilla/RLE/Dictionary). Sub-microsecond reads for recent data (typically the last 24 hours).
+- **Warm tier** -- pre-computed minute and hourly aggregates with DDSketch quantile snapshots. Efficient for dashboards and trend analysis.
 - **Cold tier** -- Parquet files on local disk (zstd compression, bloom filters, row-group pushdown). Weeks to months of history.
-- **Cloud tier** -- offload to S3, GCS, Azure Blob, or MinIO via the `ObjectStoreExporter` (requires `--features cloud-storage`).
+- **Cloud tier** -- offload to S3, GCS, Azure Blob, or MinIO via the `ObjectStoreExporter`. Configure via `[cloud_storage]` in `selene.toml`.
 
 Samples flow automatically from hot to warm as windows finalize, and from hot to cold via background flush tasks. Cloud offload runs on a configurable schedule.
 

@@ -1,6 +1,6 @@
 # GQL Query Optimizer
 
-Selene's GQL engine includes a rule-based optimizer that rewrites execution plans before they run. The optimizer applies up to 8 rules in a fixed-point loop, repeating until no rule produces a change or the iteration limit (8 passes) is reached. This guide covers how to inspect query plans, what each optimizer rule does, the index types available, and how the plan cache works.
+SeleneDB's GQL engine includes a rule-based optimizer that rewrites execution plans before they run. The optimizer applies up to 8 rules in a fixed-point loop, repeating until no rule produces a change or the iteration limit (8 passes) is reached. This guide covers how to inspect query plans, what each optimizer rule does, the index types available, and how the plan cache works.
 
 ## Inspecting Query Plans
 
@@ -198,7 +198,7 @@ MATCH (s:sensor {floor: 3, zone: 'A'}) RETURN s.name
 
 ## Index Types
 
-Selene maintains three types of indexes that the optimizer and executor use to accelerate queries.
+SeleneDB maintains three types of indexes that the optimizer and executor use to accelerate queries.
 
 ### RoaringBitmap Label Indexes
 
@@ -225,7 +225,7 @@ Composite index lookups take approximately 84 ns, compared to sequential propert
 
 ## Plan Cache
 
-Selene caches parsed GQL statements by query hash to avoid re-parsing identical queries. The cache holds up to 256 entries; when full, the least-recently-used entry is evicted.
+SeleneDB caches parsed GQL statements by query hash to avoid re-parsing identical queries. The cache holds up to 256 entries; when full, the least-recently-used entry is evicted.
 
 **Performance characteristics:**
 

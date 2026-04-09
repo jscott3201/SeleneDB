@@ -1,6 +1,6 @@
 # GQL Mutations
 
-Selene uses GQL (ISO 39075) as its sole mutation interface. All graph modifications -- creating nodes and edges, updating properties, adding labels, and deleting elements -- flow through GQL mutation statements. This guide covers every mutation operation with working examples drawn from building automation and IoT domains.
+SeleneDB uses GQL (ISO 39075) as its sole mutation interface. All graph modifications -- creating nodes and edges, updating properties, adding labels, and deleting elements -- flow through GQL mutation statements. This guide covers every mutation operation with working examples drawn from building automation and IoT domains.
 
 ## INSERT Nodes
 
@@ -32,7 +32,7 @@ FILTER s.name = 'temp-1' AND e.name = 'AHU-1'
 INSERT (s)-[:isPointOf]->(e)
 ```
 
-To create nodes and an edge in a single statement, write the full path pattern. Selene creates all elements in one atomic operation:
+To create nodes and an edge in a single statement, write the full path pattern. SeleneDB creates all elements in one atomic operation:
 
 ```gql
 INSERT (s:sensor {name: 'flow-1'})-[:isPointOf]->(e:equipment {name: 'AHU-2'})
@@ -84,7 +84,7 @@ SET r.weight = 1.0
 
 ### Two-Phase SET Semantics
 
-Selene evaluates all SET expressions against the pre-mutation graph snapshot before applying any changes. This guarantees that value swaps work correctly:
+SeleneDB evaluates all SET expressions against the pre-mutation graph snapshot before applying any changes. This guarantees that value swaps work correctly:
 
 ```gql
 MATCH (a:pair)-[:link]->(b:pair)
@@ -173,7 +173,7 @@ MATCH (n:sensor) FILTER n.name = 'temp-1'
 DELETE n
 ```
 
-If the node has edges, Selene returns an error:
+If the node has edges, SeleneDB returns an error:
 
 ```
 cannot delete node 1 with 2 incident edges, use DETACH DELETE
@@ -250,7 +250,7 @@ If a transaction is dropped without calling `commit()`, all changes are discarde
 
 ## Schema Validation
 
-When a node or edge schema is registered, Selene validates properties on every write operation (INSERT, SET, SET ALL). Schema validation includes:
+When a node or edge schema is registered, SeleneDB validates properties on every write operation (INSERT, SET, SET ALL). Schema validation includes:
 
 - **Type checking** -- property values must match the declared type in the schema definition.
 - **Required properties** -- schemas can mark properties as required; INSERT and SET ALL operations that omit required properties are rejected.
@@ -273,7 +273,7 @@ These statistics are available on the `GqlResult.mutations` field returned by ev
 
 ## Change Tracking
 
-Selene tracks individual changes within each mutation for downstream consumers (triggers, WAL, CDC replicas). Each atomic write produces a list of `Change` events:
+SeleneDB tracks individual changes within each mutation for downstream consumers (triggers, WAL, CDC replicas). Each atomic write produces a list of `Change` events:
 
 | Change Type | Fields |
 |-------------|--------|

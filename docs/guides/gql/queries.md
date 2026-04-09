@@ -1,6 +1,6 @@
 # GQL Queries
 
-This guide covers read-only GQL queries in Selene: pattern matching, filtering, projection, aggregation, and sorting. For mutations (INSERT, SET, DELETE), see the [mutations guide](mutations.md).
+This guide covers read-only GQL queries in SeleneDB: pattern matching, filtering, projection, aggregation, and sorting. For mutations (INSERT, SET, DELETE), see the [mutations guide](mutations.md).
 
 ## Basic MATCH
 
@@ -64,7 +64,7 @@ RETURN b.name AS building, s.name AS sensor
 
 ## Variable-length paths
 
-Variable-length paths match chains of edges with a specified depth range. Selene uses quantifier syntax with curly braces after the edge pattern.
+Variable-length paths match chains of edges with a specified depth range. SeleneDB uses quantifier syntax with curly braces after the edge pattern.
 
 Match all nodes reachable from a building within 1 to 3 hops:
 
@@ -328,7 +328,7 @@ The subquery inside `EXISTS` uses the same MATCH syntax as the outer query. Vari
 
 ## count(\*) short-circuit
 
-When the only column in RETURN is `count(*)`, Selene applies an optimization: it counts matching entities directly from the label bitmap index without materializing individual result rows. This avoids building bindings, evaluating property expressions, and allocating per-row output.
+When the only column in RETURN is `count(*)`, SeleneDB applies an optimization: it counts matching entities directly from the label bitmap index without materializing individual result rows. This avoids building bindings, evaluating property expressions, and allocating per-row output.
 
 ```gql
 MATCH (s:sensor) RETURN count(*) AS total

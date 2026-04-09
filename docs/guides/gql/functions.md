@@ -1,6 +1,6 @@
 # GQL Scalar Functions
 
-Selene provides 101 built-in scalar functions that can be used in `RETURN`, `FILTER`, `LET`, and `SET` expressions. This reference documents every function, organized by category.
+SeleneDB provides 101 built-in scalar functions that can be used in `RETURN`, `FILTER`, `LET`, and `SET` expressions. This reference documents every function, organized by category.
 
 ## Core Functions
 
@@ -150,7 +150,7 @@ RETURN s.name AS name, radians(s.bearing) AS bearing_rad
 
 ## Temporal Functions
 
-Functions for working with dates, times, datetimes, and durations. Selene supports five temporal types: `DATE`, `LOCAL_TIME`, `ZONED_TIME`, `LOCAL_DATETIME`, and `ZONED_DATETIME`.
+Functions for working with dates, times, datetimes, and durations. SeleneDB supports five temporal types: `DATE`, `LOCAL_TIME`, `ZONED_TIME`, `LOCAL_DATETIME`, and `ZONED_DATETIME`.
 
 | Name | Parameters | Returns | Description |
 |------|-----------|---------|-------------|

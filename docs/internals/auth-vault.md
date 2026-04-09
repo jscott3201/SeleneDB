@@ -17,7 +17,7 @@ This document describes the authorization system and encrypted vault in `selene-
 
 ## Auth Architecture
 
-Selene separates authentication (who are you?) from authorization (what can you do?):
+SeleneDB separates authentication (who are you?) from authorization (what can you do?):
 
 - **Authentication** is pluggable, supporting dev mode, token-based, and pre-shared key (PSK) types. Principals are nodes in the graph with an `identity` property.
 - **Authorization** uses Cedar (Amazon's policy language) to evaluate permit/forbid decisions against a typed entity model.
@@ -44,9 +44,9 @@ Request arrives
 
 ### Policy Language
 
-Cedar is a declarative policy language created by Amazon. Policies are `permit` or `forbid` rules with conditions on `principal`, `action`, and `resource`. Selene maps its domain concepts to Cedar's entity model:
+Cedar is a declarative policy language created by Amazon. Policies are `permit` or `forbid` rules with conditions on `principal`, `action`, and `resource`. SeleneDB maps its domain concepts to Cedar's entity model:
 
-| Cedar concept | Selene mapping |
+| Cedar concept | SeleneDB mapping |
 |---------------|----------------|
 | Principal | `Selene::Principal` entity with the principal's node ID |
 | Action | `Selene::Action` entity with a namespaced name (e.g., `entity:read`) |

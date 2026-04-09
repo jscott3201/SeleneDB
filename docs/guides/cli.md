@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `selene` CLI connects to a running Selene server over QUIC and provides subcommands
+The `selene` CLI connects to a running SeleneDB server over QUIC and provides subcommands
 for health checks, node and edge operations, time-series writes and queries, GQL execution,
 an interactive REPL shell, configuration tuning, key generation, and graph slicing.
 
@@ -29,7 +29,7 @@ All connection flags are optional and apply to every subcommand except `health -
 
 ### TLS Behavior
 
-Selene is secure by default. You must provide one of:
+SeleneDB is secure by default. You must provide one of:
 
 - `--insecure` -- disables TLS verification entirely (development only)
 - `--tls-ca <path>` -- specifies the CA certificate to verify the server
@@ -305,7 +305,7 @@ Example session:
 
 ```
 $ selene --insecure shell
-Selene GQL Shell - type .help for commands, .exit to quit
+SeleneDB GQL Shell - type .help for commands, .exit to quit
 selene> MATCH (n) RETURN count(*) AS cnt
 ┌─────┐
 │ cnt │
@@ -323,13 +323,13 @@ selene> .exit
 
 ### tune
 
-Analyze the system and recommend Selene configuration values based on available
+Analyze the system and recommend SeleneDB configuration values based on available
 hardware. The output includes a ready-to-paste TOML configuration block.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--profile` | `balanced` | Resource profile: `conservative`, `balanced`, or `greedy` |
-| `--scope` | `dedicated` | Deployment scope: `dedicated` (Selene owns the machine) or `embedded` (shared resources) |
+| `--scope` | `dedicated` | Deployment scope: `dedicated` (SeleneDB owns the machine) or `embedded` (shared resources) |
 
 Profile characteristics:
 

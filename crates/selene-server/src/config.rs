@@ -250,7 +250,9 @@ impl McpConfig {
     /// `0.0.0.0` replaced by `localhost` (unreachable bind addresses
     /// break MCP clients running outside the container).
     pub fn resolve_public_url(&self, http_addr: std::net::SocketAddr, dev_mode: bool) -> String {
-        if let Some(url) = &self.public_url {
+        if let Some(url) = &self.public_url
+            && !url.is_empty()
+        {
             return url.trim_end_matches('/').to_string();
         }
         let scheme = if dev_mode { "http" } else { "https" };
@@ -814,8 +816,17 @@ impl SeleneConfig {
         if let Some(enabled) = env_bool("SELENE_MCP_ENABLED") {
             mcp.enabled = enabled;
         }
-        if let Ok(url) = std::env::var("SELENE_PUBLIC_URL") {
+        if let Some(url) = env_non_empty("SELENE_MCP_PUBLIC_URL") {
             mcp.public_url = Some(url);
+        }
+        if let Some(key) = env_non_empty("SELENE_MCP_API_KEY") {
+            mcp.api_key = Some(key);
+        }
+        if let Some(key) = env_non_empty("SELENE_MCP_SIGNING_KEY") {
+            mcp.signing_key = Some(key);
+        }
+        if let Some(token) = env_non_empty("SELENE_MCP_REGISTRATION_TOKEN") {
+            mcp.registration_token = Some(token);
         }
 
         let performance = file_config.performance.unwrap_or_default();
@@ -1006,6 +1017,15 @@ fn env_bool(key: &str) -> Option<bool> {
     std::env::var(key)
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+}
+
+/// Read an env var, returning `None` if unset or empty (avoids Docker
+/// `${VAR}` expansion from overriding TOML values with blank strings).
+fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn default_true() -> bool {

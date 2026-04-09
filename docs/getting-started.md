@@ -1,82 +1,63 @@
 # Getting Started
 
-Selene is a lightweight, in-memory property graph database designed for IoT, smart buildings, and any domain that needs a live graph of connected entities with real-time state. Written in pure Rust with zero C/C++ dependencies, Selene ships as a single binary that exposes QUIC, HTTP, and MCP transports in one process.
+SeleneDB is the AI-native graph database. A single binary that combines a full ISO GQL query engine, built-in vector search, GraphRAG, agent memory, time-series storage, and a 64-tool MCP server — all in pure Rust with zero C/C++ dependencies.
 
-## Prerequisites
+This guide gets you from zero to running in under five minutes.
 
-- **Rust 1.94+** (install via [rustup](https://rustup.rs/))
-- No C compiler or system libraries required
+## Quick Start with Docker
 
-Docker users need only Docker (no Rust toolchain required).
+The fastest path. No toolchain required:
+
+```bash
+docker compose up -d
+curl -s http://localhost:8080/health | jq
+```
+
+This starts SeleneDB with:
+
+- **HTTP** on port 8080 — GQL queries, REST API, MCP server
+- **QUIC** on port 4510 — high-performance binary transport
+- **Dev mode** — self-signed TLS, no auth (for local development)
+
+The distroless image is ~14 MB compressed. No shell, no package manager, minimal attack surface.
+
+### With demo data
+
+Add `--seed` to populate a reference building graph (sensors, equipment, spaces, and relationships):
+
+```bash
+docker run -p 4510:4510/udp -p 8080:8080 ghcr.io/jscott3201/selenedb --dev --seed
+```
 
 ## Build from Source
 
-Clone the repository and build the server with HTTP and MCP features enabled:
+Requires Rust 1.94+ (install via [rustup](https://rustup.rs/)). No C compiler or system libraries needed.
 
 ```bash
-git clone https://github.com/yourorg/selene.git
-cd selene
-cargo build --release -p selene-server --features http,mcp
+git clone https://github.com/jscott3201/SeleneDB.git
+cd SeleneDB
+cargo run -p selene-server --features dev-tls -- --dev
 ```
 
-The server binary is at `target/release/selene-server`. The CLI binary can be built separately:
+All product features (HTTP, MCP, vector search, federation, RDF, time-series) are always compiled. The only compile-time flags are hardware variants:
+
+| Feature | Purpose |
+|---------|---------|
+| `dev-tls` | Self-signed TLS for local development |
+| `cuda` | NVIDIA GPU acceleration for embedding inference |
+| `metal` | Apple GPU acceleration for embedding inference |
+
+Build the CLI separately:
 
 ```bash
 cargo build --release -p selene-cli
 ```
 
-## Docker Quickstart
-
-The fastest way to run Selene is with Docker Compose. The dev compose file starts the server in dev mode with demo data pre-loaded:
-
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
-
-This starts Selene with:
-
-- QUIC on port 4510 (UDP)
-- HTTP on port 8080 (TCP)
-- MCP enabled
-- Dev mode (self-signed TLS, no auth)
-- Demo data seeded on startup
-
-To build the Docker image directly:
-
-```bash
-docker build -t selene .
-```
-
-The resulting image uses a distroless base and is roughly 14 MB compressed.
-
-## Dev Mode with Demo Data
-
-During development, the `--dev` and `--seed` flags simplify startup. Dev mode generates self-signed TLS certificates and disables authentication. The `--seed` flag populates the graph with sample building data (sensors, equipment, spaces, and relationships) when the graph is empty.
-
-```bash
-cargo run -p selene-server --features http,mcp -- --dev --seed
-```
-
-Expected output:
-
-```
-WARN  selene_server > === DEV MODE ACTIVE -- no authentication, self-signed TLS ===
-INFO  selene_server > seeding demo data...
-INFO  selene_server > QUIC listener started addr=0.0.0.0:4510
-INFO  selene_server > HTTP listener started addr=0.0.0.0:8080
-```
-
-The server is now running with a pre-built graph you can query immediately.
-
-## Verify the Server
-
-Check that the server is healthy with a simple curl request:
+## Verify It's Running
 
 ```bash
 curl -s http://localhost:8080/health | jq
 ```
-
-Expected output:
 
 ```json
 {
@@ -85,93 +66,181 @@ Expected output:
 }
 ```
 
-## Your First Query
+## Your First Queries
 
-### Via HTTP
+SeleneDB uses [GQL (ISO 39075)](guides/gql/overview.md) as its sole query language. Every transport — HTTP, QUIC, and MCP — routes through GQL.
 
-Selene uses GQL (ISO 39075) as its sole query language. Send a query to the HTTP endpoint to count all nodes in the graph:
+### Create and query data
 
 ```bash
+# Insert a building with a sensor
 curl -s -X POST http://localhost:8080/gql \
   -H 'Content-Type: application/json' \
-  -d '{"query": "MATCH (n) RETURN count(*) AS cnt"}' | jq
-```
+  -d '{"query": "INSERT (:building {name: '\''HQ'\''})-[:contains]->(:sensor {name: '\''T1'\'', unit: '\''°F'\'', temp: 72.5})"}'
 
-Expected output (with demo data seeded):
+# Query it back
+curl -s -X POST http://localhost:8080/gql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (b:building)-[:contains]->(s:sensor) RETURN b.name, s.name, s.temp"}' | jq
+```
 
 ```json
 {
   "status_code": "00000",
-  "message": "OK",
-  "row_count": 1,
-  "data": [{"cnt": 10}]
+  "data": [{"b.name": "HQ", "s.name": "T1", "s.temp": 72.5}]
 }
+```
+
+### Pattern matching
+
+```sql
+-- Variable-length path traversal
+MATCH (b:building)-[:contains]->{1,3}(s:sensor)
+FILTER s.temp > 80.0
+RETURN b.name, s.name, s.temp
+ORDER BY s.temp DESC LIMIT 10
+
+-- Aggregation
+MATCH (b:building)-[:contains]->(s:sensor)
+RETURN b.name, count(*) AS sensors, avg(s.temp) AS avg_temp
+GROUP BY b.name
+```
+
+### Semantic search
+
+Find nodes by meaning, not just structure:
+
+```sql
+CALL search.semantic('supply air temperature anomaly', 10)
+  YIELD nodeId, score, name
+```
+
+### GraphRAG retrieval
+
+Combine vector similarity, graph traversal, and community context in a single query:
+
+```sql
+CALL search.graphrag('which zones are overheating?', 'local', 10, 2)
+  YIELD nodeId, score, context
+```
+
+### Agent memory
+
+Persistent memory that survives across sessions — agents remember what they learned:
+
+```sql
+-- Store a fact
+CALL memory.remember('my-agent', 'The auth module uses Cedar policies for RBAC')
+
+-- Recall by semantic similarity
+CALL memory.recall('my-agent', 'how does auth work?', 5)
+  YIELD content, score
+
+-- Forget when no longer relevant
+CALL memory.forget('my-agent', 'Cedar policies')
+```
+
+### Time-series
+
+Ingest and query sensor data with built-in aggregation:
+
+```sql
+-- Query raw samples
+CALL ts.range(42, 'temp', '2026-03-20T00:00:00Z', '2026-03-21T00:00:00Z')
+  YIELD value, timestamp
+
+-- Aggregated buckets
+CALL ts.range_agg(42, 'temp', '2026-03-20T00:00:00Z', '2026-03-21T00:00:00Z', '1h', 'avg')
+  YIELD bucket, value
+```
+
+### Graph algorithms
+
+```sql
+CALL graph.pagerank(0.85, 20) YIELD nodeId, score
+CALL graph.louvain(10) YIELD nodeId, communityId
 ```
 
 ### Via the CLI
 
-The CLI connects to the server over QUIC. In dev mode, use the `--insecure` flag to skip TLS certificate verification:
+The CLI connects over QUIC. In dev mode, use `--insecure` to skip TLS verification:
 
 ```bash
 selene --insecure gql "MATCH (n) RETURN count(*) AS cnt"
 ```
 
-If you built from source, the binary is at `target/release/selene`:
+## Connect AI Agents via MCP
 
-```bash
-./target/release/selene --insecure gql "MATCH (n) RETURN count(*) AS cnt"
+SeleneDB ships a full [Model Context Protocol](https://modelcontextprotocol.io/) server with 64 tools. Point any MCP-compatible client at:
+
+```
+http://localhost:8080/mcp
 ```
 
-### Exploring the Graph
+For Claude Code / Copilot CLI, add to your MCP config:
 
-With demo data loaded, try querying for sensors and what they monitor:
-
-```bash
-curl -s -X POST http://localhost:8080/gql \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "MATCH (s:temperature_sensor)-[:isPointOf]->(e:equipment) RETURN s.name AS sensor, e.name AS equipment"}' | jq
+```json
+{
+  "mcpServers": {
+    "selenedb": {
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
 ```
 
-## Server CLI Flags
+Agents can immediately use tools like `gql_query`, `semantic_search`, `remember`, `recall`, `graphrag_search`, `batch_ingest`, and `resolve` — no additional setup required.
 
-The server accepts these flags at startup:
+See the [MCP Guide](guides/mcp.md) for the full tool reference.
+
+## Deployment Profiles
+
+SeleneDB scales from a Raspberry Pi to a GPU-accelerated cloud VM:
+
+```bash
+# Edge device (RPi 5, gateways) — minimal memory footprint
+docker run ghcr.io/jscott3201/selenedb --profile edge
+
+# Cloud VM — full services, higher memory budgets
+docker run ghcr.io/jscott3201/selenedb --profile cloud
+
+# Read replica — live changelog streaming from a primary
+docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510
+```
+
+### GPU-accelerated inference
+
+For on-device embedding with EmbeddingGemma (CUDA or Metal):
+
+```bash
+docker compose -f docker-compose.gpu.yml up -d
+```
+
+This enables native embedding inference at ~50ms/query on a Tesla T4, with no external API calls or network dependency.
+
+## Server Flags
 
 | Flag | Description |
 |------|-------------|
-| `--dev` | Enable dev mode (self-signed TLS, no auth) |
+| `--dev` | Dev mode (self-signed TLS, no auth) |
 | `--seed` | Seed demo data on startup (if graph is empty) |
 | `--config <path>` | Path to TOML config file |
 | `--profile <type>` | Runtime profile: `edge`, `cloud`, or `standalone` |
-| `--quic-listen <addr>` | QUIC listen address override |
-| `--http-listen <addr>` | HTTP listen address override |
-| `--data-dir <path>` | Data directory override |
+| `--quic-listen <addr>` | QUIC listen address (default: `0.0.0.0:4510`) |
+| `--http-listen <addr>` | HTTP listen address (default: `0.0.0.0:8080`) |
+| `--data-dir <path>` | Data directory for WAL and snapshots |
 | `--show-config` | Print effective config and exit |
 | `--replica-of <addr>` | Start as a read-only replica of the given primary |
 
-## Feature Flags
-
-All features are opt-in at compile time:
-
-| Feature | Description |
-|---------|-------------|
-| `http` | HTTP transport (axum) |
-| `mcp` | Model Context Protocol server |
-| `federation` | GQL-native federation mesh |
-| `vector` | Vector embeddings (candle) |
-| `search` | Full-text search (tantivy) |
-| `temporal` | Temporal graph features |
-| `cloud-storage` | Cloud offload (S3/GCS/Azure) |
-| `rdf` | RDF import/export |
-| `rdf-sparql` | SPARQL query support |
-
-Build with multiple features:
-
-```bash
-cargo build --release -p selene-server --features http,mcp,federation,search
-```
-
 ## Next Steps
 
-- [GQL Query Guide](guides/gql/overview.md) -- learn the query language
-- [HTTP API Reference](guides/http-api.md) -- full HTTP endpoint documentation
-- [Configuration](operations/configuration.md) -- TOML config, profiles, and environment variables
+| | |
+|---|---|
+| [GQL Guide](guides/gql/overview.md) | Learn the query language — pattern matching, mutations, functions, procedures |
+| [MCP Tools](guides/mcp.md) | 64 tools purpose-built for AI agents |
+| [Vector Search](guides/vector-search.md) | Embeddings, HNSW indexing, semantic search, GraphRAG |
+| [Time-Series](guides/time-series.md) | Multi-tier sensor data storage with built-in aggregation |
+| [Agent Workflows](agent-workflows.md) | End-to-end patterns for AI agent integration |
+| [Configuration](operations/configuration.md) | TOML config, runtime profiles, environment variables |
+| [Deployment](operations/deployment.md) | Docker, GPU, edge, cloud, and federation deployment |
+| [HTTP API](guides/http-api.md) | REST endpoint reference |
