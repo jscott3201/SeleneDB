@@ -26,6 +26,7 @@ pub mod build;
 pub mod distance;
 pub mod graph;
 pub mod params;
+pub mod quantize;
 pub mod search;
 
 pub use build::build;
