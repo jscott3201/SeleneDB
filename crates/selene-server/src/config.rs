@@ -816,16 +816,16 @@ impl SeleneConfig {
         if let Some(enabled) = env_bool("SELENE_MCP_ENABLED") {
             mcp.enabled = enabled;
         }
-        if let Ok(url) = std::env::var("SELENE_MCP_PUBLIC_URL") {
+        if let Some(url) = env_non_empty("SELENE_MCP_PUBLIC_URL") {
             mcp.public_url = Some(url);
         }
-        if let Ok(key) = std::env::var("SELENE_MCP_API_KEY") {
+        if let Some(key) = env_non_empty("SELENE_MCP_API_KEY") {
             mcp.api_key = Some(key);
         }
-        if let Ok(key) = std::env::var("SELENE_MCP_SIGNING_KEY") {
+        if let Some(key) = env_non_empty("SELENE_MCP_SIGNING_KEY") {
             mcp.signing_key = Some(key);
         }
-        if let Ok(token) = std::env::var("SELENE_MCP_REGISTRATION_TOKEN") {
+        if let Some(token) = env_non_empty("SELENE_MCP_REGISTRATION_TOKEN") {
             mcp.registration_token = Some(token);
         }
 
@@ -1017,6 +1017,15 @@ fn env_bool(key: &str) -> Option<bool> {
     std::env::var(key)
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+}
+
+/// Read an env var, returning `None` if unset or empty (avoids Docker
+/// `${VAR}` expansion from overriding TOML values with blank strings).
+fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn default_true() -> bool {

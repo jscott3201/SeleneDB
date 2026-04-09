@@ -102,6 +102,7 @@ create_vm() {
 #!/bin/bash
 set -e
 # Install GPU drivers on every boot (idempotent)
+export PATH=/var/lib/nvidia/bin:$PATH
 if ! nvidia-smi &>/dev/null; then
     cos-extensions install gpu 2>&1 | logger -t gpu-setup
     mount --bind /var/lib/nvidia /var/lib/nvidia
@@ -185,7 +186,7 @@ ${env_content}
 EOF
 chmod 600 ~/.env"
 
-    log "Secrets uploaded. MCP API key: ${api_key:0:8}..."
+    log "Secrets uploaded to ${VM_NAME}:~/.env with restricted permissions."
 }
 
 # ── Deploy to VM ─────────────────────────────────────────────────────────

@@ -192,7 +192,7 @@ pub(super) async fn enrich_communities_impl(
                 )
             })
             .await?;
-        if result.status_code == "00000" {
+        if result.status_code.starts_with("00") {
             enriched += 1;
         } else {
             tracing::warn!(
