@@ -23,13 +23,13 @@ rate_limit_data = 20
 bind = "0.0.0.0:4510"
 
 [services]
-vector = true
-search = true
-temporal = true
-federation = false
-algorithms = true
-mcp = true
-replicas = false
+vector = { enabled = true }
+search = { enabled = true }
+temporal = { enabled = true }
+federation = { enabled = false }
+algorithms = { enabled = true }
+mcp = { enabled = true }
+replicas = { enabled = false }
 
 [mcp]
 # API key for MCP endpoint authentication.
