@@ -83,10 +83,44 @@ impl GemmaProvider {
         let dense1_path = model_dir.join("2_Dense/model.safetensors");
         let dense2_path = model_dir.join("3_Dense/model.safetensors");
 
-        // Auto-detect GGUF vs safetensors backbone
+        // Auto-detect backbone format and select compute device.
+        //
+        // Candle's quantized ops (QMatMul, quantized_nn::RmsNorm) lack GPU
+        // kernels, so GGUF models must run on CPU. When a GPU is available we
+        // prefer the safetensors backbone for full hardware acceleration. The
+        // selection priority is:
+        //
+        //   GPU available + safetensors exists  → safetensors on GPU
+        //   GPU available + only GGUF exists    → GGUF on CPU (with warning)
+        //   CPU only      + GGUF exists         → GGUF on CPU
+        //   CPU only      + only safetensors    → safetensors on CPU
         let gguf_path = model_dir.join("model.gguf");
         let safetensors_path = model_dir.join("model.safetensors");
-        let use_gguf = gguf_path.exists();
+
+        let mut device = select_device();
+        let is_gpu = device.is_cuda() || device.is_metal();
+
+        let use_gguf = if is_gpu && safetensors_path.exists() {
+            // Prefer safetensors on GPU for full acceleration
+            if gguf_path.exists() {
+                tracing::info!(
+                    "Both GGUF and safetensors found; preferring safetensors for GPU acceleration"
+                );
+            }
+            false
+        } else if gguf_path.exists() {
+            if is_gpu {
+                tracing::warn!(
+                    "GGUF backbone requires CPU (quantized ops lack GPU kernels); \
+                     falling back to CPU. Add model.safetensors for GPU acceleration."
+                );
+                device = Device::Cpu;
+            }
+            true
+        } else {
+            // safetensors only (or neither, caught below)
+            false
+        };
 
         // Check required files
         let backbone_desc = if use_gguf {
@@ -129,8 +163,6 @@ impl GemmaProvider {
             Tokenizer::from_file(&tokenizer_path).map_err(|e| GqlError::InvalidArgument {
                 message: format!("failed to load tokenizer: {e}"),
             })?;
-
-        let device = select_device();
 
         // Load encoder backbone (GGUF or safetensors)
         let (encoder, format_label) = if use_gguf {

@@ -250,10 +250,10 @@ impl McpConfig {
     /// `0.0.0.0` replaced by `localhost` (unreachable bind addresses
     /// break MCP clients running outside the container).
     pub fn resolve_public_url(&self, http_addr: std::net::SocketAddr, dev_mode: bool) -> String {
-        if let Some(url) = &self.public_url {
-            if !url.is_empty() {
-                return url.trim_end_matches('/').to_string();
-            }
+        if let Some(url) = &self.public_url
+            && !url.is_empty()
+        {
+            return url.trim_end_matches('/').to_string();
         }
         let scheme = if dev_mode { "http" } else { "https" };
         let addr_str = http_addr.to_string();
