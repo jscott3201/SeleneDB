@@ -49,9 +49,7 @@ where
                 ))),
             })
             .collect(),
-        _ => Err(D::Error::custom(format!(
-            "expected array of IDs, got {v}"
-        ))),
+        _ => Err(D::Error::custom(format!("expected array of IDs, got {v}"))),
     }
 }
 

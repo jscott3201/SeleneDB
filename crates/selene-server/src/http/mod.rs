@@ -47,7 +47,8 @@ enum AuthFailure {
 fn unauthorized_response(failure: AuthFailure) -> axum::response::Response {
     let (www_auth, error, description) = match failure {
         AuthFailure::Missing => (
-            r#"Bearer error="invalid_request", error_description="missing Authorization header""#.to_owned(),
+            r#"Bearer error="invalid_request", error_description="missing Authorization header""#
+                .to_owned(),
             "invalid_request",
             "MCP requires Authorization: Bearer <token>",
         ),
