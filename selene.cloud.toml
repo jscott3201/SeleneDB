@@ -45,8 +45,7 @@ signing_key = ""         # REQUIRED: set via SELENE_MCP_SIGNING_KEY env var
 registration_token = ""  # REQUIRED: set via SELENE_MCP_REGISTRATION_TOKEN env var
 
 # Public URL for OAuth discovery (set to Tailscale MagicDNS hostname)
-# Example: http://selene-gcp:8080
-public_url = ""          # Set via SELENE_MCP_PUBLIC_URL env var
+public_url = "http://selene-gcp.taile9ca5.ts.net:8080"
 
 session_timeout = 3600
 max_sessions = 50

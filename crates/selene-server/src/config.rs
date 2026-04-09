@@ -251,7 +251,9 @@ impl McpConfig {
     /// break MCP clients running outside the container).
     pub fn resolve_public_url(&self, http_addr: std::net::SocketAddr, dev_mode: bool) -> String {
         if let Some(url) = &self.public_url {
-            return url.trim_end_matches('/').to_string();
+            if !url.is_empty() {
+                return url.trim_end_matches('/').to_string();
+            }
         }
         let scheme = if dev_mode { "http" } else { "https" };
         let addr_str = http_addr.to_string();
@@ -814,8 +816,17 @@ impl SeleneConfig {
         if let Some(enabled) = env_bool("SELENE_MCP_ENABLED") {
             mcp.enabled = enabled;
         }
-        if let Ok(url) = std::env::var("SELENE_PUBLIC_URL") {
+        if let Ok(url) = std::env::var("SELENE_MCP_PUBLIC_URL") {
             mcp.public_url = Some(url);
+        }
+        if let Ok(key) = std::env::var("SELENE_MCP_API_KEY") {
+            mcp.api_key = Some(key);
+        }
+        if let Ok(key) = std::env::var("SELENE_MCP_SIGNING_KEY") {
+            mcp.signing_key = Some(key);
+        }
+        if let Ok(token) = std::env::var("SELENE_MCP_REGISTRATION_TOKEN") {
+            mcp.registration_token = Some(token);
         }
 
         let performance = file_config.performance.unwrap_or_default();
