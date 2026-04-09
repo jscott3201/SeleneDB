@@ -374,6 +374,22 @@ pub(crate) struct SchemaLabelParams {
     pub(crate) label: String,
 }
 
+#[derive(Default, Deserialize, JsonSchema)]
+pub(crate) struct SchemaDumpParams {
+    /// Optional label filter. If set, only exports the schema for that specific
+    /// type (returns full detail regardless of compact flag).
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// If true (default), returns a compact summary — type names with property
+    /// counts and edge connectivity. If false, returns full details including
+    /// descriptions and all property definitions.
+    #[serde(default)]
+    pub(crate) compact: Option<bool>,
+    /// If true, include system schemas (__ prefix). Default: false.
+    #[serde(default)]
+    pub(crate) include_system: Option<bool>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ImportPackParams {
     /// Schema pack content in TOML or JSON format. Format is auto-detected.

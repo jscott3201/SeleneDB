@@ -359,7 +359,7 @@ fn schema_dump_excludes_ai_system_labels() {
         )
         .unwrap();
 
-    let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+    let query = "CALL graph.schemaDump(false, true, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(query, &graph).execute().unwrap();
 
     assert_eq!(result.row_count(), 1);
@@ -397,7 +397,7 @@ fn schema_dump_includes_system_labels_when_requested() {
         )
         .unwrap();
 
-    let query = "CALL graph.schemaDump(true) YIELD schema RETURN schema";
+    let query = "CALL graph.schemaDump(true, true, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(query, &graph).execute().unwrap();
 
     let batch = &result.batches[0];
@@ -578,8 +578,8 @@ fn parse_check_validates_schema_derived_query() {
         )
         .unwrap();
 
-    // Step 1: Get schema dump
-    let dump_query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+    // Step 1: Get schema dump (full mode to see property names)
+    let dump_query = "CALL graph.schemaDump(false, false, null) YIELD schema RETURN schema";
     let result = QueryBuilder::new(dump_query, &graph).execute().unwrap();
 
     let batch = &result.batches[0];

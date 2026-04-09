@@ -1677,14 +1677,32 @@ impl SeleneTools {
             open_world_hint = false
         )
     )]
-    async fn schema_dump(&self) -> Result<CallToolResult, McpError> {
+    async fn schema_dump(
+        &self,
+        params: Parameters<SchemaDumpParams>,
+    ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
-        let query = "CALL graph.schemaDump(false) YIELD schema RETURN schema";
+        let p = params.0;
+
+        let mut gql_params = HashMap::new();
+        gql_params.insert(
+            "includeSystem".into(),
+            Value::Bool(p.include_system.unwrap_or(false)),
+        );
+        gql_params.insert("compact".into(), Value::Bool(p.compact.unwrap_or(true)));
+        if let Some(label) = &p.label {
+            gql_params.insert("label".into(), Value::from(label.as_str()));
+        } else {
+            gql_params.insert("label".into(), Value::Null);
+        }
+
+        let query =
+            "CALL graph.schemaDump($includeSystem, $compact, $label) YIELD schema RETURN schema";
         let result = ops::gql::execute_gql(
             &self.state,
             &auth,
             query,
-            None,
+            Some(&gql_params),
             false,
             false,
             ops::gql::ResultFormat::Json,
