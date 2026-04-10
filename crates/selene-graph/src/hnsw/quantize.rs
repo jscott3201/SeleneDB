@@ -549,7 +549,7 @@ impl PolarQuantizer {
     /// Core distance function for quantized search. Processes packed codes
     /// directly to avoid allocation. Uses 8-wide accumulator for auto-SIMD.
     pub fn asymmetric_dot(&self, query_rotated: &[f32], packed: &[u8]) -> f32 {
-        assert_eq!(query_rotated.len(), self.dim);
+        debug_assert_eq!(query_rotated.len(), self.dim);
         match self.bits {
             8 => self.asymmetric_dot_8bit(query_rotated, packed),
             4 => self.asymmetric_dot_4bit(query_rotated, packed),
@@ -587,16 +587,42 @@ impl PolarQuantizer {
 
     fn asymmetric_dot_4bit(&self, q: &[f32], packed: &[u8]) -> f32 {
         let centroids = &self.quantizer.centroids;
-        let mut total = 0.0_f32;
-        let mut qi = 0;
+        let mut sum = [0.0_f32; 8];
+        let q_chunks = q.chunks_exact(16);
+        let p_chunks = packed.chunks_exact(8);
+        let q_rem = q_chunks.remainder();
+        let p_rem = p_chunks.remainder();
 
-        for &byte in packed {
-            if qi < self.dim {
-                total += q[qi] * centroids[(byte >> 4) as usize];
+        for (q16, p8) in q_chunks.zip(p_chunks) {
+            sum[0] += q16[0] * centroids[(p8[0] >> 4) as usize];
+            sum[1] += q16[1] * centroids[(p8[0] & 0x0F) as usize];
+            sum[2] += q16[2] * centroids[(p8[1] >> 4) as usize];
+            sum[3] += q16[3] * centroids[(p8[1] & 0x0F) as usize];
+            sum[4] += q16[4] * centroids[(p8[2] >> 4) as usize];
+            sum[5] += q16[5] * centroids[(p8[2] & 0x0F) as usize];
+            sum[6] += q16[6] * centroids[(p8[3] >> 4) as usize];
+            sum[7] += q16[7] * centroids[(p8[3] & 0x0F) as usize];
+            sum[0] += q16[8] * centroids[(p8[4] >> 4) as usize];
+            sum[1] += q16[9] * centroids[(p8[4] & 0x0F) as usize];
+            sum[2] += q16[10] * centroids[(p8[5] >> 4) as usize];
+            sum[3] += q16[11] * centroids[(p8[5] & 0x0F) as usize];
+            sum[4] += q16[12] * centroids[(p8[6] >> 4) as usize];
+            sum[5] += q16[13] * centroids[(p8[6] & 0x0F) as usize];
+            sum[6] += q16[14] * centroids[(p8[7] >> 4) as usize];
+            sum[7] += q16[15] * centroids[(p8[7] & 0x0F) as usize];
+        }
+
+        let mut total =
+            (sum[0] + sum[1]) + (sum[2] + sum[3]) + (sum[4] + sum[5]) + (sum[6] + sum[7]);
+        // Handle remaining elements (dim not divisible by 16).
+        let mut qi = 0;
+        for &byte in p_rem {
+            if qi < q_rem.len() {
+                total += q_rem[qi] * centroids[(byte >> 4) as usize];
                 qi += 1;
             }
-            if qi < self.dim {
-                total += q[qi] * centroids[(byte & 0x0F) as usize];
+            if qi < q_rem.len() {
+                total += q_rem[qi] * centroids[(byte & 0x0F) as usize];
                 qi += 1;
             }
         }
@@ -605,18 +631,44 @@ impl PolarQuantizer {
 
     fn asymmetric_dot_3bit(&self, q: &[f32], packed: &[u8]) -> f32 {
         let centroids = &self.quantizer.centroids;
-        let mut total = 0.0_f32;
+        let mut sum = [0.0_f32; 8];
+        // 8 codes × 3 bits = 24 bits = 3 bytes per chunk; process 8 query values per chunk.
+        let full_chunks = self.dim / 8;
+        let mut qi = 0;
+        let mut bi = 0;
+
+        for _ in 0..full_chunks {
+            // Load 3 bytes → 24 bits → 8 × 3-bit codes.
+            let b0 = u32::from(packed[bi]);
+            let b1 = u32::from(packed[bi + 1]);
+            let b2 = u32::from(packed[bi + 2]);
+            let bits24 = b0 | (b1 << 8) | (b2 << 16);
+
+            sum[0] += q[qi] * centroids[(bits24 & 0x07) as usize];
+            sum[1] += q[qi + 1] * centroids[((bits24 >> 3) & 0x07) as usize];
+            sum[2] += q[qi + 2] * centroids[((bits24 >> 6) & 0x07) as usize];
+            sum[3] += q[qi + 3] * centroids[((bits24 >> 9) & 0x07) as usize];
+            sum[4] += q[qi + 4] * centroids[((bits24 >> 12) & 0x07) as usize];
+            sum[5] += q[qi + 5] * centroids[((bits24 >> 15) & 0x07) as usize];
+            sum[6] += q[qi + 6] * centroids[((bits24 >> 18) & 0x07) as usize];
+            sum[7] += q[qi + 7] * centroids[((bits24 >> 21) & 0x07) as usize];
+
+            qi += 8;
+            bi += 3;
+        }
+
+        let mut total =
+            (sum[0] + sum[1]) + (sum[2] + sum[3]) + (sum[4] + sum[5]) + (sum[6] + sum[7]);
+        // Remaining codes (dim not divisible by 8).
         let mut buf: u32 = 0;
         let mut bits: u32 = 0;
-        let mut byte_idx = 0;
-
-        for qi in &q[..self.dim] {
-            while bits < 3 && byte_idx < packed.len() {
-                buf |= u32::from(packed[byte_idx]) << bits;
+        for qv in &q[qi..self.dim] {
+            while bits < 3 && bi < packed.len() {
+                buf |= u32::from(packed[bi]) << bits;
                 bits += 8;
-                byte_idx += 1;
+                bi += 1;
             }
-            total += qi * centroids[(buf & 0x07) as usize];
+            total += qv * centroids[(buf & 0x07) as usize];
             buf >>= 3;
             bits -= 3;
         }
