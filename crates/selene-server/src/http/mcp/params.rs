@@ -705,6 +705,15 @@ pub(crate) struct LogTraceParams {
     /// Tool execution time in milliseconds.
     #[serde(default)]
     pub(crate) latency_ms: Option<i64>,
+    /// The model's internal reasoning chain (maps to thinking tokens).
+    #[serde(default)]
+    pub(crate) thinking: Option<String>,
+    /// The user query that triggered this tool call.
+    #[serde(default)]
+    pub(crate) user_query: Option<String>,
+    /// Node IDs of entities this trace references (creates :about edges).
+    #[serde(default)]
+    pub(crate) about_node_ids: Option<Vec<u64>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -730,9 +739,49 @@ pub(crate) struct ExportTracesParams {
     /// Maximum traces to return (default: 1000, max: 10000).
     #[serde(default)]
     pub(crate) limit: Option<usize>,
-    /// Output format: "jsonl" (default) or "json".
+    /// Output format: "jsonl" (default), "json", or "huggingface".
     #[serde(default)]
     pub(crate) format: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct LogSessionParams {
+    /// Session identifier (must match session_id used in log_trace calls).
+    pub(crate) session_id: String,
+    /// System prompt or context used for this session.
+    #[serde(default)]
+    pub(crate) system_prompt: Option<String>,
+    /// Building or facility name.
+    #[serde(default)]
+    pub(crate) building: Option<String>,
+    /// Operator role (e.g., "facilities_manager", "energy_analyst").
+    #[serde(default)]
+    pub(crate) operator_role: Option<String>,
+    /// Current weather conditions.
+    #[serde(default)]
+    pub(crate) weather: Option<String>,
+    /// Active pricing or demand tier.
+    #[serde(default)]
+    pub(crate) active_tier: Option<String>,
+    /// Arbitrary metadata as a JSON string.
+    #[serde(default)]
+    pub(crate) metadata: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct LogOutcomeParams {
+    /// Session identifier to associate the outcome with.
+    pub(crate) session_id: String,
+    /// Whether the session achieved its goal.
+    pub(crate) success: bool,
+    /// Summary of what happened.
+    pub(crate) outcome_summary: String,
+    /// If failed, the reason why.
+    #[serde(default)]
+    pub(crate) failure_reason: Option<String>,
+    /// Quality score from 0 (worst) to 10 (best).
+    #[serde(default)]
+    pub(crate) quality_score: Option<i64>,
 }
 
 // ── Proposals (human-in-the-loop) ───────────────────────────────────
