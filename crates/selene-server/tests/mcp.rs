@@ -561,4 +561,21 @@ async fn invalid_session_id_rejected() {
         404,
         "request with invalid session ID should be 404 Not Found"
     );
+
+    // Verify enriched JSON body with recovery instructions.
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("application/json"),
+        "expired session response should be JSON, got: {content_type}"
+    );
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "session_expired");
+    assert!(json["message"].as_str().unwrap().contains("expired"));
+    assert!(json["ttl_seconds"].is_number());
+    assert!(json["recovery"].as_str().unwrap().contains("initialize"));
 }
