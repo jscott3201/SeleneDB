@@ -115,6 +115,10 @@ pub(super) async fn log_trace_impl(
         .and_then(|v| v.as_i64());
 
     // Create :about edges to referenced entities.
+    // Note: uses execute_gql directly instead of submit_mut because the
+    // mutation batcher's snapshot doesn't reliably see nodes created in the
+    // same tool invocation. Direct execution reads a fresh ArcSwap snapshot
+    // after the prior INSERT has committed. Best-effort: errors are ignored.
     if let (Some(trace_id), Some(node_ids)) = (trace_id, &about_ids) {
         for &target_id in node_ids {
             let mut edge_params = HashMap::new();
@@ -278,51 +282,48 @@ pub(super) async fn log_session_impl(
 
     let mut params = HashMap::new();
     params.insert("sid".into(), Value::from(p.session_id.as_str()));
-    params.insert(
-        "sp".into(),
-        Value::from(p.system_prompt.as_deref().unwrap_or("")),
-    );
-    params.insert(
-        "building".into(),
-        Value::from(p.building.as_deref().unwrap_or("")),
-    );
-    params.insert(
-        "role".into(),
-        Value::from(p.operator_role.as_deref().unwrap_or("")),
-    );
-    params.insert(
-        "weather".into(),
-        Value::from(p.weather.as_deref().unwrap_or("")),
-    );
-    params.insert(
-        "tier".into(),
-        Value::from(p.active_tier.as_deref().unwrap_or("")),
-    );
-    params.insert(
-        "meta".into(),
-        Value::from(p.metadata.as_deref().unwrap_or("")),
-    );
     params.insert("now".into(), Value::Int(now_ms));
 
-    let query = "MERGE (s:__TraceSession {session_id: $sid}) \
-                  ON CREATE SET \
-                      s.system_prompt = $sp, \
-                      s.building = $building, \
-                      s.operator_role = $role, \
-                      s.weather = $weather, \
-                      s.active_tier = $tier, \
-                      s.metadata = $meta, \
-                      s.created_at = $now, \
-                      s.updated_at = $now \
-                  ON MATCH SET \
-                      s.system_prompt = $sp, \
-                      s.building = $building, \
-                      s.operator_role = $role, \
-                      s.weather = $weather, \
-                      s.active_tier = $tier, \
-                      s.metadata = $meta, \
-                      s.updated_at = $now \
-                  RETURN id(s) AS sessionId";
+    // Build SET clauses dynamically so partial updates don't wipe existing fields.
+    let optional_fields: &[(&str, &str, Option<&str>)] = &[
+        ("system_prompt", "sp", p.system_prompt.as_deref()),
+        ("building", "building", p.building.as_deref()),
+        ("operator_role", "role", p.operator_role.as_deref()),
+        ("weather", "weather", p.weather.as_deref()),
+        ("active_tier", "tier", p.active_tier.as_deref()),
+        ("metadata", "meta", p.metadata.as_deref()),
+    ];
+
+    let mut set_clauses = Vec::new();
+    for &(prop, param, value) in optional_fields {
+        if let Some(v) = value {
+            params.insert(param.into(), Value::from(v));
+            set_clauses.push(format!("s.{prop} = ${param}"));
+        }
+    }
+
+    // ON CREATE always sets all provided fields + timestamps.
+    // ON MATCH only sets provided fields + updated_at.
+    let create_sets = if set_clauses.is_empty() {
+        "s.created_at = $now, s.updated_at = $now".to_string()
+    } else {
+        format!(
+            "{}, s.created_at = $now, s.updated_at = $now",
+            set_clauses.join(", ")
+        )
+    };
+    let match_sets = if set_clauses.is_empty() {
+        "s.updated_at = $now".to_string()
+    } else {
+        format!("{}, s.updated_at = $now", set_clauses.join(", "))
+    };
+
+    let query = format!(
+        "MERGE (s:__TraceSession {{session_id: $sid}}) \
+         ON CREATE SET {create_sets} \
+         ON MATCH SET {match_sets} \
+         RETURN id(s) AS sessionId"
+    );
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
@@ -331,7 +332,7 @@ pub(super) async fn log_session_impl(
             ops::gql::execute_gql(
                 &st,
                 &auth2,
-                query,
+                &query,
                 Some(&params),
                 false,
                 false,
@@ -364,7 +365,10 @@ pub(super) async fn log_outcome_impl(
         "reason".into(),
         Value::from(p.failure_reason.as_deref().unwrap_or("")),
     );
-    params.insert("score".into(), Value::Int(p.quality_score.unwrap_or(-1)));
+    params.insert(
+        "score".into(),
+        p.quality_score.map_or(Value::Null, Value::Int),
+    );
     params.insert("now".into(), Value::Int(now_ms));
 
     let query = "MERGE (o:__TraceOutcome {session_id: $sid}) \
