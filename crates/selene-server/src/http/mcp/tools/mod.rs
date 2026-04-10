@@ -1407,6 +1407,54 @@ impl SeleneTools {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    // ── Vector Quantization Stats ────────────────────────────────────
+
+    #[tool(
+        name = "quantization_stats",
+        description = "Get vector quantization statistics for all HNSW indexes. \
+        Returns compression method, bit width, vector count, memory saved, and \
+        compression ratio. Empty result when quantization is not enabled.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn quantization_stats(&self) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let query =
+            "CALL vector.quantizationStats() YIELD namespace, method, bits, vector_count, \
+             quantized_bytes, f32_bytes, compression_ratio, rescore \
+             RETURN namespace, method, bits, vector_count, quantized_bytes, \
+             f32_bytes, compression_ratio, rescore";
+
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        if result.row_count == 0 {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No quantized HNSW indexes found. Enable quantization in config \
+                 with hnsw_quantize = true under [vector].",
+            )]))
+        } else {
+            let text = format!(
+                "Quantization stats ({} index(es)):\n{data}",
+                result.row_count
+            );
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }
+    }
+
     // ── Entity Resolution + Neighborhood ─────────────────────────────
 
     #[tool(

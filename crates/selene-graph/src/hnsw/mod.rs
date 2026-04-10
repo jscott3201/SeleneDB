@@ -32,6 +32,7 @@ pub mod search;
 pub use build::build;
 pub use graph::HnswGraph;
 pub use params::HnswParams;
+pub use quantize::{QuantBits, QuantizationConfig};
 pub use search::search;
 
 use std::sync::Arc;
@@ -369,6 +370,51 @@ impl HnswIndex {
     pub fn tombstones(&self) -> RoaringBitmap {
         self.tombstones.lock().clone()
     }
+
+    /// Return quantization statistics from the read snapshot, if quantized.
+    ///
+    /// Returns `(method, bits, vector_count, quantized_bytes, f32_bytes,
+    /// compression_ratio, rescore)` or `None` when no quantized storage exists.
+    pub fn quantization_stats(&self) -> Option<QuantizationStats> {
+        let guard = self.read_snapshot.load();
+        let qs = guard.quantized()?;
+        let q = qs.quantizer();
+        let vector_count = qs.len();
+        let quantized_bytes = qs.codes_bytes();
+        let f32_bytes = vector_count * q.dim() * 4;
+        Some(QuantizationStats {
+            method: "PolarQuant",
+            bits: q.bits(),
+            vector_count,
+            quantized_bytes,
+            f32_bytes,
+            compression_ratio: q.compression_ratio(),
+            rescore: self
+                .params
+                .quantization
+                .as_ref()
+                .is_some_and(|c| c.rescore),
+        })
+    }
+}
+
+/// Statistics about the quantized storage in an HNSW index.
+#[derive(Debug, Clone)]
+pub struct QuantizationStats {
+    /// Quantization method name (e.g., "PolarQuant").
+    pub method: &'static str,
+    /// Bits per dimension.
+    pub bits: u8,
+    /// Number of quantized vectors.
+    pub vector_count: usize,
+    /// Total bytes used by quantized codes.
+    pub quantized_bytes: usize,
+    /// Equivalent f32 storage (for comparison).
+    pub f32_bytes: usize,
+    /// Compression ratio (f32_bytes / quantized_bytes).
+    pub compression_ratio: f32,
+    /// Whether rescore with f32 is enabled.
+    pub rescore: bool,
 }
 
 // ---------------------------------------------------------------------------

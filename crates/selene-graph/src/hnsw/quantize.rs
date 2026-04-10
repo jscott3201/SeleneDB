@@ -708,6 +708,12 @@ impl QuantizedStorage {
         self.codes.is_empty()
     }
 
+    /// Total memory used by quantized codes (bytes), excluding the quantizer
+    /// matrix overhead.
+    pub fn codes_bytes(&self) -> usize {
+        self.codes.iter().map(|c| c.len()).sum()
+    }
+
     /// Remap internal indices for `clone_without()`.
     ///
     /// Produces a new `QuantizedStorage` containing only the nodes in
