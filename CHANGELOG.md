@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Graph
+- **PolarQuant vector quantization** for HNSW indexes — 4–10× memory compression with >99% recall. Supports 3-bit (10.7×), 4-bit (8×), and 8-bit (4×) quantization. Asymmetric search uses f32 queries against quantized codes for maximum accuracy. Optional rescore re-ranks results with full-precision vectors.
+- `QuantizedStorage` with Haar-random rotation, Lloyd-Max scalar quantization, and bit-packed codes. Zero external dependencies — pure Rust implementation.
+- Quantized search path: upper HNSW layers use f32 cosine for navigation accuracy; layer-0 beam search uses asymmetric dot product with quantized codes.
+
+#### GQL Engine
+- `vector.quantizationStats()` procedure — reports compression ratio, memory savings, bit width, vector count, and configuration.
+
+#### Server
+- TOML configuration for quantization: `hnsw_quantize`, `hnsw_quantize_bits`, `hnsw_quantize_rescore` in `[vector]` section.
+- `quantization_stats` MCP tool for AI agent access to quantization metrics.
+
 ## [0.2.0] - 2026-04-04
 
 ### Added
