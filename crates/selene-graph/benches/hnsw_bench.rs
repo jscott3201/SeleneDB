@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use selene_core::NodeId;
-use selene_graph::hnsw::{HnswGraph, QuantBits, QuantizationConfig, build, params::HnswParams, search};
+use selene_graph::hnsw::{
+    HnswGraph, QuantBits, QuantizationConfig, build, params::HnswParams, search,
+};
 use selene_testing::bench_profiles::{BenchProfile, bench_profile};
 
 fn random_unit_vectors(n: usize, dim: usize) -> Vec<(NodeId, Arc<[f32]>)> {
@@ -560,8 +562,10 @@ fn bench_hnsw_quantized_recall(c: &mut Criterion) {
             let mut total = 0.0f64;
             for (q, truth) in queries.iter().zip(&ground_truth) {
                 let results = search::search(&graph_f32, q, 10, params_f32.ef_search, None);
-                let ids: std::collections::HashSet<u64> = results.iter().map(|(id, _)| id.0).collect();
-                let truth_ids: std::collections::HashSet<u64> = truth.iter().map(|id| id.0).collect();
+                let ids: std::collections::HashSet<u64> =
+                    results.iter().map(|(id, _)| id.0).collect();
+                let truth_ids: std::collections::HashSet<u64> =
+                    truth.iter().map(|id| id.0).collect();
                 total += ids.intersection(&truth_ids).count() as f64 / 10.0;
             }
             std::hint::black_box(total / queries.len() as f64)
@@ -581,17 +585,12 @@ fn bench_hnsw_quantized_recall(c: &mut Criterion) {
                 let qs = graph.quantized().unwrap();
                 let mut total = 0.0f64;
                 for (q, truth) in queries.iter().zip(&ground_truth) {
-                    let results = search::search_quantized(
-                        &graph,
-                        qs,
-                        q,
-                        10,
-                        params.ef_search,
-                        false,
-                        None,
-                    );
-                    let ids: std::collections::HashSet<u64> = results.iter().map(|(id, _)| id.0).collect();
-                    let truth_ids: std::collections::HashSet<u64> = truth.iter().map(|id| id.0).collect();
+                    let results =
+                        search::search_quantized(&graph, qs, q, 10, params.ef_search, false, None);
+                    let ids: std::collections::HashSet<u64> =
+                        results.iter().map(|(id, _)| id.0).collect();
+                    let truth_ids: std::collections::HashSet<u64> =
+                        truth.iter().map(|id| id.0).collect();
                     total += ids.intersection(&truth_ids).count() as f64 / 10.0;
                 }
                 std::hint::black_box(total / queries.len() as f64)
@@ -616,8 +615,10 @@ fn bench_hnsw_quantized_recall(c: &mut Criterion) {
                     true,
                     None,
                 );
-                let ids: std::collections::HashSet<u64> = results.iter().map(|(id, _)| id.0).collect();
-                let truth_ids: std::collections::HashSet<u64> = truth.iter().map(|id| id.0).collect();
+                let ids: std::collections::HashSet<u64> =
+                    results.iter().map(|(id, _)| id.0).collect();
+                let truth_ids: std::collections::HashSet<u64> =
+                    truth.iter().map(|id| id.0).collect();
                 total += ids.intersection(&truth_ids).count() as f64 / 10.0;
             }
             std::hint::black_box(total / queries.len() as f64)

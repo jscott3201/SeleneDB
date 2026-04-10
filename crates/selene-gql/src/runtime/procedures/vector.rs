@@ -1005,10 +1005,7 @@ impl Procedure for QuantizationStats {
                 };
                 rows.push(smallvec![
                     (IStr::new("namespace"), GqlValue::String(ns_display.into())),
-                    (
-                        IStr::new("method"),
-                        GqlValue::String(stats.method.into())
-                    ),
+                    (IStr::new("method"), GqlValue::String(stats.method.into())),
                     (IStr::new("bits"), GqlValue::Int(i64::from(stats.bits))),
                     (
                         IStr::new("vector_count"),
@@ -1329,7 +1326,10 @@ mod tests {
         assert_eq!(row[3].1, GqlValue::Int(10));
         // compression_ratio > 1.0
         if let GqlValue::Float(ratio) = &row[6].1 {
-            assert!(*ratio > 1.0, "compression ratio should be > 1.0, got {ratio}");
+            assert!(
+                *ratio > 1.0,
+                "compression ratio should be > 1.0, got {ratio}"
+            );
         } else {
             panic!("expected Float for compression_ratio");
         }

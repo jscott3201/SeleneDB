@@ -715,11 +715,7 @@ mod tests {
         g.entry_point = Some(0);
         g.max_layer = 0;
 
-        let qs = QuantizedStorage::build(
-            &config,
-            dims,
-            g.nodes.iter().map(|n| &*n.vector),
-        );
+        let qs = QuantizedStorage::build(&config, dims, g.nodes.iter().map(|n| &*n.vector));
 
         (g, qs)
     }
@@ -752,10 +748,7 @@ mod tests {
         let exact_ids: HashSet<NodeId> = exact.iter().map(|r| r.0).collect();
         let quant_ids: HashSet<NodeId> = quantized.iter().map(|r| r.0).collect();
         let overlap = exact_ids.intersection(&quant_ids).count();
-        assert!(
-            overlap >= 7,
-            "recall@10 must be >= 70%, got {overlap}/10"
-        );
+        assert!(overlap >= 7, "recall@10 must be >= 70%, got {overlap}/10");
     }
 
     #[test]
@@ -770,7 +763,10 @@ mod tests {
         assert!(!rescored.is_empty());
         // The similarities should be cosine values (between -1 and 1).
         for &(_, sim) in &rescored {
-            assert!((-1.0..=1.0001).contains(&sim), "sim {sim} out of cosine range");
+            assert!(
+                (-1.0..=1.0001).contains(&sim),
+                "sim {sim} out of cosine range"
+            );
         }
 
         // Rescore should improve recall vs non-rescored.
@@ -825,7 +821,8 @@ mod tests {
         for (id, _) in &results {
             assert!(
                 (1..=10).contains(&id.0),
-                "filtered result must be in range 1-10, got {}", id.0
+                "filtered result must be in range 1-10, got {}",
+                id.0
             );
         }
     }

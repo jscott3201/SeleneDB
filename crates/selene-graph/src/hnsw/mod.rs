@@ -268,11 +268,7 @@ impl HnswIndex {
         }
 
         let ef = ef.unwrap_or(self.params.ef_search);
-        let rescore = self
-            .params
-            .quantization
-            .as_ref()
-            .is_some_and(|q| q.rescore);
+        let rescore = self.params.quantization.as_ref().is_some_and(|q| q.rescore);
 
         // Snapshot tombstones once to avoid locking twice.
         let tombstones_snapshot = self.tombstones.lock().clone();
@@ -389,11 +385,7 @@ impl HnswIndex {
             quantized_bytes,
             f32_bytes,
             compression_ratio: q.compression_ratio(),
-            rescore: self
-                .params
-                .quantization
-                .as_ref()
-                .is_some_and(|c| c.rescore),
+            rescore: self.params.quantization.as_ref().is_some_and(|c| c.rescore),
         })
     }
 }
@@ -889,7 +881,10 @@ mod tests {
         index.snapshot();
 
         let snap = index.load_graph();
-        assert!(snap.quantized().is_some(), "quantized storage must exist after rebuild");
+        assert!(
+            snap.quantized().is_some(),
+            "quantized storage must exist after rebuild"
+        );
         let qs = snap.quantized().unwrap();
         assert_eq!(qs.len(), n as usize);
     }
@@ -932,7 +927,11 @@ mod tests {
 
         let snap = index.load_graph();
         let qs = snap.quantized().expect("quantized must survive snapshot");
-        assert_eq!(qs.len(), (n - 1) as usize, "tombstoned node should be remapped out");
+        assert_eq!(
+            qs.len(),
+            (n - 1) as usize,
+            "tombstoned node should be remapped out"
+        );
     }
 
     #[test]
@@ -950,7 +949,14 @@ mod tests {
         // Search still works (uses f32 distance for now; Phase 3 adds asymmetric).
         let query = pseudo_unit_vector(0, dims);
         let results = index.search(&query, 10, None, None);
-        assert!(!results.is_empty(), "quantized index must return search results");
-        assert_eq!(results[0].0, NodeId(0), "closest to seed 0 should be NodeId(0)");
+        assert!(
+            !results.is_empty(),
+            "quantized index must return search results"
+        );
+        assert_eq!(
+            results[0].0,
+            NodeId(0),
+            "closest to seed 0 should be NodeId(0)"
+        );
     }
 }

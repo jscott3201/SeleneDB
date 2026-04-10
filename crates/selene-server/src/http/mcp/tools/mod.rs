@@ -1423,8 +1423,7 @@ impl SeleneTools {
     )]
     async fn quantization_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
-        let query =
-            "CALL vector.quantizationStats() YIELD namespace, method, bits, vector_count, \
+        let query = "CALL vector.quantizationStats() YIELD namespace, method, bits, vector_count, \
              quantized_bytes, f32_bytes, compression_ratio, rescore \
              RETURN namespace, method, bits, vector_count, quantized_bytes, \
              f32_bytes, compression_ratio, rescore";

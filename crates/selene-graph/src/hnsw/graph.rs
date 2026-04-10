@@ -538,15 +538,16 @@ mod tests {
             seed: 42,
             rescore: false,
         };
-        let storage =
-            QuantizedStorage::build(&config, 3, g.nodes.iter().map(|n| &*n.vector));
+        let storage = QuantizedStorage::build(&config, 3, g.nodes.iter().map(|n| &*n.vector));
         g.quantized = Some(storage);
 
         let bytes = g.to_bytes().expect("serialization with quantized data");
         let restored = HnswGraph::from_bytes(&bytes).expect("deserialization");
 
         // Quantized storage round-tripped.
-        let qs = restored.quantized().expect("quantized storage missing after round-trip");
+        let qs = restored
+            .quantized()
+            .expect("quantized storage missing after round-trip");
         assert_eq!(qs.len(), 2);
         assert_eq!(qs.quantizer().bits(), 4);
         assert_eq!(qs.quantizer().dim(), 3);
