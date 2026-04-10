@@ -1935,7 +1935,9 @@ impl SeleneTools {
         name = "log_trace",
         description = "Log a tool interaction trace for training data collection. \
         Called by the agent orchestrator after each tool call, not by the agent itself. \
-        Stores as a __Trace node for later export via export_traces.",
+        Stores as a __Trace node for later export via export_traces. \
+        Optional fields: thinking (reasoning chain), user_query (prompt that triggered \
+        the call), about_node_ids (entity node IDs to link via :about edges).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1967,6 +1969,46 @@ impl SeleneTools {
         params: Parameters<ExportTracesParams>,
     ) -> Result<CallToolResult, McpError> {
         traces::export_traces_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "log_session",
+        description = "Log session-level metadata for training data context. \
+        Called once per session before log_trace calls. Creates or updates a \
+        __TraceSession node with building, operator, weather, and system prompt \
+        context. Idempotent: calling again for the same session_id updates the metadata.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn log_session(
+        &self,
+        params: Parameters<LogSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::log_session_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "log_outcome",
+        description = "Record whether a trace session achieved its desired outcome. \
+        Called after the session completes. Creates or updates a __TraceOutcome node. \
+        Enables quality scoring: traces from successful sessions are high-confidence \
+        training examples. Idempotent per session_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn log_outcome(
+        &self,
+        params: Parameters<LogOutcomeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::log_outcome_impl(self, params.0).await
     }
 
     // ── Action Proposals ────────────────────────────────────────────

@@ -592,3 +592,452 @@ async fn invalid_session_id_rejected() {
     );
     assert!(json["recovery"].as_str().unwrap().contains("initialize"));
 }
+
+// ── Trace system tests ────────────────────────────────────────────
+
+/// Helper: call an MCP tool and return the text content from the result.
+async fn call_tool(base: &str, sid: &str, id: u64, name: &str, args: serde_json::Value) -> String {
+    let result = session_request(
+        base,
+        sid,
+        id,
+        "tools/call",
+        serde_json::json!({ "name": name, "arguments": args }),
+    )
+    .await;
+    assert!(
+        result.get("error").is_none(),
+        "{name} should not error: {result}"
+    );
+    let content = result["result"]["content"]
+        .as_array()
+        .expect("tool result must have content");
+    content[0]["text"].as_str().unwrap_or("").to_string()
+}
+
+#[tokio::test]
+async fn trace_log_with_thinking_and_user_query() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Log a trace with the new fields.
+    let text = call_tool(
+        &base,
+        &sid,
+        2,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "test-session-1",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{\"zone\": \"Zone 301\"}",
+            "tool_result_summary": "comfort_score: 0.85",
+            "agent_response": "Zone 301 is comfortable.",
+            "thinking": "I should check the comfort score for Zone 301.",
+            "user_query": "How comfortable is Zone 301?"
+        }),
+    )
+    .await;
+    assert!(text.contains("traceId"), "should return traceId: {text}");
+
+    // Export and verify the new fields appear.
+    let exported = call_tool(
+        &base,
+        &sid,
+        3,
+        "export_traces",
+        serde_json::json!({
+            "session_id": "test-session-1",
+            "format": "jsonl"
+        }),
+    )
+    .await;
+    assert!(
+        exported.contains("thinking"),
+        "exported trace should contain thinking field: {exported}"
+    );
+    assert!(
+        exported.contains("How comfortable is Zone 301?"),
+        "exported trace should contain user_query: {exported}"
+    );
+}
+
+#[tokio::test]
+async fn trace_about_edges() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Create an entity node and get its ID.
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "gql_query",
+        serde_json::json!({
+            "query": "INSERT (:Zone {name: 'Zone 301'})"
+        }),
+    )
+    .await;
+
+    // Query back the zone ID.
+    let query_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (z:Zone {name: 'Zone 301'}) RETURN id(z) AS zid"
+        }),
+    )
+    .await;
+
+    // Extract the zone ID from the result text (id() returns Int).
+    let zid: i64 = {
+        let json_start = query_text.find('[').unwrap_or(0);
+        let json_end = query_text
+            .rfind(']')
+            .map_or(query_text.len(), |i| i + 1);
+        let json_str = &query_text[json_start..json_end];
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
+        rows[0]["zid"].as_i64().expect("zone ID must be a number")
+    };
+
+    // Log a trace with about_node_ids pointing to the zone.
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "test-about",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{}",
+            "tool_result_summary": "ok",
+            "about_node_ids": [zid]
+        }),
+    )
+    .await;
+
+    // Verify the :about edge exists.
+    let edge_text = call_tool(
+        &base,
+        &sid,
+        5,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH ()-[e:about]->() RETURN count(e) AS cnt"
+        }),
+    )
+    .await;
+    // Should find exactly 1 :about edge.
+    assert!(
+        edge_text.contains("\"cnt\":1"),
+        "should find 1 about edge: {edge_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_sequential_edges() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Log 3 sequential turns.
+    for turn in 0..3 {
+        call_tool(
+            &base,
+            &sid,
+            turn + 2,
+            "log_trace",
+            serde_json::json!({
+                "session_id": "test-seq",
+                "turn": turn,
+                "tool_name": format!("tool_{turn}"),
+                "tool_params": "{}",
+                "tool_result_summary": "ok"
+            }),
+        )
+        .await;
+    }
+
+    // Verify :next_turn edges exist.
+    let edge_text = call_tool(
+        &base,
+        &sid,
+        5,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (a)-[e:next_turn]->(b) RETURN a.turn AS from_turn, b.turn AS to_turn ORDER BY a.turn"
+        }),
+    )
+    .await;
+
+    // Should have edges: 0->1 and 1->2.
+    assert!(
+        edge_text.contains("2 rows"),
+        "should have 2 next_turn edges: {edge_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_session() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    let text = call_tool(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-session-meta",
+            "system_prompt": "You are Athena, a building intelligence agent.",
+            "building": "Maple Street Tower",
+            "operator_role": "facilities_manager",
+            "weather": "45°F, cloudy",
+            "active_tier": "peak"
+        }),
+    )
+    .await;
+    assert!(
+        text.contains("sessionId"),
+        "should return sessionId: {text}"
+    );
+
+    // Verify node exists.
+    let query_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (s:__TraceSession {session_id: 'test-session-meta'}) \
+                      RETURN s.building AS building, s.system_prompt AS sp"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("Maple Street Tower"),
+        "should find building: {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_session_idempotent() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Call log_session twice with different data.
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-idempotent",
+            "building": "Building A"
+        }),
+    )
+    .await;
+
+    call_tool(
+        &base,
+        &sid,
+        3,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-idempotent",
+            "building": "Building B"
+        }),
+    )
+    .await;
+
+    // Should have exactly one node (MERGE), with updated building.
+    let query_text = call_tool(
+        &base,
+        &sid,
+        4,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (s:__TraceSession {session_id: 'test-idempotent'}) RETURN s.building AS building"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("Building B"),
+        "should have updated building: {query_text}"
+    );
+    assert!(
+        query_text.contains("1 rows"),
+        "should have exactly 1 node (MERGE): {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_outcome() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    let text = call_tool(
+        &base,
+        &sid,
+        2,
+        "log_outcome",
+        serde_json::json!({
+            "session_id": "test-outcome",
+            "success": true,
+            "outcome_summary": "Zone reached target temperature within 20 minutes.",
+            "quality_score": 9
+        }),
+    )
+    .await;
+    assert!(
+        text.contains("outcomeId"),
+        "should return outcomeId: {text}"
+    );
+
+    // Verify node exists.
+    let query_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (o:__TraceOutcome {session_id: 'test-outcome'}) \
+                      RETURN o.success AS success, o.quality_score AS score"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("1 rows"),
+        "should have 1 outcome node: {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_export_huggingface() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Set up session metadata.
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "system_prompt": "You are a building agent.",
+            "building": "Test Tower"
+        }),
+    )
+    .await;
+
+    // Log 2 traces.
+    call_tool(
+        &base,
+        &sid,
+        3,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{\"zone\": \"Zone 1\"}",
+            "tool_result_summary": "comfort: 0.9",
+            "agent_response": "Zone 1 is comfortable.",
+            "thinking": "Check Zone 1 first.",
+            "user_query": "How is Zone 1?"
+        }),
+    )
+    .await;
+
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "turn": 1,
+            "tool_name": "adjust_setpoint",
+            "tool_params": "{\"zone\": \"Zone 2\", \"temp\": 72}",
+            "tool_result_summary": "setpoint updated",
+            "agent_response": "Adjusted Zone 2 to 72°F.",
+            "user_query": "Warm up Zone 2."
+        }),
+    )
+    .await;
+
+    // Log outcome.
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "log_outcome",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "success": true,
+            "outcome_summary": "All zones comfortable.",
+            "quality_score": 8
+        }),
+    )
+    .await;
+
+    // Export in HuggingFace format.
+    let exported = call_tool(
+        &base,
+        &sid,
+        6,
+        "export_traces",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "format": "huggingface"
+        }),
+    )
+    .await;
+
+    // Verify the structure.
+    assert!(
+        exported.contains("HuggingFace chat"),
+        "header should mention HuggingFace: {exported}"
+    );
+
+    // Parse the JSONL line (skip the header line).
+    let lines: Vec<&str> = exported.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "should have header + at least 1 JSONL line: {exported}"
+    );
+    let example: serde_json::Value =
+        serde_json::from_str(lines[1]).expect("JSONL line should be valid JSON");
+
+    // Check messages array exists and has expected roles.
+    let messages = example["messages"]
+        .as_array()
+        .expect("should have messages array");
+    assert!(
+        messages.len() >= 5,
+        "should have at least 5 messages (system + 2 turns): got {}",
+        messages.len()
+    );
+
+    // First message should be the system prompt.
+    assert_eq!(messages[0]["role"], "system");
+    assert!(
+        messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("building agent")
+    );
+
+    // Should have tools array.
+    let tools = example["tools"]
+        .as_array()
+        .expect("should have tools array");
+    assert_eq!(tools.len(), 2, "should list 2 unique tools");
+
+    // Should have metadata with success and quality_score.
+    assert_eq!(example["metadata"]["success"], true);
+    assert_eq!(example["metadata"]["quality_score"], 8);
+}
