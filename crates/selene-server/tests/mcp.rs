@@ -694,9 +694,7 @@ async fn trace_about_edges() {
     // Extract the zone ID from the result text (id() returns Int).
     let zid: i64 = {
         let json_start = query_text.find('[').unwrap_or(0);
-        let json_end = query_text
-            .rfind(']')
-            .map_or(query_text.len(), |i| i + 1);
+        let json_end = query_text.rfind(']').map_or(query_text.len(), |i| i + 1);
         let json_str = &query_text[json_start..json_end];
         let rows: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
         rows[0]["zid"].as_i64().expect("zone ID must be a number")
