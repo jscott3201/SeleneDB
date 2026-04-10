@@ -13,6 +13,8 @@ use smallvec::SmallVec;
 
 use selene_core::NodeId;
 
+use super::quantize::QuantizedStorage;
+
 /// A single node in the HNSW graph.
 ///
 /// `neighbors` is a per-layer adjacency list. `neighbors[0]` holds the
@@ -50,6 +52,8 @@ pub struct HnswGraph {
     pub(crate) node_id_to_idx: HashMap<u64, u32>,
     /// Dimensionality of all vectors stored in this graph.
     pub(crate) dimensions: u16,
+    /// Optional quantized vector storage for compressed search.
+    pub(crate) quantized: Option<QuantizedStorage>,
 }
 
 impl HnswGraph {
@@ -61,6 +65,7 @@ impl HnswGraph {
             max_layer: 0,
             node_id_to_idx: HashMap::new(),
             dimensions,
+            quantized: None,
         }
     }
 
@@ -98,6 +103,11 @@ impl HnswGraph {
     /// algorithm.
     pub fn get(&self, idx: u32) -> &HnswNode {
         &self.nodes[idx as usize]
+    }
+
+    /// Return a reference to the quantized storage, if present.
+    pub fn quantized(&self) -> Option<&QuantizedStorage> {
+        self.quantized.as_ref()
     }
 
     /// Return the neighbors of node `idx` on the given `layer`.
@@ -183,6 +193,7 @@ impl HnswGraph {
             max_layer: new_max_layer,
             node_id_to_idx: new_node_id_to_idx,
             dimensions: self.dimensions,
+            quantized: self.quantized.as_ref().map(|qs| qs.remap(&old_to_new)),
         }
     }
 
@@ -514,5 +525,36 @@ mod tests {
         let (_, node2) = restored.get_by_node_id(NodeId(20)).unwrap();
         assert_eq!(&*node2.vector, &[0.0f32, 1.0, 0.0]);
         assert_eq!(restored.neighbors(1, 0), &[0u32]);
+    }
+
+    #[test]
+    fn serialize_round_trip_with_quantization() {
+        use crate::hnsw::quantize::{QuantBits, QuantizationConfig, QuantizedStorage};
+
+        let mut g = simple_graph();
+        // Attach quantized storage.
+        let config = QuantizationConfig {
+            bits: QuantBits::Four,
+            seed: 42,
+            rescore: false,
+        };
+        let storage = QuantizedStorage::build(&config, 3, g.nodes.iter().map(|n| &*n.vector));
+        g.quantized = Some(storage);
+
+        let bytes = g.to_bytes().expect("serialization with quantized data");
+        let restored = HnswGraph::from_bytes(&bytes).expect("deserialization");
+
+        // Quantized storage round-tripped.
+        let qs = restored
+            .quantized()
+            .expect("quantized storage missing after round-trip");
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs.quantizer().bits(), 4);
+        assert_eq!(qs.quantizer().dim(), 3);
+
+        // Codes should be identical.
+        let original_qs = g.quantized().unwrap();
+        assert_eq!(qs.codes(0), original_qs.codes(0));
+        assert_eq!(qs.codes(1), original_qs.codes(1));
     }
 }

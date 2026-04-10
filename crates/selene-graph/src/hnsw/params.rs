@@ -1,5 +1,7 @@
 //! HNSW index configuration parameters.
 
+use super::quantize::QuantizationConfig;
+
 /// Configuration for the HNSW index.
 #[derive(Debug, Clone)]
 pub struct HnswParams {
@@ -13,6 +15,9 @@ pub struct HnswParams {
     pub ef_search: usize,
     /// Layer assignment probability factor: 1.0 / ln(M).
     pub level_factor: f64,
+    /// Optional PolarQuant vector quantization. When `Some`, vectors are
+    /// quantized after build/insert for compressed asymmetric search.
+    pub quantization: Option<QuantizationConfig>,
 }
 
 impl HnswParams {
@@ -23,6 +28,7 @@ impl HnswParams {
             ef_construction: 200,
             ef_search: 50,
             level_factor: 1.0 / (m as f64).ln(),
+            quantization: None,
         }
     }
 
@@ -34,6 +40,14 @@ impl HnswParams {
 impl Default for HnswParams {
     fn default() -> Self {
         Self::new(16)
+    }
+}
+
+impl HnswParams {
+    /// Create params with quantization enabled.
+    pub fn with_quantization(mut self, config: QuantizationConfig) -> Self {
+        self.quantization = Some(config);
+        self
     }
 }
 

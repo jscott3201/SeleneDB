@@ -26,11 +26,13 @@ pub mod build;
 pub mod distance;
 pub mod graph;
 pub mod params;
+pub mod quantize;
 pub mod search;
 
 pub use build::build;
 pub use graph::HnswGraph;
 pub use params::HnswParams;
+pub use quantize::{QuantBits, QuantizationConfig};
 pub use search::search;
 
 use std::sync::Arc;
@@ -110,6 +112,10 @@ impl HnswIndex {
     /// algorithm (O(log N)), and bumps the generation counter. The vector is
     /// immediately visible to subsequent `search()` calls via the write_graph
     /// merge path.
+    ///
+    /// If quantization is enabled, the vector is also encoded and appended to
+    /// the quantized storage. On the first insert with quantization configured,
+    /// the storage is lazily initialized from all existing vectors.
     pub fn insert(&self, node_id: NodeId, vector: Arc<[f32]>) {
         let max_layer = build::random_layer(self.params.level_factor);
         let mut neighbors = SmallVec::new();
@@ -118,13 +124,27 @@ impl HnswIndex {
         }
         let node = HnswNode {
             node_id,
-            vector,
+            vector: Arc::clone(&vector),
             neighbors,
             max_layer,
         };
 
         let mut wg = self.write_graph.write();
         build::insert_node(&mut wg, node, &self.params);
+
+        // Keep quantized storage in sync with inserted nodes whenever it already exists.
+        // If quantization is configured but storage has not been initialized yet, lazily
+        // build it from all existing vectors (including the one just inserted).
+        if let Some(quantized) = wg.quantized.as_mut() {
+            quantized.encode_and_push(&vector);
+        } else if let Some(ref qconfig) = self.params.quantization {
+            let storage = quantize::QuantizedStorage::build(
+                qconfig,
+                vector.len(),
+                wg.nodes.iter().map(|n| &*n.vector),
+            );
+            wg.quantized = Some(storage);
+        }
         drop(wg);
 
         self.generation.fetch_add(1, Ordering::Release);
@@ -222,6 +242,11 @@ impl HnswIndex {
     /// 2. If mutations are pending, also search the write_graph under a read
     ///    lock and merge results.
     ///
+    /// When quantized storage is available, layer-0 beam search uses asymmetric
+    /// dot product (~8× less memory bandwidth) instead of full f32 cosine
+    /// similarity. If `rescore` is enabled in the quantization config, top-k
+    /// candidates are re-ranked with exact f32 cosine.
+    ///
     /// Tombstoned node IDs are filtered from the merged result list. The final
     /// result is sorted by descending similarity and truncated to `k`.
     ///
@@ -242,6 +267,7 @@ impl HnswIndex {
         }
 
         let ef = ef.unwrap_or(self.params.ef_search);
+        let rescore = self.params.quantization.as_ref().is_some_and(|q| q.rescore);
 
         // Snapshot tombstones once to avoid locking twice.
         let tombstones_snapshot = self.tombstones.lock().clone();
@@ -252,6 +278,8 @@ impl HnswIndex {
 
         let mut results: Vec<(NodeId, f32)> = if guard.is_empty() {
             Vec::new()
+        } else if let Some(qs) = guard.quantized() {
+            search::search_quantized(&guard, qs, query, k_expanded, ef, rescore, filter)
         } else {
             search::search(&guard, query, k_expanded, ef, filter)
         };
@@ -260,7 +288,11 @@ impl HnswIndex {
         if self.has_pending_mutations() {
             let wg = self.write_graph.read();
             if !wg.is_empty() {
-                let write_results = search::search(&wg, query, k_expanded, ef, filter);
+                let write_results = if let Some(qs) = wg.quantized() {
+                    search::search_quantized(&wg, qs, query, k_expanded, ef, rescore, filter)
+                } else {
+                    search::search(&wg, query, k_expanded, ef, filter)
+                };
 
                 // Merge: union by NodeId, keep highest similarity score.
                 // For small result sets (typical k < 64), linear scan is
@@ -333,6 +365,47 @@ impl HnswIndex {
     pub fn tombstones(&self) -> RoaringBitmap {
         self.tombstones.lock().clone()
     }
+
+    /// Return quantization statistics from the read snapshot, if quantized.
+    ///
+    /// Returns `(method, bits, vector_count, quantized_bytes, f32_bytes,
+    /// compression_ratio, rescore)` or `None` when no quantized storage exists.
+    pub fn quantization_stats(&self) -> Option<QuantizationStats> {
+        let guard = self.read_snapshot.load();
+        let qs = guard.quantized()?;
+        let q = qs.quantizer();
+        let vector_count = qs.len();
+        let quantized_bytes = qs.codes_bytes();
+        let f32_bytes = vector_count * q.dim() * 4;
+        Some(QuantizationStats {
+            method: "PolarQuant",
+            bits: q.bits(),
+            vector_count,
+            quantized_bytes,
+            f32_bytes,
+            compression_ratio: q.compression_ratio(),
+            rescore: self.params.quantization.as_ref().is_some_and(|c| c.rescore),
+        })
+    }
+}
+
+/// Statistics about the quantized storage in an HNSW index.
+#[derive(Debug, Clone)]
+pub struct QuantizationStats {
+    /// Quantization method name (e.g., "PolarQuant").
+    pub method: &'static str,
+    /// Bits per dimension.
+    pub bits: u8,
+    /// Number of quantized vectors.
+    pub vector_count: usize,
+    /// Total bytes used by quantized codes.
+    pub quantized_bytes: usize,
+    /// Equivalent f32 storage (for comparison).
+    pub f32_bytes: usize,
+    /// Compression ratio (f32_bytes / quantized_bytes).
+    pub compression_ratio: f32,
+    /// Whether rescore with f32 is enabled.
+    pub rescore: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -780,5 +853,109 @@ mod tests {
             );
         }
         drop(wg);
+    }
+
+    // ------------------------------------------------------------------
+    // Quantized storage integration
+    // ------------------------------------------------------------------
+
+    fn quantized_params() -> HnswParams {
+        HnswParams::default().with_quantization(quantize::QuantizationConfig {
+            bits: quantize::QuantBits::Four,
+            seed: 42,
+            rescore: false,
+        })
+    }
+
+    #[test]
+    fn rebuild_with_quantization() {
+        let dims = 64;
+        let n = 50;
+        let vectors: Vec<_> = (0..n)
+            .map(|i| (NodeId(i), pseudo_unit_vector(i, dims)))
+            .collect();
+
+        let index = HnswIndex::new(quantized_params(), dims as u16);
+        index.rebuild(vectors);
+        index.snapshot();
+
+        let snap = index.load_graph();
+        assert!(
+            snap.quantized().is_some(),
+            "quantized storage must exist after rebuild"
+        );
+        let qs = snap.quantized().unwrap();
+        assert_eq!(qs.len(), n as usize);
+    }
+
+    #[test]
+    fn insert_with_quantization_lazy_init() {
+        let dims = 32;
+        let index = HnswIndex::new(quantized_params(), dims as u16);
+
+        // First insert triggers lazy initialization.
+        index.insert(NodeId(1), pseudo_unit_vector(1, dims));
+        {
+            let wg = index.write_graph.read();
+            assert!(wg.quantized.is_some(), "lazy init on first insert");
+            assert_eq!(wg.quantized.as_ref().unwrap().len(), 1);
+        }
+
+        // Subsequent inserts append incrementally.
+        index.insert(NodeId(2), pseudo_unit_vector(2, dims));
+        index.insert(NodeId(3), pseudo_unit_vector(3, dims));
+        {
+            let wg = index.write_graph.read();
+            assert_eq!(wg.quantized.as_ref().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn snapshot_preserves_quantized_storage() {
+        let dims = 48;
+        let n = 20;
+        let vectors: Vec<_> = (0..n)
+            .map(|i| (NodeId(i), pseudo_unit_vector(i, dims)))
+            .collect();
+
+        let index = HnswIndex::new(quantized_params(), dims as u16);
+        index.rebuild(vectors);
+        // Tombstone one node, then snapshot.
+        index.remove(NodeId(5));
+        index.snapshot();
+
+        let snap = index.load_graph();
+        let qs = snap.quantized().expect("quantized must survive snapshot");
+        assert_eq!(
+            qs.len(),
+            (n - 1) as usize,
+            "tombstoned node should be remapped out"
+        );
+    }
+
+    #[test]
+    fn quantized_search_returns_results() {
+        let dims = 64;
+        let n = 100;
+        let vectors: Vec<_> = (0..n)
+            .map(|i| (NodeId(i), pseudo_unit_vector(i, dims)))
+            .collect();
+
+        let index = HnswIndex::new(quantized_params(), dims as u16);
+        index.rebuild(vectors);
+        index.snapshot();
+
+        // Search still works (uses f32 distance for now; Phase 3 adds asymmetric).
+        let query = pseudo_unit_vector(0, dims);
+        let results = index.search(&query, 10, None, None);
+        assert!(
+            !results.is_empty(),
+            "quantized index must return search results"
+        );
+        assert_eq!(
+            results[0].0,
+            NodeId(0),
+            "closest to seed 0 should be NodeId(0)"
+        );
     }
 }

@@ -252,6 +252,9 @@ pub fn insert_node(graph: &mut HnswGraph, node: HnswNode, params: &HnswParams) {
 /// embedding vector. Vectors are inserted sequentially; the resulting graph is
 /// ready for search immediately.
 ///
+/// When `params.quantization` is `Some`, all vectors are quantized after
+/// insertion and a `QuantizedStorage` is attached to the graph.
+///
 /// Returns an empty graph when `vectors` is empty.
 pub fn build(vectors: Vec<(NodeId, Arc<[f32]>)>, params: &HnswParams) -> HnswGraph {
     if vectors.is_empty() {
@@ -277,6 +280,16 @@ pub fn build(vectors: Vec<(NodeId, Arc<[f32]>)>, params: &HnswParams) -> HnswGra
         };
 
         insert_node(&mut graph, node, params);
+    }
+
+    // Quantize all vectors if configured.
+    if let Some(ref qconfig) = params.quantization {
+        let storage = super::quantize::QuantizedStorage::build(
+            qconfig,
+            dimensions as usize,
+            graph.nodes.iter().map(|n| &*n.vector),
+        );
+        graph.quantized = Some(storage);
     }
 
     graph
