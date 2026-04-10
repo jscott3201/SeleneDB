@@ -32,7 +32,7 @@ pub(super) async fn register_agent_impl(
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
 
-    // Upsert: if agent_id already exists, update it; otherwise create.
+    // Atomic upsert via MERGE — avoids TOCTOU race between read and write.
     let mut params = HashMap::new();
     params.insert("aid".into(), Value::from(p.agent_id.as_str()));
     params.insert("project".into(), Value::from(p.project.as_str()));
@@ -56,88 +56,44 @@ pub(super) async fn register_agent_impl(
         files_str.as_deref().map_or(Value::Null, Value::from),
     );
 
-    // Check if session already exists
-    let check_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
-                        RETURN id(a) AS id";
-    let check_result = ops::gql::execute_gql(
-        &tools.state,
-        &auth,
-        check_query,
-        Some(&params),
-        false,
-        false,
-        ResultFormat::Json,
-    )
-    .map_err(op_err)?;
-
-    let existing: Vec<serde_json::Value> =
-        serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
-            .unwrap_or_default();
+    let query = "MERGE (a:__AgentSession {agent_id: $aid}) \
+                  ON CREATE SET \
+                      a.project = $project, \
+                      a.status = $status, \
+                      a.working_on = $working_on, \
+                      a.files_touched = $files, \
+                      a.capabilities = $capabilities, \
+                      a.heartbeat_at = $now, \
+                      a.started_at = $now \
+                  ON MATCH SET \
+                      a.project = $project, \
+                      a.status = $status, \
+                      a.working_on = $working_on, \
+                      a.files_touched = $files, \
+                      a.capabilities = $capabilities, \
+                      a.heartbeat_at = $now \
+                  RETURN id(a) AS id";
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
 
-    if existing.is_empty() {
-        // Create new session
-        let query = "INSERT (a:__AgentSession { \
-                      agent_id: $aid, \
-                      project: $project, \
-                      status: $status, \
-                      working_on: $working_on, \
-                      files_touched: $files, \
-                      capabilities: $capabilities, \
-                      heartbeat_at: $now, \
-                      started_at: $now \
-                      }) RETURN id(a) AS id, 'created' AS action";
-
-        let result = tools
-            .submit_mut(move || {
-                ops::gql::execute_gql(
-                    &st,
-                    &auth2,
-                    query,
-                    Some(&params),
-                    false,
-                    false,
-                    ResultFormat::Json,
-                )
-            })
-            .await?;
-
-        let data = result.data_json.unwrap_or_else(|| "{}".into());
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Agent registered: {data}"
-        ))]))
-    } else {
-        // Update existing session
-        let query = "MATCH (a:__AgentSession {agent_id: $aid}) \
-                      SET a.status = $status, \
-                          a.project = $project, \
-                          a.heartbeat_at = $now, \
-                          a.working_on = $working_on, \
-                          a.files_touched = $files, \
-                          a.capabilities = $capabilities \
-                      RETURN id(a) AS id, 'updated' AS action";
-
-        let result = tools
-            .submit_mut(move || {
-                ops::gql::execute_gql(
-                    &st,
-                    &auth2,
-                    query,
-                    Some(&params),
-                    false,
-                    false,
-                    ResultFormat::Json,
-                )
-            })
-            .await?;
-
-        let data = result.data_json.unwrap_or_else(|| "{}".into());
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Agent session updated: {data}"
-        ))]))
-    }
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Agent registered: {data}"
+    ))]))
 }
 
 pub(super) async fn heartbeat_impl(
@@ -486,6 +442,10 @@ pub(super) async fn get_shared_context_impl(
         filters.push("(c.expires_at = 0 OR c.expires_at > $now)");
     }
 
+    // Enforce visibility: only return project/global context by default.
+    // Directed visibility (agent:<id>) is private and not exposed here.
+    filters.push("(c.visibility = 'project' OR c.visibility = 'global' OR c.visibility IS NULL)");
+
     params.insert("lim".into(), Value::Int(limit as i64));
 
     let filter_clause = if filters.is_empty() {
@@ -594,13 +554,19 @@ pub(super) async fn claim_intent_impl(
             serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
                 .unwrap_or_default();
 
-        // Check for path overlap
+        // Check for path overlap — only reject on overlapping locked intents
+        let mut has_locked_overlap = false;
         for row in &rows {
             let their_targets: Vec<String> = row
                 .get("targets")
                 .and_then(|t| t.as_str())
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
+
+            let their_level = row
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
 
             for my_target in &p.targets {
                 for their_target in &their_targets {
@@ -615,31 +581,26 @@ pub(super) async fn claim_intent_impl(
                             .get("action")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        let their_level = row
-                            .get("level")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
                         let _ = writeln!(
                             conflict_text,
                             "CONFLICT: agent '{agent}' has {their_level} claim on \
                              '{their_target}' (action: {action})"
                         );
+                        if their_level == "locked" {
+                            has_locked_overlap = true;
+                        }
                     }
                 }
             }
         }
 
-        // If target is locked by another agent, reject
-        if !conflict_text.is_empty()
-            && rows.iter().any(|r| {
-                r.get("level")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|l| l == "locked")
-            })
-        {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Cannot claim — locked by another agent:\n{conflict_text}"
-            ))]));
+        // If an overlapping intent is locked, reject with an error
+        if has_locked_overlap {
+            return Err(McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: format!("Cannot claim — locked by another agent:\n{conflict_text}").into(),
+                data: None,
+            });
         }
     }
 
@@ -782,6 +743,7 @@ pub(super) async fn check_conflicts_impl(
 
     let query = "MATCH (i:__Intent) \
                   FILTER i.status = 'claimed' AND i.agent_id <> $aid \
+                  AND (i.level = 'exclusive' OR i.level = 'locked') \
                   RETURN i.agent_id AS agent_id, i.action AS action, \
                   i.targets AS targets, i.level AS level, i.claimed_at AS claimed_at";
 

@@ -1533,9 +1533,16 @@ async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken
                 })
                 .await;
 
-            if let Err(e) = mark_result {
-                tracing::warn!(agent_id, "failed to mark session stale: {e}");
-                continue;
+            match mark_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(agent_id, "failed to mark session stale: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(agent_id, "batcher error marking session stale: {e}");
+                    continue;
+                }
             }
 
             // 3. Release exclusive/locked intents for this agent
