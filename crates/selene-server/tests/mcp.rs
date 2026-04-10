@@ -573,9 +573,22 @@ async fn invalid_session_id_rejected() {
         "expired session response should be JSON, got: {content_type}"
     );
 
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        retry_after, "0",
+        "Retry-After header should be 0 for immediate retry"
+    );
+
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "session_expired");
     assert!(json["message"].as_str().unwrap().contains("expired"));
-    assert!(json["ttl_seconds"].is_number());
+    assert_eq!(
+        json["ttl_seconds"], 3600,
+        "ttl_seconds should match the default MCP session timeout"
+    );
     assert!(json["recovery"].as_str().unwrap().contains("initialize"));
 }
