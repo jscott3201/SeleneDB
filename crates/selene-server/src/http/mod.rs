@@ -313,11 +313,11 @@ pub fn router(state: Arc<ServerState>) -> Router {
             );
             app.route(
                 "/mcp",
-                axum::routing::any_service(mcp_service).layer(
-                    axum::middleware::from_fn(move |req, next: axum::middleware::Next| {
+                axum::routing::any_service(mcp_service).layer(axum::middleware::from_fn(
+                    move |req, next: axum::middleware::Next| {
                         enrich_session_expiry(req, next, timeout_secs)
-                    }),
-                ),
+                    },
+                )),
             )
         } else {
             // Production: require Bearer JWT or static API key.
@@ -361,9 +361,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
                             let key = api_key.clone();
                             async move {
                                 match validate_mcp_bearer(&st, &key, &req) {
-                                    Ok(auth) => {
-                                        MCP_AUTH_CTX.scope(auth, next.run(req)).await
-                                    }
+                                    Ok(auth) => MCP_AUTH_CTX.scope(auth, next.run(req)).await,
                                     Err(failure) => unauthorized_response(failure),
                                 }
                             }
