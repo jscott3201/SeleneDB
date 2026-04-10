@@ -40,15 +40,11 @@ pub(super) async fn register_agent_impl(
     params.insert("now".into(), Value::Int(now_ms));
     params.insert(
         "working_on".into(),
-        p.working_on
-            .as_deref()
-            .map_or(Value::Null, Value::from),
+        p.working_on.as_deref().map_or(Value::Null, Value::from),
     );
     params.insert(
         "capabilities".into(),
-        p.capabilities
-            .as_deref()
-            .map_or(Value::Null, Value::from),
+        p.capabilities.as_deref().map_or(Value::Null, Value::from),
     );
 
     let files_str = p
@@ -57,9 +53,7 @@ pub(super) async fn register_agent_impl(
         .map(|f| serde_json::to_string(f).unwrap_or_else(|_| "[]".into()));
     params.insert(
         "files".into(),
-        files_str
-            .as_deref()
-            .map_or(Value::Null, Value::from),
+        files_str.as_deref().map_or(Value::Null, Value::from),
     );
 
     // Check if session already exists
@@ -76,10 +70,9 @@ pub(super) async fn register_agent_impl(
     )
     .map_err(op_err)?;
 
-    let existing: Vec<serde_json::Value> = serde_json::from_str(
-        &check_result.data_json.unwrap_or_else(|| "[]".into()),
-    )
-    .unwrap_or_default();
+    let existing: Vec<serde_json::Value> =
+        serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
+            .unwrap_or_default();
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
@@ -100,7 +93,13 @@ pub(super) async fn register_agent_impl(
         let result = tools
             .submit_mut(move || {
                 ops::gql::execute_gql(
-                    &st, &auth2, query, Some(&params), false, false, ResultFormat::Json,
+                    &st,
+                    &auth2,
+                    query,
+                    Some(&params),
+                    false,
+                    false,
+                    ResultFormat::Json,
                 )
             })
             .await?;
@@ -123,7 +122,13 @@ pub(super) async fn register_agent_impl(
         let result = tools
             .submit_mut(move || {
                 ops::gql::execute_gql(
-                    &st, &auth2, query, Some(&params), false, false, ResultFormat::Json,
+                    &st,
+                    &auth2,
+                    query,
+                    Some(&params),
+                    false,
+                    false,
+                    ResultFormat::Json,
                 )
             })
             .await?;
@@ -172,7 +177,13 @@ pub(super) async fn heartbeat_impl(
     let result = tools
         .submit_mut(move || {
             ops::gql::execute_gql(
-                &st, &auth2, &query, Some(&params), false, false, ResultFormat::Json,
+                &st,
+                &auth2,
+                &query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
             )
         })
         .await?;
@@ -330,9 +341,7 @@ pub(super) async fn share_context_impl(
         .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
     params.insert(
         "targets".into(),
-        targets_str
-            .as_deref()
-            .map_or(Value::Null, Value::from),
+        targets_str.as_deref().map_or(Value::Null, Value::from),
     );
 
     let ttl = p.ttl_ms.unwrap_or(0);
@@ -358,7 +367,13 @@ pub(super) async fn share_context_impl(
     let result = tools
         .submit_mut(move || {
             ops::gql::execute_gql(
-                &st, &auth2, query, Some(&params), false, false, ResultFormat::Json,
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
             )
         })
         .await?;
@@ -370,9 +385,11 @@ pub(super) async fn share_context_impl(
         && !node_ids.is_empty()
     {
         // Parse the created context node ID from the result
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&data).unwrap_or_default();
-        if let Some(ctx_id) = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_u64())
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        if let Some(ctx_id) = rows
+            .first()
+            .and_then(|r| r.get("id"))
+            .and_then(|v| v.as_u64())
         {
             for &target_id in node_ids {
                 let mut edge_params = HashMap::new();
@@ -404,7 +421,11 @@ pub(super) async fn share_context_impl(
 
     // Also link to the author's agent session
     let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-    if let Some(ctx_id) = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_u64()) {
+    if let Some(ctx_id) = rows
+        .first()
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_u64())
+    {
         let mut link_params = HashMap::new();
         link_params.insert("aid".into(), Value::from(p.author.as_str()));
         link_params.insert("cid".into(), Value::Int(ctx_id as i64));
@@ -504,8 +525,7 @@ pub(super) async fn get_shared_context_impl(
 
     // If target_prefix filter requested, apply post-query (JSON array stored as string)
     let final_data = if let Some(ref prefix) = p.target_prefix {
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&data).unwrap_or_default();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
         let filtered: Vec<&serde_json::Value> = rows
             .iter()
             .filter(|row| {
@@ -570,10 +590,9 @@ pub(super) async fn claim_intent_impl(
         )
         .map_err(op_err)?;
 
-        let rows: Vec<serde_json::Value> = serde_json::from_str(
-            &check_result.data_json.unwrap_or_else(|| "[]".into()),
-        )
-        .unwrap_or_default();
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
+                .unwrap_or_default();
 
         // Check for path overlap
         for row in &rows {
@@ -634,9 +653,7 @@ pub(super) async fn claim_intent_impl(
     params.insert("now".into(), Value::Int(now_ms));
     params.insert(
         "reason".into(),
-        p.reason
-            .as_deref()
-            .map_or(Value::Null, Value::from),
+        p.reason.as_deref().map_or(Value::Null, Value::from),
     );
 
     let query = "INSERT (i:__Intent { \
@@ -654,7 +671,13 @@ pub(super) async fn claim_intent_impl(
     let result = tools
         .submit_mut(move || {
             ops::gql::execute_gql(
-                &st, &auth2, query, Some(&params), false, false, ResultFormat::Json,
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
             )
         })
         .await?;
@@ -663,7 +686,11 @@ pub(super) async fn claim_intent_impl(
 
     // Link intent to agent session
     let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-    if let Some(intent_id) = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_u64()) {
+    if let Some(intent_id) = rows
+        .first()
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_u64())
+    {
         let mut link_params = HashMap::new();
         link_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
         link_params.insert("iid".into(), Value::Int(intent_id as i64));
@@ -691,7 +718,10 @@ pub(super) async fn claim_intent_impl(
 
     let mut text = format!("Intent claimed ({level}): {data}");
     if !conflict_text.is_empty() {
-        let _ = write!(text, "\n\nWarning — overlapping claims detected:\n{conflict_text}");
+        let _ = write!(
+            text,
+            "\n\nWarning — overlapping claims detected:\n{conflict_text}"
+        );
     }
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
@@ -724,7 +754,13 @@ pub(super) async fn release_intent_impl(
     let result = tools
         .submit_mut(move || {
             ops::gql::execute_gql(
-                &st, &auth2, query, Some(&params), false, false, ResultFormat::Json,
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
             )
         })
         .await?;
@@ -760,10 +796,8 @@ pub(super) async fn check_conflicts_impl(
     )
     .map_err(op_err)?;
 
-    let rows: Vec<serde_json::Value> = serde_json::from_str(
-        &result.data_json.unwrap_or_else(|| "[]".into()),
-    )
-    .unwrap_or_default();
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
 
     // Filter to only intents with overlapping targets
     let mut conflicts = Vec::new();
@@ -775,9 +809,9 @@ pub(super) async fn check_conflicts_impl(
             .unwrap_or_default();
 
         let overlaps: bool = p.targets.iter().any(|my_t| {
-            their_targets
-                .iter()
-                .any(|their_t| my_t.starts_with(their_t.as_str()) || their_t.starts_with(my_t.as_str()))
+            their_targets.iter().any(|their_t| {
+                my_t.starts_with(their_t.as_str()) || their_t.starts_with(my_t.as_str())
+            })
         });
 
         if overlaps {
