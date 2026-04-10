@@ -132,19 +132,18 @@ impl HnswIndex {
         let mut wg = self.write_graph.write();
         build::insert_node(&mut wg, node, &self.params);
 
-        // Encode for quantized storage if quantization is configured.
-        if let Some(ref qconfig) = self.params.quantization {
-            if wg.quantized.is_none() {
-                // Lazy init: encode all existing vectors (including the one just inserted).
-                let storage = quantize::QuantizedStorage::build(
-                    qconfig,
-                    vector.len(),
-                    wg.nodes.iter().map(|n| &*n.vector),
-                );
-                wg.quantized = Some(storage);
-            } else {
-                wg.quantized.as_mut().unwrap().encode_and_push(&vector);
-            }
+        // Keep quantized storage in sync with inserted nodes whenever it already exists.
+        // If quantization is configured but storage has not been initialized yet, lazily
+        // build it from all existing vectors (including the one just inserted).
+        if let Some(quantized) = wg.quantized.as_mut() {
+            quantized.encode_and_push(&vector);
+        } else if let Some(ref qconfig) = self.params.quantization {
+            let storage = quantize::QuantizedStorage::build(
+                qconfig,
+                vector.len(),
+                wg.nodes.iter().map(|n| &*n.vector),
+            );
+            wg.quantized = Some(storage);
         }
         drop(wg);
 

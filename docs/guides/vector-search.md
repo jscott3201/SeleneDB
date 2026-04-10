@@ -386,18 +386,18 @@ Check quantization status and memory savings:
 
 ```sql
 CALL vector.quantizationStats()
-YIELD enabled, bits, vector_count, original_bytes, quantized_bytes, compression_ratio, seed, rescore
+YIELD namespace, method, bits, vector_count, quantized_bytes, f32_bytes, compression_ratio, rescore
 ```
 
 | Column | Type | Description |
 |--------|------|-------------|
-| enabled | BOOL | Whether quantization is active |
+| namespace | STRING | Index namespace |
+| method | STRING | Quantization method (e.g., "PolarQuant") |
 | bits | INT | Bit width (3, 4, or 8) |
 | vector_count | INT | Number of quantized vectors |
-| original_bytes | INT | Equivalent f32 storage size |
 | quantized_bytes | INT | Actual quantized storage size |
-| compression_ratio | FLOAT | original_bytes / quantized_bytes |
-| seed | INT | Rotation matrix seed |
+| f32_bytes | INT | Equivalent f32 storage size |
+| compression_ratio | FLOAT | f32_bytes / quantized_bytes |
 | rescore | BOOL | Whether rescore is enabled |
 
 The `quantization_stats` MCP tool exposes the same information to AI agents.

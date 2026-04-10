@@ -406,11 +406,12 @@ pub fn search_quantized(
         rescored.truncate(k);
         rescored
     } else {
-        // Return quantized scores directly.
+        // Return quantized scores clamped to valid cosine range.
+        // Asymmetric dot with dequantized codes can slightly exceed [-1, 1].
         candidates
             .into_iter()
             .take(k)
-            .map(|c| (graph.get(c.idx).node_id, c.similarity))
+            .map(|c| (graph.get(c.idx).node_id, c.similarity.clamp(-1.0, 1.0)))
             .collect()
     }
 }

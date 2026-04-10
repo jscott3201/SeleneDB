@@ -548,8 +548,27 @@ impl PolarQuantizer {
     ///
     /// Core distance function for quantized search. Processes packed codes
     /// directly to avoid allocation. Uses 8-wide accumulator for auto-SIMD.
+    /// Expected packed byte length for a single vector at the configured bit width.
+    fn expected_packed_len(&self) -> usize {
+        match self.bits {
+            8 => self.dim,
+            4 => self.dim.div_ceil(2),
+            3 => (self.dim * 3).div_ceil(8),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn asymmetric_dot(&self, query_rotated: &[f32], packed: &[u8]) -> f32 {
         debug_assert_eq!(query_rotated.len(), self.dim);
+        debug_assert_eq!(
+            packed.len(),
+            self.expected_packed_len(),
+            "packed code length mismatch: expected {} for {}-bit × {}-dim, got {}",
+            self.expected_packed_len(),
+            self.bits,
+            self.dim,
+            packed.len()
+        );
         match self.bits {
             8 => self.asymmetric_dot_8bit(query_rotated, packed),
             4 => self.asymmetric_dot_4bit(query_rotated, packed),
