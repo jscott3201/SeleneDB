@@ -242,6 +242,11 @@ impl HnswIndex {
     /// 2. If mutations are pending, also search the write_graph under a read
     ///    lock and merge results.
     ///
+    /// When quantized storage is available, layer-0 beam search uses asymmetric
+    /// dot product (~8× less memory bandwidth) instead of full f32 cosine
+    /// similarity. If `rescore` is enabled in the quantization config, top-k
+    /// candidates are re-ranked with exact f32 cosine.
+    ///
     /// Tombstoned node IDs are filtered from the merged result list. The final
     /// result is sorted by descending similarity and truncated to `k`.
     ///
@@ -262,6 +267,11 @@ impl HnswIndex {
         }
 
         let ef = ef.unwrap_or(self.params.ef_search);
+        let rescore = self
+            .params
+            .quantization
+            .as_ref()
+            .is_some_and(|q| q.rescore);
 
         // Snapshot tombstones once to avoid locking twice.
         let tombstones_snapshot = self.tombstones.lock().clone();
@@ -272,6 +282,8 @@ impl HnswIndex {
 
         let mut results: Vec<(NodeId, f32)> = if guard.is_empty() {
             Vec::new()
+        } else if let Some(qs) = guard.quantized() {
+            search::search_quantized(&guard, qs, query, k_expanded, ef, rescore, filter)
         } else {
             search::search(&guard, query, k_expanded, ef, filter)
         };
@@ -280,7 +292,11 @@ impl HnswIndex {
         if self.has_pending_mutations() {
             let wg = self.write_graph.read();
             if !wg.is_empty() {
-                let write_results = search::search(&wg, query, k_expanded, ef, filter);
+                let write_results = if let Some(qs) = wg.quantized() {
+                    search::search_quantized(&wg, qs, query, k_expanded, ef, rescore, filter)
+                } else {
+                    search::search(&wg, query, k_expanded, ef, filter)
+                };
 
                 // Merge: union by NodeId, keep highest similarity score.
                 // For small result sets (typical k < 64), linear scan is
