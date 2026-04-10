@@ -831,6 +831,145 @@ pub(crate) struct RotateCredentialParams {
     pub(crate) new_password: String,
 }
 
+// ── Context Bridge: multi-agent coordination ───────────────────────
+
+fn default_intent_level() -> String {
+    "advisory".into()
+}
+
+fn default_context_type() -> String {
+    "discovery".into()
+}
+
+fn default_visibility() -> String {
+    "project".into()
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RegisterAgentParams {
+    /// Unique agent identifier (e.g., "claude-artemis-1").
+    pub(crate) agent_id: String,
+    /// Project the agent is working on.
+    pub(crate) project: String,
+    /// What the agent is currently working on.
+    #[serde(default)]
+    pub(crate) working_on: Option<String>,
+    /// File paths the agent is actively touching.
+    #[serde(default)]
+    pub(crate) files_touched: Option<Vec<String>>,
+    /// Agent capabilities or role description.
+    #[serde(default)]
+    pub(crate) capabilities: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct HeartbeatParams {
+    /// Agent identifier to update.
+    pub(crate) agent_id: String,
+    /// Optional update to what the agent is working on.
+    #[serde(default)]
+    pub(crate) working_on: Option<String>,
+    /// Optional update to files being touched.
+    #[serde(default)]
+    pub(crate) files_touched: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct DeregisterAgentParams {
+    /// Agent identifier to deregister.
+    pub(crate) agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ListAgentsParams {
+    /// Filter by project name.
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    /// Filter by status (active, stale, done). Default: returns all.
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ShareContextParams {
+    /// Agent publishing this context.
+    pub(crate) author: String,
+    /// Context type: discovery, decision, warning, request, blocker.
+    #[serde(default = "default_context_type")]
+    pub(crate) context_type: String,
+    /// Project scope for this context.
+    pub(crate) scope: String,
+    /// Optional fine-grained targets (file paths, crate names).
+    #[serde(default)]
+    pub(crate) targets: Option<Vec<String>>,
+    /// The context content.
+    pub(crate) content: String,
+    /// Visibility: project (default), global, or agent:<id> for directed.
+    #[serde(default = "default_visibility")]
+    pub(crate) visibility: String,
+    /// Time-to-live in milliseconds. 0 = no expiry.
+    #[serde(default)]
+    pub(crate) ttl_ms: Option<i64>,
+    /// Optional node IDs this context is about (creates edges).
+    #[serde(default)]
+    pub(crate) about_node_ids: Option<Vec<u64>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct GetSharedContextParams {
+    /// Filter by project scope.
+    #[serde(default)]
+    pub(crate) scope: Option<String>,
+    /// Filter by context type.
+    #[serde(default)]
+    pub(crate) context_type: Option<String>,
+    /// Only return context created after this timestamp (ms since epoch).
+    #[serde(default)]
+    pub(crate) since_ms: Option<i64>,
+    /// Filter by target path prefix (e.g., "crates/selene-gql/").
+    #[serde(default)]
+    pub(crate) target_prefix: Option<String>,
+    /// Include expired context. Default: false.
+    #[serde(default)]
+    pub(crate) include_expired: Option<bool>,
+    /// Maximum results. Default: 50.
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ClaimIntentParams {
+    /// Agent claiming the intent.
+    pub(crate) agent_id: String,
+    /// Description of the intended action.
+    pub(crate) action: String,
+    /// File paths or crate names being claimed.
+    pub(crate) targets: Vec<String>,
+    /// Intent level: advisory (default), exclusive, locked.
+    #[serde(default = "default_intent_level")]
+    pub(crate) level: String,
+    /// Reason for the claim.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ReleaseIntentParams {
+    /// Agent releasing the intent.
+    pub(crate) agent_id: String,
+    /// Specific intent node ID to release. If omitted, releases all intents for this agent.
+    #[serde(default)]
+    pub(crate) intent_id: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct CheckConflictsParams {
+    /// Agent checking for conflicts (excluded from results).
+    pub(crate) agent_id: String,
+    /// Target paths to check for conflicting intents.
+    pub(crate) targets: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

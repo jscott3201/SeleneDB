@@ -1,6 +1,7 @@
 //! MCP tool implementations for graph, time-series, schema, and data operations.
 
 mod ai;
+mod bridge;
 mod memory;
 mod principals;
 mod proposals;
@@ -2172,6 +2173,161 @@ impl SeleneTools {
         params: Parameters<RotateCredentialParams>,
     ) -> Result<CallToolResult, McpError> {
         principals::rotate_credential_impl(self, params.0).await
+    }
+
+    // ── Context Bridge: multi-agent coordination ────────────────────
+
+    #[tool(
+        name = "register_agent",
+        description = "Register or update an agent session for multi-agent coordination. Creates an __AgentSession node with presence info. Other agents can discover active peers via list_agents. Call heartbeat periodically to maintain liveness.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn register_agent(
+        &self,
+        params: Parameters<RegisterAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::register_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "heartbeat",
+        description = "Update agent session liveness. Must be called periodically (recommended: every 60s) to prevent the session from being marked stale. Optionally update working_on and files_touched.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn heartbeat(
+        &self,
+        params: Parameters<HeartbeatParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::heartbeat_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "deregister_agent",
+        description = "Deregister an agent session and release all its claimed intents. Call on clean shutdown. Sessions not deregistered are reaped after heartbeat timeout.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn deregister_agent(
+        &self,
+        params: Parameters<DeregisterAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::deregister_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_agents",
+        description = "List active agent sessions. Filter by project or status. Use to discover peers before starting work and to check who is working on what.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_agents(
+        &self,
+        params: Parameters<ListAgentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_agents_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "share_context",
+        description = "Publish shared context for other agents. Types: discovery (learned something), decision (made a choice), warning (potential issue), request (need help), blocker (blocked on something). Scoped to a project with optional fine-grained targets. Optionally link to graph entities via about_node_ids.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn share_context(
+        &self,
+        params: Parameters<ShareContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::share_context_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "get_shared_context",
+        description = "Query shared context from other agents. Filter by scope (project), context_type, recency (since_ms), and target_prefix. By default excludes expired context; set include_expired=true to see all.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_shared_context(
+        &self,
+        params: Parameters<GetSharedContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::get_shared_context_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "claim_intent",
+        description = "Declare intent to modify targets (file paths, crate names). Three levels: advisory (informational), exclusive (warns others away), locked (blocks others). Checks for conflicts before claiming. Linked to agent session via claims edge.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn claim_intent(
+        &self,
+        params: Parameters<ClaimIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::claim_intent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "release_intent",
+        description = "Release a claimed intent. Provide intent_id to release a specific intent, or omit to release all intents for the agent. Automatically called by deregister_agent.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn release_intent(
+        &self,
+        params: Parameters<ReleaseIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::release_intent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "check_conflicts",
+        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets. Does not create any state — read-only check.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn check_conflicts(
+        &self,
+        params: Parameters<CheckConflictsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::check_conflicts_impl(self, params.0).await
     }
 }
 
