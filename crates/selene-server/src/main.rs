@@ -51,6 +51,10 @@ struct ServerCli {
     /// the database as a subprocess.
     #[arg(long)]
     stdio: bool,
+    /// Emit logs as JSON (for production log aggregators).
+    /// Also enabled by setting SELENE_LOG_FORMAT=json.
+    #[arg(long)]
+    json_logs: bool,
 }
 
 fn parse_profile(s: &str) -> Result<selene_server::config::ProfileType, String> {
@@ -72,14 +76,28 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "selene_server=info".into()),
-        )
-        .init();
-
     let cli = ServerCli::parse();
+
+    // Subscriber composition: shared filter + format layer (text or JSON).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "selene_server=info".into());
+    let json_logs = cli.json_logs
+        || std::env::var("SELENE_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+
+    if json_logs {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_span_list(true)
+                    .with_current_span(false),
+            )
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     let data_dir_str = cli
         .data_dir
