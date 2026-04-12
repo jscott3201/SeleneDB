@@ -6,6 +6,40 @@
 mod support;
 use support::*;
 
+/// Extract a numeric ID from an MCP tool response text.
+///
+/// Handles JSON responses like `{"id":1,...}` or `[{"proposalId":5}]`,
+/// as well as text like `"Created node 5"`.
+fn extract_id(text: &str) -> u64 {
+    // Try JSON: look for `"id":N` or `"proposalId":N` pattern directly
+    for key in ["\"id\":", "\"nodeId\":", "\"edgeId\":", "\"proposalId\":"] {
+        if let Some(pos) = text.find(key) {
+            let after = &text[pos + key.len()..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(id) = num_str.parse::<u64>() {
+                return id;
+            }
+        }
+    }
+    // Fallback: find the first standalone number in the text
+    text.split_whitespace()
+        .find_map(|w| {
+            w.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no numeric ID found in: {text}"))
+}
+
+/// Assert that text (case-insensitive) contains one of the given substrings.
+fn assert_text_contains_any(text: &str, needles: &[&str], context: &str) {
+    let lower = text.to_lowercase();
+    assert!(
+        needles.iter().any(|n| lower.contains(&n.to_lowercase())),
+        "{context}: {text}"
+    );
+}
+
 // ── Health & Info ───────────────────────────────────────────────────
 
 #[tokio::test]
@@ -62,11 +96,23 @@ async fn create_get_modify_delete_node() {
         )
         .await,
     );
-    assert!(text.contains("1"), "created node should have id 1: {text}");
+    let node_id = extract_id(&text);
+    assert!(
+        node_id > 0,
+        "created node should have a positive id: {text}"
+    );
 
     // Get
-    let text =
-        tool_text(&call_tool(&base, &sid, 3, "get_node", serde_json::json!({"id": 1})).await);
+    let text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            3,
+            "get_node",
+            serde_json::json!({"id": node_id}),
+        )
+        .await,
+    );
     assert!(
         text.contains("Zone-A Temp"),
         "get_node should return name: {text}"
@@ -84,33 +130,47 @@ async fn create_get_modify_delete_node() {
             4,
             "modify_node",
             serde_json::json!({
-                "id": 1,
+                "id": node_id,
                 "set_properties": {"calibrated": true},
                 "add_labels": ["calibrated_sensor"]
             }),
         )
         .await,
     );
-    assert!(
-        text.contains("calibrated") || text.contains("modified") || text.contains("updated"),
-        "modify should confirm change: {text}"
+    assert_text_contains_any(
+        &text,
+        &["calibrated", "modified", "updated"],
+        "modify should confirm",
     );
 
     // Verify modification via get
-    let text =
-        tool_text(&call_tool(&base, &sid, 5, "get_node", serde_json::json!({"id": 1})).await);
+    let text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            5,
+            "get_node",
+            serde_json::json!({"id": node_id}),
+        )
+        .await,
+    );
     assert!(
         text.contains("calibrated"),
         "modified node should have new property: {text}"
     );
 
     // Delete
-    let text =
-        tool_text(&call_tool(&base, &sid, 6, "delete_node", serde_json::json!({"id": 1})).await);
-    assert!(
-        text.contains("deleted") || text.contains("Deleted") || text.contains("removed"),
-        "delete should confirm: {text}"
+    let text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            6,
+            "delete_node",
+            serde_json::json!({"id": node_id}),
+        )
+        .await,
     );
+    assert_text_contains_any(&text, &["deleted", "removed"], "delete should confirm");
 }
 
 #[tokio::test]
@@ -191,22 +251,28 @@ async fn create_get_modify_delete_edge() {
     let sid = initialize(&base).await;
 
     // Create two nodes
-    call_tool(
-        &base,
-        &sid,
-        2,
-        "create_node",
-        serde_json::json!({"labels": ["building"], "properties": {"name": "HQ"}}),
-    )
-    .await;
-    call_tool(
-        &base,
-        &sid,
-        3,
-        "create_node",
-        serde_json::json!({"labels": ["floor"], "properties": {"name": "Floor 1"}}),
-    )
-    .await;
+    let n1_text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            2,
+            "create_node",
+            serde_json::json!({"labels": ["building"], "properties": {"name": "HQ"}}),
+        )
+        .await,
+    );
+    let n1 = extract_id(&n1_text);
+    let n2_text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            3,
+            "create_node",
+            serde_json::json!({"labels": ["floor"], "properties": {"name": "Floor 1"}}),
+        )
+        .await,
+    );
+    let n2 = extract_id(&n2_text);
 
     // Create edge
     let text = tool_text(
@@ -216,22 +282,31 @@ async fn create_get_modify_delete_edge() {
             4,
             "create_edge",
             serde_json::json!({
-                "source": 1,
-                "target": 2,
+                "source": n1,
+                "target": n2,
                 "label": "contains",
                 "properties": {"level": 1}
             }),
         )
         .await,
     );
+    let edge_id = extract_id(&text);
     assert!(
-        text.contains("1") || text.contains("created"),
-        "create_edge should return edge id or confirm: {text}"
+        edge_id > 0,
+        "create_edge should return a positive id: {text}"
     );
 
     // Get edge
-    let text =
-        tool_text(&call_tool(&base, &sid, 5, "get_edge", serde_json::json!({"id": 1})).await);
+    let text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            5,
+            "get_edge",
+            serde_json::json!({"id": edge_id}),
+        )
+        .await,
+    );
     assert!(
         text.contains("contains"),
         "get_edge should return label: {text}"
@@ -244,13 +319,14 @@ async fn create_get_modify_delete_edge() {
             &sid,
             6,
             "modify_edge",
-            serde_json::json!({"id": 1, "set_properties": {"weight": 1.0}}),
+            serde_json::json!({"id": edge_id, "set_properties": {"weight": 1.0}}),
         )
         .await,
     );
-    assert!(
-        text.contains("modified") || text.contains("updated") || text.contains("weight"),
-        "modify_edge should confirm: {text}"
+    assert_text_contains_any(
+        &text,
+        &["modified", "updated", "weight"],
+        "modify_edge should confirm",
     );
 
     // List edges
@@ -270,12 +346,17 @@ async fn create_get_modify_delete_edge() {
     );
 
     // Delete edge
-    let text =
-        tool_text(&call_tool(&base, &sid, 8, "delete_edge", serde_json::json!({"id": 1})).await);
-    assert!(
-        text.contains("deleted") || text.contains("Deleted"),
-        "delete_edge should confirm: {text}"
+    let text = tool_text(
+        &call_tool(
+            &base,
+            &sid,
+            8,
+            "delete_edge",
+            serde_json::json!({"id": edge_id}),
+        )
+        .await,
     );
+    assert_text_contains_any(&text, &["deleted", "removed"], "delete_edge should confirm");
 }
 
 #[tokio::test]
@@ -555,9 +636,10 @@ async fn schema_lifecycle() {
         )
         .await,
     );
-    assert!(
-        text.contains("eleted") || text.contains("removed") || text.contains("nregistered"),
-        "delete_schema should confirm: {text}"
+    assert_text_contains_any(
+        &text,
+        &["deleted", "removed", "unregistered"],
+        "delete_schema should confirm",
     );
 }
 
@@ -599,9 +681,10 @@ async fn edge_schema_lifecycle() {
         )
         .await,
     );
-    assert!(
-        text.contains("eleted") || text.contains("removed") || text.contains("unregistered"),
-        "delete_edge_schema should confirm: {text}"
+    assert_text_contains_any(
+        &text,
+        &["deleted", "removed", "unregistered"],
+        "delete_edge_schema should confirm",
     );
 }
 
@@ -930,24 +1013,7 @@ async fn proposal_lifecycle() {
         text.contains("roposal"),
         "propose_action should return proposal: {text}"
     );
-    // Response contains JSON like [{"proposalId": N}] — extract the ID.
-    let proposal_id: u64 = {
-        let json_start = text
-            .find('[')
-            .or_else(|| text.find('{'))
-            .unwrap_or_else(|| panic!("response should contain JSON: {text}"));
-        let json_part = &text[json_start..];
-        let parsed: serde_json::Value = serde_json::from_str(json_part)
-            .unwrap_or_else(|_| panic!("should parse JSON from: {text}"));
-        let obj = if parsed.is_array() {
-            &parsed[0]
-        } else {
-            &parsed
-        };
-        obj["proposalId"]
-            .as_i64()
-            .unwrap_or_else(|| panic!("should have proposalId in: {text}")) as u64
-    };
+    let proposal_id = extract_id(&text);
 
     // List proposals
     let text = tool_text(
@@ -1014,24 +1080,7 @@ async fn proposal_reject() {
         )
         .await,
     );
-    // Response contains JSON like [{"proposalId": N}] — extract the ID.
-    let proposal_id: u64 = {
-        let json_start = propose_text
-            .find('[')
-            .or_else(|| propose_text.find('{'))
-            .unwrap_or_else(|| panic!("response should contain JSON: {propose_text}"));
-        let json_part = &propose_text[json_start..];
-        let parsed: serde_json::Value = serde_json::from_str(json_part)
-            .unwrap_or_else(|_| panic!("should parse JSON from: {propose_text}"));
-        let obj = if parsed.is_array() {
-            &parsed[0]
-        } else {
-            &parsed
-        };
-        obj["proposalId"]
-            .as_i64()
-            .unwrap_or_else(|| panic!("should have proposalId in: {propose_text}")) as u64
-    };
+    let proposal_id = extract_id(&propose_text);
 
     let text = tool_text(
         &call_tool(
@@ -1049,16 +1098,16 @@ async fn proposal_reject() {
 // ── Principal Management ───────────────────────────────────────────
 //
 // Principal CRUD requires the vault service for password hashing.
-// In dev mode the vault is not initialized, so we test the read-only
-// paths (list/get) and verify create returns a graceful error.
+// In dev mode the vault is not initialized, so we verify that
+// list_principals, get_principal, and create_principal all return
+// a graceful "vault not available" error rather than panicking.
 
 #[tokio::test]
 async fn principal_tools_require_vault() {
     let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
-    // In dev mode, vault is not available — principal tools should fail gracefully.
-    // Test list_principals:
+    // list_principals
     let result = session_request(
         &base,
         &sid,
@@ -1073,11 +1122,26 @@ async fn principal_tools_require_vault() {
         "list_principals without vault should fail gracefully: {text}"
     );
 
-    // Test create_principal:
+    // get_principal
     let result = session_request(
         &base,
         &sid,
         3,
+        "tools/call",
+        serde_json::json!({"name": "get_principal", "arguments": {"identity": "nobody"}}),
+    )
+    .await;
+    let text = result.to_string();
+    assert!(
+        text.contains("vault") || text.contains("error"),
+        "get_principal without vault should fail gracefully: {text}"
+    );
+
+    // create_principal
+    let result = session_request(
+        &base,
+        &sid,
+        4,
         "tools/call",
         serde_json::json!({
             "name": "create_principal",
@@ -1186,24 +1250,7 @@ async fn execute_unapproved_proposal_fails() {
         )
         .await,
     );
-    // Response contains JSON like [{"proposalId": N}] — extract the ID.
-    let proposal_id: u64 = {
-        let json_start = propose_text
-            .find('[')
-            .or_else(|| propose_text.find('{'))
-            .unwrap_or_else(|| panic!("response should contain JSON: {propose_text}"));
-        let json_part = &propose_text[json_start..];
-        let parsed: serde_json::Value = serde_json::from_str(json_part)
-            .unwrap_or_else(|_| panic!("should parse JSON from: {propose_text}"));
-        let obj = if parsed.is_array() {
-            &parsed[0]
-        } else {
-            &parsed
-        };
-        obj["proposalId"]
-            .as_i64()
-            .unwrap_or_else(|| panic!("should have proposalId in: {propose_text}")) as u64
-    };
+    let proposal_id = extract_id(&propose_text);
 
     // Try to execute without approval
     let result = session_request(
