@@ -31,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # For dispatch, checkout the specified tag/ref so merge-base check
+          # validates the actual release commit, not the default branch HEAD.
+          ref: ${{ inputs.version || github.ref }}
           fetch-depth: 0
       - name: Check tag is reachable from main
         run: |
@@ -62,7 +65,7 @@ jobs:
   # ── CPU Docker Images (multi-arch: amd64 + arm64) ─────────────────
   build-cpu:
     name: Docker CPU (${{ matrix.arch }})
-    needs: ci
+    needs: [ci, preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +79,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -122,7 +127,7 @@ jobs:
 
   create-cpu-manifest:
     name: CPU manifest
-    needs: build-cpu
+    needs: [build-cpu, preflight]
     runs-on: ubuntu-latest
     steps:
       - name: Set up Docker Buildx
@@ -141,10 +146,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{version}}-cpu
-            type=semver,pattern=v{{major}}.{{minor}}-cpu
+            type=semver,pattern=v{{version}},value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{version}}-cpu,value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}}-cpu,value=${{ needs.preflight.outputs.version }}
           flavor: |
             latest=true
 
@@ -169,11 +174,13 @@ jobs:
   # Requires HF_TOKEN secret for EmbeddingGemma model download.
   build-cuda:
     name: Docker CUDA
-    needs: ci
+    needs: [ci, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
 
       - name: Free disk space
         run: |
@@ -197,8 +204,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern=v{{version}}-cuda
-            type=semver,pattern=v{{major}}.{{minor}}-cuda
+            type=semver,pattern=v{{version}}-cuda,value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}}-cuda,value=${{ needs.preflight.outputs.version }}
             type=raw,value=cuda-latest
 
       - name: Build and push
@@ -221,7 +228,7 @@ jobs:
   # RUSTFLAGS overrides .cargo/config.toml target-cpu=native for portable binaries.
   build-binaries:
     name: Binary (${{ matrix.target }})
-    needs: ci
+    needs: [ci, preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -251,6 +258,8 @@ jobs:
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -274,11 +283,9 @@ jobs:
 
       - name: Package tarball
         env:
-          VERSION: ${{ needs.ci.result == 'success' && github.ref_name || '' }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: |
-          # Use git tag name; falls back to preflight output for dispatch
-          TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="selene-${TAG}-${{ matrix.target }}"
+          ARCHIVE="selene-${RELEASE_VERSION}-${{ matrix.target }}"
           mkdir -p "${ARCHIVE}"
           cp "target/${{ matrix.target }}/release/selene-server" "${ARCHIVE}/"
           cp "target/${{ matrix.target }}/release/selene" "${ARCHIVE}/"
@@ -299,12 +306,14 @@ jobs:
   # Waits for all build tracks, then creates a release with binaries.
   release:
     name: Create GitHub Release
-    needs: [create-cpu-manifest, build-cuda, build-binaries]
+    needs: [create-cpu-manifest, build-cuda, build-binaries, preflight]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
 
       - name: Download binary artifacts
         uses: actions/download-artifact@v8
@@ -316,6 +325,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.preflight.outputs.version }}
           generate_release_notes: true
           files: |
             /tmp/artifacts/*.tar.gz
