@@ -1126,10 +1126,9 @@ pub(super) async fn claim_intent_impl(
                     false,
                     ResultFormat::Json,
                 ) {
-                    let rows: Vec<serde_json::Value> = serde_json::from_str(
-                        &exp_result.data_json.unwrap_or_else(|| "[]".into()),
-                    )
-                    .unwrap_or_default();
+                    let rows: Vec<serde_json::Value> =
+                        serde_json::from_str(&exp_result.data_json.unwrap_or_else(|| "[]".into()))
+                            .unwrap_or_default();
                     for row in &rows {
                         if let Some(cid) = row.get("child_id").and_then(|v| v.as_i64()) {
                             children.push(format!("node:{cid}"));
