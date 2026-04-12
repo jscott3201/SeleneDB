@@ -710,7 +710,7 @@ pub(super) async fn share_context_impl(
             inv_params.insert("inv_id".into(), Value::from(inv_id.as_str()));
             inv_params.insert("cid".into(), Value::Int(ctx_id as i64));
 
-            let inv_query = "MATCH (inv:__Investigation) FILTER inv.investigation_id = $inv_id \
+            let inv_query = "MATCH (inv:__Investigation {investigation_id: $inv_id}) \
                               MATCH (c) WHERE id(c) = $cid \
                               INSERT (c)-[:belongs_to]->(inv) \
                               RETURN id(inv) AS inv_node_id";
@@ -878,7 +878,7 @@ pub(super) async fn start_investigation_impl(
     let inv_count = count_entities(
         &tools.state,
         &auth,
-        "MATCH (i:__Investigation) FILTER i.scope = $scope AND i.status = 'open' \
+        "MATCH (i:__Investigation {scope: $scope}) FILTER i.status = 'open' \
          RETURN count(i) AS cnt",
         Some(&limit_params),
     );
@@ -1000,8 +1000,8 @@ pub(super) async fn close_investigation_impl(
     );
     params.insert("now".into(), Value::Int(now_ms));
 
-    let query = "MATCH (i:__Investigation) \
-                  FILTER i.investigation_id = $inv_id AND i.status = 'open' \
+    let query = "MATCH (i:__Investigation {investigation_id: $inv_id}) \
+                  FILTER i.status = 'open' \
                   SET i.status = 'closed', \
                   i.conclusion = $conclusion, \
                   i.outcome = $outcome, \
@@ -1033,7 +1033,7 @@ pub(super) async fn close_investigation_impl(
         let exists = count_entities(
             &tools.state,
             &auth,
-            "MATCH (i:__Investigation) FILTER i.investigation_id = $inv_id RETURN count(i) AS cnt",
+            "MATCH (i:__Investigation {investigation_id: $inv_id}) RETURN count(i) AS cnt",
             Some(&check_params),
         );
         let msg = if exists > 0 {

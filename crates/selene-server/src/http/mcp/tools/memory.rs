@@ -39,7 +39,7 @@ pub(super) async fn remember_impl(
     let (max_memories, default_ttl_ms, eviction_policy, ttl_tiers) = {
         let mut config_params = HashMap::new();
         config_params.insert("ns".into(), Value::from(namespace.as_str()));
-        let config_query = "MATCH (c:__MemoryConfig) FILTER c.namespace = $ns \
+        let config_query = "MATCH (c:__MemoryConfig {namespace: $ns}) \
                             RETURN c.max_memories AS max_memories, \
                             c.default_ttl_ms AS default_ttl_ms, \
                             c.eviction_policy AS eviction_policy, \
