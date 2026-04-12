@@ -21,39 +21,6 @@ use crate::http::mcp::params::*;
 use crate::ops;
 use crate::ops::gql::ResultFormat;
 
-// ── Resource limits ─────────────────────────────────────────────
-const MAX_SHARED_CONTEXTS: usize = 500;
-const MAX_INTENTS_PER_AGENT: usize = 50;
-const MAX_TASKS_PER_PROJECT: usize = 1000;
-
-/// Run a COUNT query and return the count, or 0 on error.
-fn count_entities(
-    state: &crate::bootstrap::ServerState,
-    auth: &crate::auth::handshake::AuthContext,
-    query: &str,
-    params: Option<&HashMap<String, Value>>,
-) -> usize {
-    let result =
-        ops::gql::execute_gql(state, auth, query, params, false, false, ResultFormat::Json);
-    match result {
-        Ok(r) => {
-            let rows: Vec<serde_json::Value> =
-                serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into()))
-                    .unwrap_or_default();
-            rows.first()
-                .and_then(|row| row.get("cnt"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize
-        }
-        Err(_) => 0,
-    }
-}
-
-/// Return the principal node ID as a string, suitable for ownership tracking.
-fn caller_identity(auth: &crate::auth::handshake::AuthContext) -> String {
-    auth.principal_node_id.0.to_string()
-}
-
 // ── Agent Session ───────────────────────────────────────────────────
 
 pub(super) async fn register_agent_impl(
@@ -115,10 +82,6 @@ pub(super) async fn register_agent_impl(
         p.context_window.map_or(Value::Null, Value::Int),
     );
 
-    // Bind session ownership to the caller's principal identity.
-    let registered_by = caller_identity(&auth);
-    params.insert("registered_by".into(), Value::from(registered_by.as_str()));
-
     let query = "MERGE (a:__AgentSession {agent_id: $aid}) \
                   ON CREATE SET \
                       a.project = $project, \
@@ -130,7 +93,6 @@ pub(super) async fn register_agent_impl(
                       a.domain_expertise = $domain_expertise, \
                       a.model_family = $model_family, \
                       a.context_window = $context_window, \
-                      a.registered_by = $registered_by, \
                       a.heartbeat_at = $now, \
                       a.started_at = $now \
                   ON MATCH SET \
@@ -207,40 +169,6 @@ pub(super) async fn heartbeat_impl(
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
 
-    // Verify session ownership: the caller must be the principal that registered this session.
-    let identity = caller_identity(&auth);
-    {
-        let mut owner_params = HashMap::new();
-        owner_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
-        let owner_result = ops::gql::execute_gql(
-            &tools.state,
-            &auth,
-            "MATCH (a:__AgentSession {agent_id: $aid}) RETURN a.registered_by AS owner",
-            Some(&owner_params),
-            false,
-            false,
-            ResultFormat::Json,
-        )
-        .map_err(op_err)?;
-
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&owner_result.data_json.unwrap_or_else(|| "[]".into()))
-                .unwrap_or_default();
-        if let Some(owner) = rows
-            .first()
-            .and_then(|r| r.get("owner"))
-            .and_then(|v| v.as_str())
-        {
-            if owner != identity {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_REQUEST,
-                    message: "session owned by a different principal".into(),
-                    data: None,
-                });
-            }
-        }
-    }
-
     let now_ms = selene_core::now_nanos() / 1_000_000;
 
     // Validate status if provided
@@ -316,40 +244,6 @@ pub(super) async fn deregister_agent_impl(
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
-
-    // Verify session ownership before deregistering.
-    let identity = caller_identity(&auth);
-    {
-        let mut owner_params = HashMap::new();
-        owner_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
-        let owner_result = ops::gql::execute_gql(
-            &tools.state,
-            &auth,
-            "MATCH (a:__AgentSession {agent_id: $aid}) RETURN a.registered_by AS owner",
-            Some(&owner_params),
-            false,
-            false,
-            ResultFormat::Json,
-        )
-        .map_err(op_err)?;
-
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&owner_result.data_json.unwrap_or_else(|| "[]".into()))
-                .unwrap_or_default();
-        if let Some(owner) = rows
-            .first()
-            .and_then(|r| r.get("owner"))
-            .and_then(|v| v.as_str())
-        {
-            if owner != identity {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_REQUEST,
-                    message: "session owned by a different principal".into(),
-                    data: None,
-                });
-            }
-        }
-    }
 
     let mut params = HashMap::new();
     params.insert("aid".into(), Value::from(p.agent_id.as_str()));
@@ -506,25 +400,6 @@ pub(super) async fn share_context_impl(
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
-
-    // Resource limit: cap total __SharedContext nodes.
-    let ctx_count = count_entities(
-        &tools.state,
-        &auth,
-        "MATCH (c:__SharedContext) RETURN count(c) AS cnt",
-        None,
-    );
-    if ctx_count >= MAX_SHARED_CONTEXTS {
-        return Err(McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: format!(
-                "shared context limit reached ({MAX_SHARED_CONTEXTS}); \
-                 remove expired contexts before sharing new ones"
-            )
-            .into(),
-            data: None,
-        });
-    }
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
 
@@ -769,154 +644,129 @@ pub(super) async fn claim_intent_impl(
         });
     }
 
-    // Resource limit: cap intents per agent.
-    let mut limit_params = HashMap::new();
-    limit_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
-    let intent_count = count_entities(
-        &tools.state,
-        &auth,
-        "MATCH (i:__Intent {agent_id: $aid}) FILTER i.status = 'claimed' RETURN count(i) AS cnt",
-        Some(&limit_params),
-    );
-    if intent_count >= MAX_INTENTS_PER_AGENT {
-        return Err(McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: format!(
-                "intent limit reached for agent '{}' ({MAX_INTENTS_PER_AGENT}); \
-                 release existing intents before claiming new ones",
-                p.agent_id
-            )
-            .into(),
-            data: None,
-        });
-    }
-
     let now_ms = selene_core::now_nanos() / 1_000_000;
     let targets_str = serde_json::to_string(&p.targets).unwrap_or_else(|_| "[]".into());
 
-    // Prepare insert params (used inside the atomic closure below).
-    let mut insert_params = HashMap::new();
-    insert_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
-    insert_params.insert("action".into(), Value::from(p.action.as_str()));
-    insert_params.insert("targets".into(), Value::from(targets_str.as_str()));
-    insert_params.insert("level".into(), Value::from(level));
-    insert_params.insert("status".into(), Value::from("claimed"));
-    insert_params.insert("now".into(), Value::Int(now_ms));
-    insert_params.insert(
+    // Check for existing conflicts on exclusive/locked targets
+    let mut conflict_text = String::new();
+    if level != "advisory" {
+        let mut check_params = HashMap::new();
+        check_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+
+        let check_query = "MATCH (i:__Intent) \
+                            FILTER i.status = 'claimed' AND i.agent_id <> $aid \
+                            AND (i.level = 'exclusive' OR i.level = 'locked') \
+                            RETURN i.agent_id AS agent_id, i.action AS action, \
+                            i.targets AS targets, i.level AS level";
+
+        let check_result = ops::gql::execute_gql(
+            &tools.state,
+            &auth,
+            check_query,
+            Some(&check_params),
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
+                .unwrap_or_default();
+
+        // Check for path overlap — only reject on overlapping locked intents
+        let mut has_locked_overlap = false;
+        for row in &rows {
+            let their_targets: Vec<String> = row
+                .get("targets")
+                .and_then(|t| t.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+
+            let their_level = row
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            for my_target in &p.targets {
+                for their_target in &their_targets {
+                    if my_target.starts_with(their_target.as_str())
+                        || their_target.starts_with(my_target.as_str())
+                    {
+                        let agent = row
+                            .get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let action = row
+                            .get("action")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let _ = writeln!(
+                            conflict_text,
+                            "CONFLICT: agent '{agent}' has {their_level} claim on \
+                             '{their_target}' (action: {action})"
+                        );
+                        if their_level == "locked" {
+                            has_locked_overlap = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If an overlapping intent is locked, reject with an error
+        if has_locked_overlap {
+            return Err(McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: format!("Cannot claim — locked by another agent:\n{conflict_text}").into(),
+                data: None,
+            });
+        }
+    }
+
+    // Create the intent
+    let mut params = HashMap::new();
+    params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+    params.insert("action".into(), Value::from(p.action.as_str()));
+    params.insert("targets".into(), Value::from(targets_str.as_str()));
+    params.insert("level".into(), Value::from(level));
+    params.insert("status".into(), Value::from("claimed"));
+    params.insert("now".into(), Value::Int(now_ms));
+    params.insert(
         "reason".into(),
         p.reason.as_deref().map_or(Value::Null, Value::from),
     );
 
-    // Atomic conflict-check-then-insert inside a single submit_mut to prevent TOCTOU race.
-    let check_non_advisory = level != "advisory";
-    let my_targets = p.targets.clone();
+    let query = "INSERT (i:__Intent { \
+                  agent_id: $aid, \
+                  action: $action, \
+                  targets: $targets, \
+                  level: $level, \
+                  status: $status, \
+                  claimed_at: $now, \
+                  reason: $reason \
+                  }) RETURN id(i) AS id";
+
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
-    let (conflict_text, insert_data) = tools
+    let result = tools
         .submit_mut(move || {
-            let mut conflict_text = String::new();
-
-            // Step 1: conflict check for exclusive/locked levels.
-            if check_non_advisory {
-                let mut check_params = HashMap::new();
-                check_params.insert("aid".into(), insert_params["aid"].clone());
-
-                let check_query = "MATCH (i:__Intent) \
-                                    FILTER i.status = 'claimed' AND i.agent_id <> $aid \
-                                    AND (i.level = 'exclusive' OR i.level = 'locked') \
-                                    RETURN i.agent_id AS agent_id, i.action AS action, \
-                                    i.targets AS targets, i.level AS level";
-
-                let check_result = ops::gql::execute_gql(
-                    &st,
-                    &auth2,
-                    check_query,
-                    Some(&check_params),
-                    false,
-                    false,
-                    ResultFormat::Json,
-                )
-                .map_err(|e| ops::OpError::QueryError(e.to_string()))?;
-
-                let rows: Vec<serde_json::Value> =
-                    serde_json::from_str(&check_result.data_json.unwrap_or_else(|| "[]".into()))
-                        .unwrap_or_default();
-
-                let mut has_locked_overlap = false;
-                for row in &rows {
-                    let their_targets: Vec<String> = row
-                        .get("targets")
-                        .and_then(|t| t.as_str())
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-
-                    let their_level = row
-                        .get("level")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-
-                    for my_target in &my_targets {
-                        for their_target in &their_targets {
-                            if my_target.starts_with(their_target.as_str())
-                                || their_target.starts_with(my_target.as_str())
-                            {
-                                let agent = row
-                                    .get("agent_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                let action = row
-                                    .get("action")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                let _ = writeln!(
-                                    conflict_text,
-                                    "CONFLICT: agent '{agent}' has {their_level} claim on \
-                                     '{their_target}' (action: {action})"
-                                );
-                                if their_level == "locked" {
-                                    has_locked_overlap = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if has_locked_overlap {
-                    return Err(ops::OpError::Conflict(format!(
-                        "Cannot claim — locked by another agent:\n{conflict_text}"
-                    )));
-                }
-            }
-
-            // Step 2: insert the intent (serialized with the check above).
-            let insert_query = "INSERT (i:__Intent { \
-                                  agent_id: $aid, \
-                                  action: $action, \
-                                  targets: $targets, \
-                                  level: $level, \
-                                  status: $status, \
-                                  claimed_at: $now, \
-                                  reason: $reason \
-                                  }) RETURN id(i) AS id";
-
-            let insert_result = ops::gql::execute_gql(
+            ops::gql::execute_gql(
                 &st,
                 &auth2,
-                insert_query,
-                Some(&insert_params),
+                query,
+                Some(&params),
                 false,
                 false,
                 ResultFormat::Json,
             )
-            .map_err(|e| ops::OpError::QueryError(e.to_string()))?;
-
-            let data = insert_result.data_json.unwrap_or_else(|| "{}".into());
-            Ok((conflict_text, data))
         })
         .await?;
 
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+
     // Link intent to agent session
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&insert_data).unwrap_or_default();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
     if let Some(intent_id) = rows
         .first()
         .and_then(|r| r.get("id"))
@@ -947,7 +797,7 @@ pub(super) async fn claim_intent_impl(
             .await;
     }
 
-    let mut text = format!("Intent claimed ({level}): {insert_data}");
+    let mut text = format!("Intent claimed ({level}): {data}");
     if !conflict_text.is_empty() {
         let _ = write!(
             text,
@@ -1408,28 +1258,6 @@ pub(super) async fn propose_task_impl(
     let auth = mcp_auth(tools)?;
     reject_replica(&tools.state)?;
 
-    // Resource limit: cap tasks per project.
-    let mut task_limit_params = HashMap::new();
-    task_limit_params.insert("project".into(), Value::from(p.project.as_str()));
-    let task_count = count_entities(
-        &tools.state,
-        &auth,
-        "MATCH (t:__Task {project: $project}) RETURN count(t) AS cnt",
-        Some(&task_limit_params),
-    );
-    if task_count >= MAX_TASKS_PER_PROJECT {
-        return Err(McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: format!(
-                "task limit reached for project '{}' ({MAX_TASKS_PER_PROJECT}); \
-                 complete or remove existing tasks before proposing new ones",
-                p.project
-            )
-            .into(),
-            data: None,
-        });
-    }
-
     if !VALID_PRIORITIES.contains(&p.priority.as_str()) {
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -1632,20 +1460,14 @@ pub(super) async fn reject_task_impl(
 
     let mut params = HashMap::new();
     params.insert("tid".into(), Value::Int(p.task_id as i64));
-    params.insert("aid".into(), Value::from(p.agent_id.as_str()));
     params.insert(
         "reason".into(),
         p.reason.as_deref().map_or(Value::Null, Value::from),
     );
     params.insert("now".into(), Value::Int(now_ms));
 
-    // Authorization: only the targeted assignee, original proposer, or anyone
-    // (if untargeted) may reject a proposed task.
     let query = "MATCH (t:__Task) WHERE id(t) = $tid \
                   FILTER t.status = 'proposed' \
-                      AND (t.assignee_agent IS NULL \
-                           OR t.assignee_agent = $aid \
-                           OR t.proposer_agent = $aid) \
                   SET t.status = 'rejected', t.failure_reason = $reason, \
                       t.updated_at = $now \
                   RETURN id(t) AS id";
@@ -1669,12 +1491,7 @@ pub(super) async fn reject_task_impl(
     if result.row_count == 0 {
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: format!(
-                "Task {} not found, not in 'proposed' status, or agent '{}' \
-                 is not authorized to reject it",
-                p.task_id, p.agent_id
-            )
-            .into(),
+            message: format!("Task {} not found or not in 'proposed' status", p.task_id).into(),
             data: None,
         });
     }
