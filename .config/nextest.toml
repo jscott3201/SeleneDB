@@ -1,0 +1,43 @@
+# Nextest configuration for SeleneDB.
+# https://nexte.st/docs/configuration/
+
+[store]
+dir = "target/nextest"
+
+# ── Default profile (local development) ─────────────────────────────
+
+[profile.default]
+# Per-test timeout: most unit tests complete in <1s.
+slow-timeout = { period = "30s", terminate-after = 2 }
+# Fail-fast: stop on first failure during local dev.
+fail-fast = true
+
+# ── CI profile ──────────────────────────────────────────────────────
+
+[profile.ci]
+# Longer slow threshold for CI runners (weaker CPUs).
+slow-timeout = { period = "60s", terminate-after = 3 }
+# Run all tests even if some fail — see the full picture in CI.
+fail-fast = false
+# Retry flaky tests once before marking as failed.
+retries = 1
+# JUnit output for CI dashboards and GitHub Actions annotations.
+junit = { path = "junit.xml" }
+
+# ── Test groups ─────────────────────────────────────────────────────
+#
+# Integration tests that boot full HTTP/QUIC servers need limited
+# concurrency to avoid port contention and memory pressure.
+
+[test-groups.integration-servers]
+max-threads = 4
+
+[[profile.default.overrides]]
+filter = "package(selene-server) & kind(test)"
+test-group = "integration-servers"
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "package(selene-server) & kind(test)"
+test-group = "integration-servers"
+slow-timeout = { period = "120s", terminate-after = 2 }

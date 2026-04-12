@@ -45,13 +45,33 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@v2
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
+      - name: Build tests
+        # Compile test binaries with limited parallelism to avoid OOM on 7 GB runners.
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo nextest run --workspace --features selene-server/dev-tls,selene-testing/bench --no-run
       - name: Run tests
-        # Limit parallelism to avoid OOM on 7 GB runners. Exclude 'metal' (macOS only).
-        run: cargo test --workspace -j2 --features selene-server/dev-tls,selene-testing/bench
+        # Nextest runs each test in its own process for isolation and parallelism.
+        run: cargo nextest run --workspace --features selene-server/dev-tls,selene-testing/bench --profile ci
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+      - name: Doctests
+        # Nextest does not run doctests, so run them separately.
+        # Limited build parallelism to avoid OOM on 7 GB runners.
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo test --workspace --features selene-server/dev-tls,selene-testing/bench --doc
 
   doc-audit:
     name: Docs & Audit
