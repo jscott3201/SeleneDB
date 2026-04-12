@@ -2,7 +2,7 @@
 
 Lightweight, in-memory property graph runtime for IoT, smart buildings, and domains requiring a living graph of connected entities with real-time state. Written in pure Rust (zero C/C++ dependencies).
 
-v0.2.0 release candidate. 13 crates, ~141K LOC, ~2,828 unit tests + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization). Eight rounds of agent usability testing (90+ issues fixed). 56 MCP tools with read/write/destructive annotations.
+v1.0.0. 13 crates, ~141K LOC, ~2,923 unit tests + 14 integration tests. AI MVP (GraphRAG, agent memory, Text2GQL, EmbeddingGemma, GGUF quantization). Eight rounds of agent usability testing (90+ issues fixed). 56 MCP tools with read/write/destructive annotations. PolarQuant vector quantization (3/4/8-bit).
 
 ## Build and test
 

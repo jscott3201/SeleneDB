@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-12
+
 ### Added
 
 #### Graph
@@ -20,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Server
 - TOML configuration for quantization: `hnsw_quantize`, `hnsw_quantize_bits`, `hnsw_quantize_rescore` in `[vector]` section.
 - `quantization_stats` MCP tool for AI agent access to quantization metrics.
+- JSON structured log output for production environments.
+- Tracing spans at all service boundaries and spawn sites.
+- Test infrastructure consolidation into shared support module.
+- CI adoption of cargo-nextest for per-process test isolation.
+- 25 MCP tool integration tests for graph CRUD and operations.
+- Context bridge enhancements from upstream agent proposals.
+- Bridge security hardening and integration tests.
+- Heartbeat improvements and agent performance tracking.
+- Batch semantic_search lookups and aggregate trust query optimization.
+
+#### DevOps
+- Multi-arch Docker release pipeline (amd64 + arm64) with CUDA GPU variant.
+- Native binary releases for Linux (musl) and macOS (Apple Silicon with Metal, Intel).
+- GitHub Actions release automation with semver tagging.
 
 ## [0.2.0] - 2026-04-04
 
@@ -196,6 +212,7 @@ Initial release candidate.
 - GitHub Actions CI (lint, test, feature-gated test, doc audit)
 - Release pipeline to GHCR with semver tagging
 
-[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jscott3201/SeleneDB/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jscott3201/SeleneDB/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jscott3201/SeleneDB/releases/tag/v0.1.0

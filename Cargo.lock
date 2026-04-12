@@ -5160,7 +5160,7 @@ dependencies = [
 
 [[package]]
 name = "selene-algorithms"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "parking_lot",
@@ -5173,7 +5173,7 @@ dependencies = [
 
 [[package]]
 name = "selene-cli"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5189,7 +5189,7 @@ dependencies = [
 
 [[package]]
 name = "selene-client"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "quinn",
@@ -5208,7 +5208,7 @@ dependencies = [
 
 [[package]]
 name = "selene-core"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "lasso",
  "postcard",
@@ -5221,7 +5221,7 @@ dependencies = [
 
 [[package]]
 name = "selene-gql"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "candle-core",
@@ -5254,7 +5254,7 @@ dependencies = [
 
 [[package]]
 name = "selene-graph"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "criterion",
@@ -5279,7 +5279,7 @@ dependencies = [
 
 [[package]]
 name = "selene-packs"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "selene-core",
  "serde",
@@ -5291,7 +5291,7 @@ dependencies = [
 
 [[package]]
 name = "selene-persist"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "postcard",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "selene-rdf"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "criterion",
@@ -5329,7 +5329,7 @@ dependencies = [
 
 [[package]]
 name = "selene-server"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5396,7 +5396,7 @@ dependencies = [
 
 [[package]]
 name = "selene-testing"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "quinn",
@@ -5413,7 +5413,7 @@ dependencies = [
 
 [[package]]
 name = "selene-ts"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "criterion",
@@ -5436,7 +5436,7 @@ dependencies = [
 
 [[package]]
 name = "selene-wire"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "bitflags 2.11.0",
  "bytes",
