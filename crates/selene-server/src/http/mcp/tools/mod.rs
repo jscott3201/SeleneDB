@@ -1271,7 +1271,7 @@ impl SeleneTools {
 
     #[tool(
         name = "semantic_search",
-        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Requires the embedding model to be loaded.",
+        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Use summary_mode=true for compact results (name/labels/score only). Use max_property_length to truncate long property values when include_properties=true. Supports pagination via offset (k is page size). Requires the embedding model to be loaded.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1318,19 +1318,34 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let mut rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        let total = rows.len();
+
+        // Apply offset for pagination
+        let offset = p.offset.unwrap_or(0).max(0) as usize;
+        if offset > 0 {
+            rows = rows.into_iter().skip(offset).collect();
+        }
+
+        let summary = p.summary_mode.unwrap_or(false);
         let include_props = p.include_properties.unwrap_or(false);
-        if !include_props {
-            let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+
+        if !include_props && !summary {
             let text = format!(
-                "Semantic search for '{}': {} results\n{data}",
-                p.query_text, result.row_count
+                "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
+                p.query_text,
+                total,
+                rows.len(),
+                offset,
+                format_json(&rows)
             );
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        // Enrich results with full node properties
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        // Enrich results — summary_mode returns lightweight data,
+        // full mode returns complete node properties.
+        let max_prop_len = p.max_property_length.unwrap_or(0);
 
         let enriched: Vec<serde_json::Value> = rows
             .into_iter()
@@ -1341,18 +1356,45 @@ impl SeleneTools {
                     .map_or(0, |v| v as u64);
                 let mut enriched = row;
                 if let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id) {
-                    enriched["node"] = serde_json::to_value(&node).unwrap_or_default();
+                    if summary {
+                        // Lightweight: only name and labels
+                        let name = node
+                            .properties
+                            .iter()
+                            .find(|(k, _)| k.as_str() == "name")
+                            .map(|(_, v)| serde_json::to_value(v).unwrap_or_default());
+                        if let Some(n) = name {
+                            enriched["name"] = n;
+                        }
+                        enriched["labels"] = serde_json::to_value(&node.labels).unwrap_or_default();
+                    } else {
+                        let mut node_json = serde_json::to_value(&node).unwrap_or_default();
+                        if max_prop_len > 0 {
+                            truncate_property_values(&mut node_json, max_prop_len);
+                        }
+                        enriched["node"] = node_json;
+                    }
                 }
                 enriched
             })
             .collect();
 
-        let text = format!(
-            "Semantic search for '{}': {} results\n{}",
+        let mut text = format!(
+            "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
             p.query_text,
+            total,
             enriched.len(),
+            offset,
             format_json(&enriched)
         );
+
+        // Response size guard
+        const MAX_RESPONSE_CHARS: usize = 50_000;
+        if text.len() > MAX_RESPONSE_CHARS {
+            text.truncate(MAX_RESPONSE_CHARS);
+            text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
+        }
+
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -2221,7 +2263,7 @@ impl SeleneTools {
 
     #[tool(
         name = "register_agent",
-        description = "Register or update an agent session for multi-agent coordination. Creates an __AgentSession node with presence info. Other agents can discover active peers via list_agents. Call heartbeat periodically to maintain liveness.",
+        description = "Register or update an agent session for multi-agent coordination. Creates an __AgentSession node with presence info. Optionally provide structured capabilities: supported_tools, domain_expertise, model_family, context_window. Returns active Convention nodes for the project. Discover peers via list_agents or find_capable_agent.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2370,6 +2412,156 @@ impl SeleneTools {
         params: Parameters<CheckConflictsParams>,
     ) -> Result<CallToolResult, McpError> {
         bridge::check_conflicts_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "find_capable_agent",
+        description = "Find agents matching required capabilities. Searches structured fields (supported_tools, domain_expertise) and free-text capabilities. Returns agents ranked by match score. At least one of required_tools, required_expertise, or query must be provided.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_capable_agent(
+        &self,
+        params: Parameters<FindCapableAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::find_capable_agent_impl(self, params.0).await
+    }
+
+    // ── Task Delegation ───────────────────────────────────────────────
+
+    #[tool(
+        name = "propose_task",
+        description = "Propose a task for another agent to execute. Creates a __Task node in 'proposed' status with a :proposed edge from the proposer's session. Optionally target a specific agent via assignee_agent. Include required_tools for capability-based matching.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn propose_task(
+        &self,
+        params: Parameters<ProposeTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::propose_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "accept_task",
+        description = "Accept a proposed task. Sets status to 'accepted' and creates an :assigned edge. Only tasks in 'proposed' status can be accepted.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn accept_task(
+        &self,
+        params: Parameters<AcceptTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::accept_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "reject_task",
+        description = "Reject a proposed task with an optional reason. Only tasks in 'proposed' status can be rejected.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn reject_task(
+        &self,
+        params: Parameters<RejectTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::reject_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "complete_task",
+        description = "Mark a task as completed or failed. Only the assigned agent can complete a task. Provide output_data for results or failure_reason when success is false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn complete_task(
+        &self,
+        params: Parameters<CompleteTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::complete_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_tasks",
+        description = "List tasks with optional filters by project, status, proposer, or assignee. Returns tasks ordered by most recently updated. Default limit: 50.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_tasks(
+        &self,
+        params: Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_tasks_impl(self, params.0).await
+    }
+}
+
+// ── Standalone helpers ─────────────────────────────────────────────
+
+/// Truncate string property values that exceed `max_len` characters.
+/// Handles both serde-tagged enum format (`{"String": "..."}`) and plain
+/// JSON strings.
+fn truncate_property_values(node_json: &mut serde_json::Value, max_len: usize) {
+    let Some(props) = node_json
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    else {
+        return;
+    };
+    for v in props.values_mut() {
+        truncate_string_value(v, max_len);
+    }
+}
+
+/// Truncate a single JSON value in-place if it contains a string exceeding
+/// `max_len` characters. Handles `{"String": "..."}` (serde-tagged
+/// `Value` enum) and plain `"..."` JSON strings.
+fn truncate_string_value(v: &mut serde_json::Value, max_len: usize) {
+    // Check serde-tagged format: {"String": "..."}
+    let needs_tagged_truncation = v
+        .get("String")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| s.chars().count() > max_len);
+
+    if needs_tagged_truncation {
+        let inner = v["String"].as_str().unwrap();
+        let total = inner.chars().count();
+        let truncated: String = inner.chars().take(max_len).collect();
+        v["String"] =
+            serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
+        return;
+    }
+
+    // Plain JSON string
+    let needs_plain_truncation = v.as_str().is_some_and(|s| s.chars().count() > max_len);
+    if needs_plain_truncation {
+        let s = v.as_str().unwrap();
+        let total = s.chars().count();
+        let truncated: String = s.chars().take(max_len).collect();
+        *v = serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
     }
 }
 
