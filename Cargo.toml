@@ -107,6 +107,12 @@ parquet = { version = "58", default-features = false, features = ["arrow", "snap
 rmcp = { version = "1", features = ["server", "macros"] }
 schemars = "1.0"
 
+# Concurrency (shared across crates)
+arc-swap = "1"
+
+# Encoding
+base64 = "0.22"
+
 # Random
 rand = "0.10"
 
