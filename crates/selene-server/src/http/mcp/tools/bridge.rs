@@ -988,12 +988,12 @@ pub(super) async fn find_capable_agent_impl(
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
 
-    // Batch-fetch task completion stats for trust scoring.
+    // Aggregate task completion stats server-side to avoid fetching individual rows.
     let trust_data: HashMap<String, (u64, u64)> = {
         let trust_query = "MATCH (t:__Task) \
                             FILTER t.status = 'completed' OR t.status = 'failed' \
-                            RETURN t.assignee_agent AS agent_id, t.status AS status \
-                            LIMIT 5000";
+                            RETURN t.assignee_agent AS agent_id, t.status AS status, \
+                            count(t) AS total";
 
         ops::gql::execute_gql(
             &tools.state,
@@ -1006,21 +1006,22 @@ pub(super) async fn find_capable_agent_impl(
         )
         .ok()
         .map(|r| {
-            let trust_rows: Vec<serde_json::Value> =
+            let agg_rows: Vec<serde_json::Value> =
                 serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into()))
                     .unwrap_or_default();
             let mut map: HashMap<String, (u64, u64)> = HashMap::new();
-            for row in trust_rows {
+            for row in agg_rows {
                 let aid = row
                     .get("agent_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
                 let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let total = row.get("total").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
                 let entry = map.entry(aid).or_insert((0, 0));
                 match status {
-                    "completed" => entry.0 += 1,
-                    "failed" => entry.1 += 1,
+                    "completed" => entry.0 += total,
+                    "failed" => entry.1 += total,
                     _ => {}
                 }
             }
