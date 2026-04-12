@@ -129,7 +129,7 @@ pub(super) async fn log_trace_impl(
                               MATCH (t) WHERE id(t) = $tgt \
                               INSERT (c)-[:about]->(t)";
 
-            let _ = ops::gql::execute_gql(
+            if let Err(e) = ops::gql::execute_gql(
                 &tools.state,
                 &auth,
                 edge_query,
@@ -137,7 +137,14 @@ pub(super) async fn log_trace_impl(
                 false,
                 false,
                 ResultFormat::Json,
-            );
+            ) {
+                tracing::warn!(
+                    trace_id,
+                    target_id,
+                    error = %e,
+                    "best-effort :about edge creation failed"
+                );
+            }
         }
     }
 
@@ -156,7 +163,7 @@ pub(super) async fn log_trace_impl(
                          MATCH (cur) WHERE id(cur) = $tid \
                          INSERT (prev)-[:next_turn]->(cur)";
 
-        let _ = ops::gql::execute_gql(
+        if let Err(e) = ops::gql::execute_gql(
             &tools.state,
             &auth,
             seq_query,
@@ -164,7 +171,14 @@ pub(super) async fn log_trace_impl(
             false,
             false,
             ResultFormat::Json,
-        );
+        ) {
+            tracing::warn!(
+                trace_id,
+                prev_turn,
+                error = %e,
+                "best-effort :next_turn edge creation failed"
+            );
+        }
     }
 
     Ok(CallToolResult::success(vec![Content::text(format!(

@@ -1593,3 +1593,414 @@ async fn bridge_task_complete_requires_assignee() {
     )
     .await;
 }
+
+// ── Investigation Session Lifecycle ────────────────────────────────
+
+#[tokio::test]
+async fn investigation_lifecycle() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Register an agent first.
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-inv-agent", "project": "test-inv"}),
+    )
+    .await;
+
+    // Start an investigation.
+    let start_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "start_investigation",
+        serde_json::json!({
+            "author": "test-inv-agent",
+            "scope": "test-inv",
+            "subject": "Memory leak in connection pool",
+            "initial_findings": "Heap grows 2MB/hour under steady load"
+        }),
+    )
+    .await;
+    assert!(
+        start_text.contains("investigation_id"),
+        "should return investigation_id: {start_text}"
+    );
+
+    // Extract the investigation_id by parsing the embedded JSON.
+    let json_start = start_text.find('{').expect("response should contain JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&start_text[json_start..])
+        .unwrap_or_else(|e| panic!("should parse investigation JSON: {e}; body: {start_text}"));
+    let inv_id = parsed["investigation_id"]
+        .as_str()
+        .expect("should have investigation_id string field");
+
+    // Share context linked to the investigation.
+    let share_text = call_tool(
+        &base,
+        &sid,
+        4,
+        "share_context",
+        serde_json::json!({
+            "author": "test-inv-agent",
+            "scope": "test-inv",
+            "context_type": "discovery",
+            "content": "Connection objects not returned to pool on timeout",
+            "investigation_id": inv_id
+        }),
+    )
+    .await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm context shared: {share_text}"
+    );
+    assert!(
+        !share_text.contains("WARNING"),
+        "should not warn about investigation link: {share_text}"
+    );
+
+    // List investigations — should find the open one.
+    let list_text = call_tool(
+        &base,
+        &sid,
+        5,
+        "list_investigations",
+        serde_json::json!({"scope": "test-inv", "status": "open"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("Memory leak in connection pool"),
+        "should list the open investigation: {list_text}"
+    );
+
+    // Close the investigation.
+    let close_text = call_tool(
+        &base,
+        &sid,
+        6,
+        "close_investigation",
+        serde_json::json!({
+            "investigation_id": inv_id,
+            "conclusion": "Fixed: timeout handler now calls pool.release()",
+            "outcome": "resolved"
+        }),
+    )
+    .await;
+    assert!(
+        close_text.contains("Investigation closed"),
+        "should confirm closure: {close_text}"
+    );
+
+    // Verify it's now listed as closed.
+    let list_closed = call_tool(
+        &base,
+        &sid,
+        7,
+        "list_investigations",
+        serde_json::json!({"scope": "test-inv", "status": "closed"}),
+    )
+    .await;
+    assert!(
+        list_closed.contains("Memory leak"),
+        "should list closed investigation: {list_closed}"
+    );
+
+    // Closing again should fail with "already closed".
+    let result = session_request(
+        &base,
+        &sid,
+        8,
+        "tools/call",
+        serde_json::json!({
+            "name": "close_investigation",
+            "arguments": {
+                "investigation_id": inv_id,
+                "conclusion": "duplicate close"
+            }
+        }),
+    )
+    .await;
+    let error_msg = result
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        error_msg.contains("already closed"),
+        "re-closing should say already closed: {result}"
+    );
+
+    // Get context filtered by investigation_id.
+    let ctx_text = call_tool(
+        &base,
+        &sid,
+        9,
+        "get_shared_context",
+        serde_json::json!({"investigation_id": inv_id}),
+    )
+    .await;
+    assert!(
+        ctx_text.contains("not returned to pool"),
+        "should find linked context: {ctx_text}"
+    );
+
+    call_tool(
+        &base,
+        &sid,
+        10,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-inv-agent"}),
+    )
+    .await;
+}
+
+// ── Confidence and Response Tracking ───────────────────────────────
+
+#[tokio::test]
+async fn context_confidence_and_response_tracking() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-conf-agent", "project": "test-conf"}),
+    )
+    .await;
+
+    // Share context with confidence and response tracking.
+    let share_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "share_context",
+        serde_json::json!({
+            "author": "test-conf-agent",
+            "scope": "test-conf",
+            "context_type": "warning",
+            "content": "Possible heat exchanger fouling detected",
+            "confidence": 0.72,
+            "response_requested": true,
+            "response_deadline_ms": 600_000
+        }),
+    )
+    .await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm sharing: {share_text}"
+    );
+
+    // Retrieve and verify confidence + response tracking fields via JSON parsing.
+    let get_text = call_tool(
+        &base,
+        &sid,
+        4,
+        "get_shared_context",
+        serde_json::json!({"scope": "test-conf"}),
+    )
+    .await;
+    assert!(
+        get_text.contains("heat exchanger fouling"),
+        "should find content: {get_text}"
+    );
+
+    // Parse the JSON array from the response to assert typed fields.
+    let json_start = get_text
+        .find('[')
+        .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
+    let json_end = get_text.rfind(']').map_or_else(
+        || panic!("should contain JSON array: {get_text}"),
+        |i| i + 1,
+    );
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&get_text[json_start..json_end])
+        .unwrap_or_else(|e| panic!("should parse context JSON: {e}; body: {get_text}"));
+    let entry = entries
+        .first()
+        .and_then(|e| e.as_object())
+        .unwrap_or_else(|| panic!("should have at least one entry: {get_text}"));
+    let confidence = entry
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| panic!("should have numeric confidence: {get_text}"));
+    assert!(
+        (confidence - 0.72).abs() < 0.001,
+        "confidence should be ~0.72, got {confidence}"
+    );
+    let response_requested = entry
+        .get("response_requested")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| panic!("should have boolean response_requested: {get_text}"));
+    assert!(response_requested, "response_requested should be true");
+
+    // Test validation: negative deadline should be rejected.
+    let bad_result = session_request(
+        &base,
+        &sid,
+        5,
+        "tools/call",
+        serde_json::json!({
+            "name": "share_context",
+            "arguments": {
+                "author": "test-conf-agent",
+                "scope": "test-conf",
+                "content": "bad deadline",
+                "response_deadline_ms": -1000
+            }
+        }),
+    )
+    .await;
+    assert!(
+        bad_result.get("error").is_some(),
+        "negative deadline should be rejected: {bad_result}"
+    );
+
+    // Auto-infer response_requested from deadline.
+    let auto_text = call_tool(
+        &base,
+        &sid,
+        6,
+        "share_context",
+        serde_json::json!({
+            "author": "test-conf-agent",
+            "scope": "test-conf",
+            "content": "auto-inferred response request",
+            "response_deadline_ms": 300_000
+        }),
+    )
+    .await;
+    assert!(
+        auto_text.contains("Context shared"),
+        "deadline-only should auto-infer response_requested: {auto_text}"
+    );
+
+    call_tool(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-conf-agent"}),
+    )
+    .await;
+}
+
+// ── TTL Tiers in Memory ────────────────────────────────────────────
+
+#[tokio::test]
+async fn memory_ttl_tier_config_and_validation() {
+    let base = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Configure memory namespace with TTL tiers.
+    let config_text = call_tool(
+        &base,
+        &sid,
+        2,
+        "configure_memory",
+        serde_json::json!({
+            "namespace": "tier_test",
+            "max_memories": 100,
+            "ttl_tiers": "{\"ephemeral\":3600000,\"session\":86400000,\"persistent\":0}"
+        }),
+    )
+    .await;
+    assert!(
+        config_text.contains("tier_test"),
+        "should confirm config: {config_text}"
+    );
+
+    // Verify tiers stored via GQL.
+    let verify_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (c:__MemoryConfig) FILTER c.namespace = 'tier_test' RETURN c.ttl_tiers AS tiers"
+        }),
+    )
+    .await;
+    assert!(
+        verify_text.contains("ephemeral")
+            && verify_text.contains("session")
+            && verify_text.contains("persistent"),
+        "tiers should be stored in config: {verify_text}"
+    );
+
+    // Invalid tiers JSON should be rejected.
+    let bad_json = session_request(
+        &base,
+        &sid,
+        4,
+        "tools/call",
+        serde_json::json!({
+            "name": "configure_memory",
+            "arguments": {
+                "namespace": "tier_test",
+                "ttl_tiers": "not valid json"
+            }
+        }),
+    )
+    .await;
+    assert!(
+        bad_json.get("error").is_some(),
+        "invalid tiers JSON should be rejected: {bad_json}"
+    );
+
+    // Unknown tier should fail in remember.
+    let bad_tier = session_request(
+        &base,
+        &sid,
+        5,
+        "tools/call",
+        serde_json::json!({
+            "name": "remember",
+            "arguments": {
+                "namespace": "tier_test",
+                "content": "bad tier",
+                "tier": "nonexistent"
+            }
+        }),
+    )
+    .await;
+    let error_msg = bad_tier
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        error_msg.contains("unknown tier 'nonexistent'"),
+        "should report unknown tier: {bad_tier}"
+    );
+
+    // Tier + valid_until should fail (mutually exclusive).
+    let conflict = session_request(
+        &base,
+        &sid,
+        6,
+        "tools/call",
+        serde_json::json!({
+            "name": "remember",
+            "arguments": {
+                "namespace": "tier_test",
+                "content": "conflict test",
+                "tier": "ephemeral",
+                "valid_until": 9_999_999_999_999_i64
+            }
+        }),
+    )
+    .await;
+    let conflict_msg = conflict
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        conflict_msg.contains("mutually exclusive"),
+        "tier + valid_until should be rejected: {conflict}"
+    );
+}
