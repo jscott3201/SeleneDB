@@ -1478,6 +1478,68 @@ async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken
         // Sweep 2: working_locally sessions past the 30-minute safety threshold
         let local_threshold = now_ms - AGENT_WORKING_LOCALLY_THRESHOLD_MS;
         reap_stale_agents(&state, &auth, "working_locally", local_threshold).await;
+
+        // Sweep 3: mark overdue response-requested context
+        mark_overdue_responses(&state, &auth, now_ms).await;
+    }
+}
+
+/// Mark `__SharedContext` nodes as overdue when their response deadline has passed.
+async fn mark_overdue_responses(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::handshake::AuthContext,
+    now_ms: i64,
+) {
+    use std::collections::HashMap;
+
+    let mut params = HashMap::new();
+    params.insert("now".into(), selene_core::Value::Int(now_ms));
+
+    // Single mutation: find all overdue contexts and mark them in one pass.
+    let query = "MATCH (c:__SharedContext) \
+                 FILTER c.response_requested = true \
+                 AND c.response_deadline_at > 0 \
+                 AND c.response_deadline_at < $now \
+                 AND c.response_overdue IS NULL \
+                 SET c.response_overdue = true \
+                 RETURN count(c) AS marked";
+
+    let st = Arc::clone(state);
+    let auth2 = auth.clone();
+    let mark_result = state
+        .mutation_batcher
+        .submit(move || {
+            crate::ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                crate::ops::gql::ResultFormat::Json,
+            )
+        })
+        .await;
+
+    match mark_result {
+        Ok(Ok(r)) => {
+            let count: i64 = r
+                .data_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
+                .and_then(|rows| rows.first().cloned())
+                .and_then(|row| row.get("marked").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            if count > 0 {
+                tracing::debug!("marked {count} context(s) as response overdue");
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("response deadline sweep mutation failed: {e}");
+        }
+        Err(e) => {
+            tracing::warn!("response deadline sweep submit failed: {e}");
+        }
     }
 }
 

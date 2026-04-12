@@ -1,4 +1,4 @@
-# Cloud Build configuration for SeleneDB GPU image.
+# Cloud Build configuration for SeleneDB images (CPU + GPU).
 #
 # Builds and pushes to Artifact Registry. Requires:
 #   1. HF token stored as a Secret Manager secret named 'hf-token'
@@ -30,8 +30,22 @@ availableSecrets:
       env: HF_TOKEN
 
 steps:
+  # Build the CPU image (standard Dockerfile, no CUDA)
+  - id: cpu-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:cpu-${_TAG}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:cpu-latest
+      - .
+
   # Build the GPU image with CUDA support and embedded model
-  - name: gcr.io/cloud-builders/docker
+  - id: gpu-image
+    name: gcr.io/cloud-builders/docker
     entrypoint: bash
     args:
       - -c
@@ -48,6 +62,8 @@ steps:
       - HF_TOKEN
 
 images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:cpu-${_TAG}
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:cpu-latest
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-${_TAG}
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:gpu-latest
 

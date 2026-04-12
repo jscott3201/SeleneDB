@@ -1929,7 +1929,7 @@ impl SeleneTools {
 
     #[tool(
         name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory).",
+        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Use tier (e.g., 'ephemeral', 'session', 'persistent') for named TTL tiers configured via configure_memory, or valid_until for explicit expiry (mutually exclusive). Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1974,7 +1974,7 @@ impl SeleneTools {
 
     #[tool(
         name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy ('clock' default, 'oldest', or 'lowest_confidence'). Settings persist in a __MemoryConfig node.",
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), eviction policy ('clock' default, 'oldest', or 'lowest_confidence'), and named TTL tiers (ttl_tiers JSON object mapping tier names to ms, e.g., {\"ephemeral\": 3600000, \"session\": 86400000, \"persistent\": 0}). Settings persist in a __MemoryConfig node.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2349,7 +2349,7 @@ impl SeleneTools {
 
     #[tool(
         name = "share_context",
-        description = "Publish shared context for other agents. Types: discovery (learned something), decision (made a choice), warning (potential issue), request (need help), blocker (blocked on something). Scoped to a project with optional fine-grained targets. Optionally link to graph entities via about_node_ids.",
+        description = "Publish shared context for other agents. Types: discovery (learned something), decision (made a choice), warning (potential issue), request (need help), blocker (blocked on something). Scoped to a project with optional fine-grained targets. Optionally link to graph entities via about_node_ids. Supports confidence (0.0–1.0) for epistemic annotation, response_requested + response_deadline_ms for escalation tracking, and investigation_id to thread context into an investigation session.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2366,7 +2366,7 @@ impl SeleneTools {
 
     #[tool(
         name = "get_shared_context",
-        description = "Query shared context from other agents. Filter by scope (project), context_type, recency (since_ms), and target_prefix. By default excludes expired context; set include_expired=true to see all.",
+        description = "Query shared context from other agents. Filter by scope (project), context_type, recency (since_ms), target_prefix, investigation_id, or author. Returns confidence, response tracking status, and investigation links when present. By default excludes expired context; set include_expired=true to see all.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2383,7 +2383,7 @@ impl SeleneTools {
 
     #[tool(
         name = "claim_intent",
-        description = "Declare intent to modify targets (file paths, crate names). Three levels: advisory (informational), exclusive (warns others away), locked (blocks others). Checks for conflicts before claiming. Linked to agent session via claims edge.",
+        description = "Declare intent to modify targets (file paths, crate names, or node:<id> for graph nodes). Three levels: advisory (informational), exclusive (warns others away), locked (blocks others). Checks for conflicts before claiming. Set cascade=true with node:<id> targets to auto-claim descendant nodes via :contains edges. Linked to agent session via claims edge.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2417,7 +2417,7 @@ impl SeleneTools {
 
     #[tool(
         name = "check_conflicts",
-        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets. Does not create any state — read-only check.",
+        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets (including cascaded expanded_targets). Does not expand the caller's targets — use the same targets you would pass to claim_intent. Does not create any state — read-only check.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2430,6 +2430,64 @@ impl SeleneTools {
         params: Parameters<CheckConflictsParams>,
     ) -> Result<CallToolResult, McpError> {
         bridge::check_conflicts_impl(self, params.0).await
+    }
+
+    // ── Investigation Sessions ──────────────────────────────────────
+
+    #[tool(
+        name = "start_investigation",
+        description = "Start a new investigation thread. Creates an __Investigation node that groups \
+        related shared context entries into a traceable chain. Use investigation_id in subsequent \
+        share_context calls to link findings. Returns the generated investigation_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn start_investigation(
+        &self,
+        params: Parameters<StartInvestigationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::start_investigation_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "close_investigation",
+        description = "Close an open investigation with a conclusion. Sets status to 'closed' and records \
+        the conclusion and optional outcome classification (e.g., 'resolved', 'escalated', 'inconclusive'). \
+        Idempotent per investigation_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn close_investigation(
+        &self,
+        params: Parameters<CloseInvestigationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::close_investigation_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_investigations",
+        description = "List investigation threads. Filter by scope (project), status (open/closed), or \
+        author. Returns investigation metadata including subject, status, and conclusion.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_investigations(
+        &self,
+        params: Parameters<ListInvestigationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_investigations_impl(self, params.0).await
     }
 
     #[tool(
