@@ -101,8 +101,8 @@ pub(super) fn execute_call(
         &owned_ctx
     };
 
-    // Pre-compute normalized YIELD names once (avoids per-row allocations).
-    // Each entry: (normalized_name, alias_istr) for matching against procedure columns.
+    // Pre-compute normalized YIELD names once so the explicit YIELD list is not
+    // re-normalized for every procedure result row during column matching.
     let yield_all = call.yield_star || call.yields.is_empty();
     let yield_lookup: Vec<(String, IStr)> = if yield_all {
         Vec::new()

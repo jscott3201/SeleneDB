@@ -21,7 +21,7 @@ rustyline = "18"
 serde_json.workspace = true
 anyhow.workspace = true
 getrandom = "0.4"
-base64.workspace = true
+base64 = "0.22"
 
 # Global allocator (musl only: fixes 2-9x perf loss from musl's single-lock allocator)
 [target.'cfg(target_env = "musl")'.dependencies]

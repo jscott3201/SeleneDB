@@ -65,7 +65,7 @@ anyhow.workspace = true
 parking_lot.workspace = true
 roaring.workspace = true
 smallvec.workspace = true
-arc-swap.workspace = true
+arc-swap = "1"
 
 # Dev mode TLS (feature-gated: dev-tls)
 rcgen = { workspace = true, optional = true }
@@ -92,7 +92,7 @@ jsonwebtoken.workspace = true
 rand.workspace = true
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.11"
-base64.workspace = true
+base64 = "0.22"
 
 # Vault encryption
 chacha20poly1305 = "0.10"
