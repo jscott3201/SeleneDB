@@ -1136,11 +1136,13 @@ pub(super) async fn find_capable_agent_impl(
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
 
-    // Batch-fetch task completion stats for trust scoring.
+    // Aggregate task completion stats server-side to avoid fetching individual rows.
+    // LIMIT bounds query cost as task history grows.
     let trust_data: HashMap<String, (u64, u64)> = {
         let trust_query = "MATCH (t:__Task) \
                             FILTER t.status = 'completed' OR t.status = 'failed' \
-                            RETURN t.assignee_agent AS agent_id, t.status AS status \
+                            RETURN t.assignee_agent AS agent_id, t.status AS status, \
+                            count(t) AS total \
                             LIMIT 5000";
 
         ops::gql::execute_gql(
@@ -1165,10 +1167,11 @@ pub(super) async fn find_capable_agent_impl(
                     .unwrap_or("")
                     .to_string();
                 let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let cnt = row.get("total").and_then(|v| v.as_u64()).unwrap_or(1);
                 let entry = map.entry(aid).or_insert((0, 0));
                 match status {
-                    "completed" => entry.0 += 1,
-                    "failed" => entry.1 += 1,
+                    "completed" => entry.0 += cnt,
+                    "failed" => entry.1 += cnt,
                     _ => {}
                 }
             }

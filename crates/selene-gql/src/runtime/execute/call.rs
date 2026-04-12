@@ -101,6 +101,22 @@ pub(super) fn execute_call(
         &owned_ctx
     };
 
+    // Pre-compute normalized YIELD names once so the explicit YIELD list is not
+    // re-normalized for every procedure result row during column matching.
+    let yield_all = call.yield_star || call.yields.is_empty();
+    let yield_lookup: Vec<(String, IStr)> = if yield_all {
+        Vec::new()
+    } else {
+        call.yields
+            .iter()
+            .map(|yi| {
+                let normalized = normalize_col(yi.name.as_str());
+                let alias = yi.alias.unwrap_or(yi.name);
+                (normalized, alias)
+            })
+            .collect()
+    };
+
     let mut output = Vec::new();
     for binding in &bindings {
         // Evaluate arguments against current binding with full context
@@ -118,23 +134,18 @@ pub(super) fn execute_call(
         for row in rows {
             let mut extended = binding.clone();
             for (name, value) in &row {
-                // Apply YIELD aliases: match procedure column names using
-                // normalized comparison (uppercase + strip underscores) so
-                // `node_count` matches `nodeCount`.
-                let norm_name = normalize_col(name.as_str());
-                let upper_name = IStr::new(&name.as_str().to_uppercase());
-                // YIELD * or no explicit yields: include all columns
-                if call.yield_star || call.yields.is_empty() {
+                if yield_all {
+                    // YIELD * or no explicit yields: include all columns
+                    let upper_name = IStr::new(&name.as_str().to_uppercase());
                     extended.bind(upper_name, BoundValue::Scalar(value.clone()));
-                } else if let Some(yi) = call
-                    .yields
-                    .iter()
-                    .find(|y| normalize_col(y.name.as_str()) == norm_name)
-                {
-                    let alias = yi.alias.unwrap_or(yi.name);
-                    extended.bind(alias, BoundValue::Scalar(value.clone()));
+                } else {
+                    // Match procedure column name against pre-computed YIELD names.
+                    let norm_name = normalize_col(name.as_str());
+                    if let Some((_, alias)) = yield_lookup.iter().find(|(n, _)| *n == norm_name) {
+                        extended.bind(*alias, BoundValue::Scalar(value.clone()));
+                    }
+                    // else: column not in YIELD list, skip it
                 }
-                // else: column not in YIELD list, skip it
             }
             output.push(extended);
         }
