@@ -1813,10 +1813,10 @@ async fn context_confidence_and_response_tracking() {
     let json_start = get_text
         .find('[')
         .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
-    let json_end = get_text
-        .rfind(']')
-        .map(|i| i + 1)
-        .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
+    let json_end = get_text.rfind(']').map_or_else(
+        || panic!("should contain JSON array: {get_text}"),
+        |i| i + 1,
+    );
     let entries: Vec<serde_json::Value> = serde_json::from_str(&get_text[json_start..json_end])
         .unwrap_or_else(|e| panic!("should parse context JSON: {e}; body: {get_text}"));
     let entry = entries

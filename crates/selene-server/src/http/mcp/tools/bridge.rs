@@ -737,7 +737,12 @@ pub(super) async fn share_context_impl(
                         " WARNING: investigation '{inv_id}' not found — context not linked"
                     );
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!(
+                        investigation_id = inv_id.as_str(),
+                        error = %e,
+                        "failed to link context to investigation"
+                    );
                     let _ = write!(
                         inv_warning,
                         " WARNING: failed to link context to investigation '{inv_id}'"
@@ -873,7 +878,7 @@ pub(super) async fn start_investigation_impl(
     let inv_count = count_entities(
         &tools.state,
         &auth,
-        "MATCH (i:__Investigation {scope: $scope}) FILTER i.status = 'open' \
+        "MATCH (i:__Investigation) FILTER i.scope = $scope AND i.status = 'open' \
          RETURN count(i) AS cnt",
         Some(&limit_params),
     );
