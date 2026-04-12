@@ -495,6 +495,20 @@ pub(crate) struct SemanticSearchParams {
     /// with each result. Saves follow-up get_node calls. Default: false.
     #[serde(default)]
     pub(crate) include_properties: Option<bool>,
+    /// If true, return only id/name/labels/score/path per result (no full
+    /// properties). Overrides include_properties when set. Default: false.
+    #[serde(default)]
+    pub(crate) summary_mode: Option<bool>,
+    /// Maximum character length for any single string property value.
+    /// Values exceeding this are truncated. Only applies when
+    /// include_properties is true and summary_mode is false.
+    /// 0 means no truncation. Default: no truncation.
+    #[serde(default)]
+    pub(crate) max_property_length: Option<usize>,
+    /// Starting offset for pagination (skip this many results).
+    /// `k` serves as the page size / limit. Default: 0.
+    #[serde(default)]
+    pub(crate) offset: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -906,9 +920,21 @@ pub(crate) struct RegisterAgentParams {
     /// File paths the agent is actively touching.
     #[serde(default)]
     pub(crate) files_touched: Option<Vec<String>>,
-    /// Agent capabilities or role description.
+    /// Free-text agent capabilities or role description.
     #[serde(default)]
     pub(crate) capabilities: Option<String>,
+    /// Structured: tools/skills this agent supports (e.g., \["code_review", "testing"\]).
+    #[serde(default)]
+    pub(crate) supported_tools: Option<Vec<String>>,
+    /// Structured: domain expertise areas (e.g., \["HVAC", "security", "rust"\]).
+    #[serde(default)]
+    pub(crate) domain_expertise: Option<Vec<String>>,
+    /// Model family identifier (e.g., "claude-opus-4", "gemma-4-e4b").
+    #[serde(default)]
+    pub(crate) model_family: Option<String>,
+    /// Context window size in tokens.
+    #[serde(default)]
+    pub(crate) context_window: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1017,6 +1043,114 @@ pub(crate) struct CheckConflictsParams {
     pub(crate) agent_id: String,
     /// Target paths to check for conflicting intents.
     pub(crate) targets: Vec<String>,
+}
+
+// ── Agent capability discovery ──────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct FindCapableAgentParams {
+    /// Required tools/skills the agent must support (e.g., \["code_review", "rust"\]).
+    #[serde(default)]
+    pub(crate) required_tools: Option<Vec<String>>,
+    /// Required domain expertise (e.g., \["security", "HVAC"\]).
+    #[serde(default)]
+    pub(crate) required_expertise: Option<Vec<String>>,
+    /// Free-text capability query for substring matching on the capabilities field.
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+    /// Filter to a specific project. Default: all projects.
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    /// Only return agents active within this many milliseconds. Default: 300000 (5 min).
+    #[serde(default)]
+    pub(crate) active_within_ms: Option<i64>,
+}
+
+// ── Task Delegation ─────────────────────────────────────────────────
+
+fn default_task_priority() -> String {
+    "medium".into()
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ProposeTaskParams {
+    /// Agent proposing this task.
+    pub(crate) proposer_agent: String,
+    /// Project scope.
+    pub(crate) project: String,
+    /// Short task title.
+    pub(crate) title: String,
+    /// Detailed task description and requirements.
+    pub(crate) description: String,
+    /// Priority: low, medium (default), high, critical.
+    #[serde(default = "default_task_priority")]
+    pub(crate) priority: String,
+    /// Specific agent to target. If omitted, any agent can accept.
+    #[serde(default)]
+    pub(crate) assignee_agent: Option<String>,
+    /// Tools/skills required (for capability matching via find_capable_agent).
+    #[serde(default)]
+    pub(crate) required_tools: Option<Vec<String>>,
+    /// JSON input data/context for the task.
+    #[serde(default)]
+    pub(crate) input_data: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct AcceptTaskParams {
+    /// Agent accepting the task.
+    pub(crate) agent_id: String,
+    /// Task node ID to accept.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) task_id: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct RejectTaskParams {
+    /// Agent rejecting the task.
+    pub(crate) agent_id: String,
+    /// Task node ID to reject.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) task_id: u64,
+    /// Reason for rejection.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct CompleteTaskParams {
+    /// Agent completing the task (must be the assignee).
+    pub(crate) agent_id: String,
+    /// Task node ID to complete.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) task_id: u64,
+    /// Whether the task succeeded or failed.
+    pub(crate) success: bool,
+    /// JSON output data/results from the task.
+    #[serde(default)]
+    pub(crate) output_data: Option<String>,
+    /// Reason for failure (required when success is false).
+    #[serde(default)]
+    pub(crate) failure_reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ListTasksParams {
+    /// Filter by project.
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    /// Filter by status (proposed, accepted, working, completed, failed, rejected).
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    /// Filter by proposer agent.
+    #[serde(default)]
+    pub(crate) proposer_agent: Option<String>,
+    /// Filter by assignee agent.
+    #[serde(default)]
+    pub(crate) assignee_agent: Option<String>,
+    /// Maximum results. Default: 50.
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
 }
 
 #[cfg(test)]

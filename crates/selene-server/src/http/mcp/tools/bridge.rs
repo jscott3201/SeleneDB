@@ -56,6 +56,32 @@ pub(super) async fn register_agent_impl(
         files_str.as_deref().map_or(Value::Null, Value::from),
     );
 
+    // Structured capability fields (JSON-serialised Vec for storage).
+    let tools_str = p
+        .supported_tools
+        .as_ref()
+        .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
+    params.insert(
+        "supported_tools".into(),
+        tools_str.as_deref().map_or(Value::Null, Value::from),
+    );
+    let expertise_str = p
+        .domain_expertise
+        .as_ref()
+        .map(|e| serde_json::to_string(e).unwrap_or_else(|_| "[]".into()));
+    params.insert(
+        "domain_expertise".into(),
+        expertise_str.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert(
+        "model_family".into(),
+        p.model_family.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert(
+        "context_window".into(),
+        p.context_window.map_or(Value::Null, Value::Int),
+    );
+
     let query = "MERGE (a:__AgentSession {agent_id: $aid}) \
                   ON CREATE SET \
                       a.project = $project, \
@@ -63,6 +89,10 @@ pub(super) async fn register_agent_impl(
                       a.working_on = $working_on, \
                       a.files_touched = $files, \
                       a.capabilities = $capabilities, \
+                      a.supported_tools = $supported_tools, \
+                      a.domain_expertise = $domain_expertise, \
+                      a.model_family = $model_family, \
+                      a.context_window = $context_window, \
                       a.heartbeat_at = $now, \
                       a.started_at = $now \
                   ON MATCH SET \
@@ -71,6 +101,10 @@ pub(super) async fn register_agent_impl(
                       a.working_on = $working_on, \
                       a.files_touched = $files, \
                       a.capabilities = $capabilities, \
+                      a.supported_tools = $supported_tools, \
+                      a.domain_expertise = $domain_expertise, \
+                      a.model_family = $model_family, \
+                      a.context_window = $context_window, \
                       a.heartbeat_at = $now \
                   RETURN id(a) AS id";
 
@@ -91,9 +125,41 @@ pub(super) async fn register_agent_impl(
         .await?;
 
     let data = result.data_json.unwrap_or_else(|| "{}".into());
-    Ok(CallToolResult::success(vec![Content::text(format!(
-        "Agent registered: {data}"
-    ))]))
+
+    // Surface Convention nodes matching the agent's project or global scope.
+    let mut conv_params = HashMap::new();
+    conv_params.insert("project".into(), Value::from(p.project.as_str()));
+
+    let conv_query = "MATCH (c:Convention) \
+                       WHERE c.scope = $project OR c.scope = 'global' \
+                       RETURN c.name AS name, c.scope AS scope, \
+                       c.severity AS severity, c.description AS description \
+                       ORDER BY c.severity DESC, c.name ASC \
+                       LIMIT 50";
+
+    let conv_result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        conv_query,
+        Some(&conv_params),
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let mut text = format!("Agent registered: {data}");
+    let conv_count = conv_result.row_count;
+    if conv_count > 0 {
+        let conv_data = conv_result.data_json.unwrap_or_else(|| "[]".to_string());
+        let _ = write!(
+            text,
+            "\n\n{conv_count} active convention(s) for project '{}':\n{conv_data}",
+            p.project
+        );
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
 pub(super) async fn heartbeat_impl(
@@ -209,9 +275,41 @@ pub(super) async fn deregister_agent_impl(
         })
         .await?;
 
-    let data = result.data_json.unwrap_or_else(|| "{}".into());
+    let intents_data = result.data_json.unwrap_or_else(|| "{}".into());
+
+    // 3. Reassign active tasks back to proposed for re-delegation.
+    let task_query = "MATCH (t:__Task {assignee_agent: $aid}) \
+                       FILTER t.status = 'accepted' OR t.status = 'working' \
+                       SET t.status = 'proposed', t.assignee_agent = NULL, \
+                           t.updated_at = $now \
+                       RETURN count(t) AS reassigned";
+
+    let mut task_params = HashMap::new();
+    task_params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+    task_params.insert(
+        "now".into(),
+        Value::Int(selene_core::now_nanos() / 1_000_000),
+    );
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let task_result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                task_query,
+                Some(&task_params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    let tasks_data = task_result.data_json.unwrap_or_else(|| "{}".into());
     Ok(CallToolResult::success(vec![Content::text(format!(
-        "Agent '{}' deregistered. Intents released: {data}",
+        "Agent '{}' deregistered. Intents released: {intents_data}. Tasks reassigned: {tasks_data}",
         p.agent_id
     ))]))
 }
@@ -245,6 +343,11 @@ pub(super) async fn list_agents_impl(
          RETURN a.agent_id AS agent_id, a.project AS project, \
          a.status AS status, a.working_on AS working_on, \
          a.files_touched AS files_touched, \
+         a.capabilities AS capabilities, \
+         a.supported_tools AS supported_tools, \
+         a.domain_expertise AS domain_expertise, \
+         a.model_family AS model_family, \
+         a.context_window AS context_window, \
          a.heartbeat_at AS heartbeat_at, a.started_at AS started_at \
          ORDER BY a.heartbeat_at DESC"
     );
@@ -793,4 +896,561 @@ pub(super) async fn check_conflicts_impl(
             conflicts.len()
         ))]))
     }
+}
+
+// ── Agent Capability Discovery ────────────────────────────────────
+
+pub(super) async fn find_capable_agent_impl(
+    tools: &SeleneTools,
+    p: FindCapableAgentParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+
+    if p.required_tools.is_none() && p.required_expertise.is_none() && p.query.is_none() {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "At least one of required_tools, required_expertise, or query \
+                      must be provided"
+                .into(),
+            data: None,
+        });
+    }
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+    let active_within = p.active_within_ms.unwrap_or(300_000);
+
+    if active_within < 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "active_within_ms must be non-negative".into(),
+            data: None,
+        });
+    }
+
+    let mut params = HashMap::new();
+    params.insert(
+        "cutoff".into(),
+        Value::Int(now_ms.saturating_sub(active_within)),
+    );
+
+    let mut filters = vec![
+        "a.status = 'active'".to_string(),
+        "a.heartbeat_at > $cutoff".to_string(),
+    ];
+
+    if let Some(ref project) = p.project {
+        params.insert("project".into(), Value::from(project.as_str()));
+        filters.push("a.project = $project".to_string());
+    }
+
+    let filter_clause = format!(" FILTER {}", filters.join(" AND "));
+
+    let query = format!(
+        "MATCH (a:__AgentSession){filter_clause} \
+         RETURN a.agent_id AS agent_id, a.project AS project, \
+         a.working_on AS working_on, \
+         a.capabilities AS capabilities, \
+         a.supported_tools AS supported_tools, \
+         a.domain_expertise AS domain_expertise, \
+         a.model_family AS model_family, \
+         a.context_window AS context_window, \
+         a.heartbeat_at AS heartbeat_at"
+    );
+
+    let result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        &query,
+        Some(&params),
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
+
+    // Score each agent by capability match.
+    let mut scored: Vec<(f64, serde_json::Value)> = rows
+        .into_iter()
+        .map(|row| {
+            let mut score = 0.0_f64;
+
+            // Structured tool match (up to 50 points)
+            if let Some(ref required) = p.required_tools {
+                let their_tools: Vec<String> = row
+                    .get("supported_tools")
+                    .and_then(|t| t.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                if !required.is_empty() {
+                    let matched = required
+                        .iter()
+                        .filter(|r| their_tools.iter().any(|t| t.eq_ignore_ascii_case(r)))
+                        .count();
+                    score += (matched as f64 / required.len() as f64) * 50.0;
+                }
+            }
+
+            // Structured expertise match (up to 30 points)
+            if let Some(ref required) = p.required_expertise {
+                let their_exp: Vec<String> = row
+                    .get("domain_expertise")
+                    .and_then(|t| t.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                if !required.is_empty() {
+                    let matched = required
+                        .iter()
+                        .filter(|r| their_exp.iter().any(|e| e.eq_ignore_ascii_case(r)))
+                        .count();
+                    score += (matched as f64 / required.len() as f64) * 30.0;
+                }
+            }
+
+            // Free-text substring match on capabilities (up to 20 points)
+            if let Some(ref query_text) = p.query
+                && let Some(caps) = row.get("capabilities").and_then(|c| c.as_str())
+            {
+                let query_lower = query_text.to_lowercase();
+                let caps_lower = caps.to_lowercase();
+                if caps_lower.contains(&query_lower) {
+                    score += 20.0;
+                } else {
+                    let words: Vec<&str> = query_lower.split_whitespace().collect();
+                    if !words.is_empty() {
+                        let matched = words.iter().filter(|w| caps_lower.contains(*w)).count();
+                        score += (matched as f64 / words.len() as f64) * 15.0;
+                    }
+                }
+            }
+
+            (score, row)
+        })
+        .collect();
+
+    // Keep only agents that matched something, sorted by score.
+    scored.retain(|(s, _)| *s > 0.0);
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    if scored.is_empty() {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "No capable agents found matching the criteria.",
+        )]));
+    }
+
+    let results: Vec<serde_json::Value> = scored
+        .into_iter()
+        .map(|(score, mut row)| {
+            row["match_score"] = serde_json::json!((score * 100.0).round() / 100.0);
+            row
+        })
+        .collect();
+
+    let text = format!(
+        "{} capable agent(s) found:\n{}",
+        results.len(),
+        serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
+    );
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+// ── Task Delegation ───────────────────────────────────────────────
+
+const VALID_PRIORITIES: &[&str] = &["low", "medium", "high", "critical"];
+
+pub(super) async fn propose_task_impl(
+    tools: &SeleneTools,
+    p: ProposeTaskParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    if !VALID_PRIORITIES.contains(&p.priority.as_str()) {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "Invalid priority '{}'. Must be one of: {}",
+                p.priority,
+                VALID_PRIORITIES.join(", ")
+            )
+            .into(),
+            data: None,
+        });
+    }
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+
+    let mut params = HashMap::new();
+    params.insert("title".into(), Value::from(p.title.as_str()));
+    params.insert("description".into(), Value::from(p.description.as_str()));
+    params.insert("proposer".into(), Value::from(p.proposer_agent.as_str()));
+    params.insert(
+        "assignee".into(),
+        p.assignee_agent.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert("project".into(), Value::from(p.project.as_str()));
+    params.insert("priority".into(), Value::from(p.priority.as_str()));
+    let tools_str = p
+        .required_tools
+        .as_ref()
+        .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
+    params.insert(
+        "required_tools".into(),
+        tools_str.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert(
+        "input_data".into(),
+        p.input_data.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert("now".into(), Value::Int(now_ms));
+
+    // Create the task node.
+    let insert_query = "INSERT (t:__Task { \
+                             title: $title, \
+                             description: $description, \
+                             status: 'proposed', \
+                             proposer_agent: $proposer, \
+                             assignee_agent: $assignee, \
+                             project: $project, \
+                             priority: $priority, \
+                             required_tools: $required_tools, \
+                             input_data: $input_data, \
+                             created_at: $now, \
+                             updated_at: $now \
+                         }) RETURN id(t) AS id";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let params2 = params.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                insert_query,
+                Some(&params2),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+    let task_id: Option<u64> = serde_json::from_str::<Vec<serde_json::Value>>(&data)
+        .ok()
+        .and_then(|rows| rows.first().cloned())
+        .and_then(|row| row.get("id").and_then(|v| v.as_u64()));
+
+    // Create :proposed edge from proposer's __AgentSession.
+    if let Some(tid) = task_id {
+        let edge_params = HashMap::from([
+            ("proposer".into(), Value::from(p.proposer_agent.as_str())),
+            ("tid".into(), Value::Int(tid as i64)),
+        ]);
+        let edge_query = "MATCH (a:__AgentSession {agent_id: $proposer}) \
+                           MATCH (t:__Task) WHERE id(t) = $tid \
+                           INSERT (a)-[:proposed]->(t)";
+
+        let st = Arc::clone(&tools.state);
+        let auth2 = auth.clone();
+        let _ = tools
+            .submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    edge_query,
+                    Some(&edge_params),
+                    false,
+                    false,
+                    ResultFormat::Json,
+                )
+            })
+            .await;
+    }
+
+    let mut text = format!("Task proposed: {data}");
+    if p.assignee_agent.is_some() && task_id.is_some() {
+        let _ = write!(
+            text,
+            " (targeted at agent '{}')",
+            p.assignee_agent.as_deref().unwrap_or("?")
+        );
+    }
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+pub(super) async fn accept_task_impl(
+    tools: &SeleneTools,
+    p: AcceptTaskParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+
+    let mut params = HashMap::new();
+    params.insert("tid".into(), Value::Int(p.task_id as i64));
+    params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+    params.insert("now".into(), Value::Int(now_ms));
+
+    // Only accept if the task is proposed AND either untargeted or targeted
+    // at this agent (prevents task stealing from targeted assignees).
+    let query = "MATCH (t:__Task) WHERE id(t) = $tid \
+                  FILTER t.status = 'proposed' \
+                      AND (t.assignee_agent IS NULL OR t.assignee_agent = $aid) \
+                  SET t.status = 'accepted', t.assignee_agent = $aid, \
+                      t.updated_at = $now \
+                  RETURN id(t) AS id, t.title AS title";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let params2 = params.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params2),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    if result.row_count == 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!("Task {} not found or not in 'proposed' status", p.task_id).into(),
+            data: None,
+        });
+    }
+
+    // Create :assigned edge.
+    let edge_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
+                       MATCH (t:__Task) WHERE id(t) = $tid \
+                       INSERT (a)-[:assigned]->(t)";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let _ = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                edge_query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await;
+
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Task accepted by '{}': {data}",
+        p.agent_id
+    ))]))
+}
+
+pub(super) async fn reject_task_impl(
+    tools: &SeleneTools,
+    p: RejectTaskParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+
+    let mut params = HashMap::new();
+    params.insert("tid".into(), Value::Int(p.task_id as i64));
+    params.insert(
+        "reason".into(),
+        p.reason.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert("now".into(), Value::Int(now_ms));
+
+    let query = "MATCH (t:__Task) WHERE id(t) = $tid \
+                  FILTER t.status = 'proposed' \
+                  SET t.status = 'rejected', t.failure_reason = $reason, \
+                      t.updated_at = $now \
+                  RETURN id(t) AS id";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    if result.row_count == 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!("Task {} not found or not in 'proposed' status", p.task_id).into(),
+            data: None,
+        });
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Task {} rejected by '{}'",
+        p.task_id, p.agent_id
+    ))]))
+}
+
+pub(super) async fn complete_task_impl(
+    tools: &SeleneTools,
+    p: CompleteTaskParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    if !p.success && p.failure_reason.as_ref().is_none_or(|r| r.is_empty()) {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "failure_reason is required when success is false".into(),
+            data: None,
+        });
+    }
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+    let target_status = if p.success { "completed" } else { "failed" };
+
+    let mut params = HashMap::new();
+    params.insert("tid".into(), Value::Int(p.task_id as i64));
+    params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+    params.insert("status".into(), Value::from(target_status));
+    params.insert(
+        "output".into(),
+        p.output_data.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert(
+        "reason".into(),
+        p.failure_reason.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert("now".into(), Value::Int(now_ms));
+
+    // Only the assignee can complete, and the task must be in a completable state.
+    let query = "MATCH (t:__Task) WHERE id(t) = $tid \
+                  FILTER t.assignee_agent = $aid \
+                      AND (t.status = 'accepted' OR t.status = 'working' \
+                           OR t.status = 'input_required') \
+                  SET t.status = $status, t.output_data = $output, \
+                      t.failure_reason = $reason, \
+                      t.updated_at = $now, t.completed_at = $now \
+                  RETURN id(t) AS id, t.title AS title";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    if result.row_count == 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "Task {} not found, not assigned to '{}', or not in a completable status \
+                 (accepted/working/input_required)",
+                p.task_id, p.agent_id
+            )
+            .into(),
+            data: None,
+        });
+    }
+
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Task {target_status}: {data}"
+    ))]))
+}
+
+pub(super) async fn list_tasks_impl(
+    tools: &SeleneTools,
+    p: ListTasksParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+
+    let mut params = HashMap::new();
+    let mut filters = Vec::new();
+
+    if let Some(ref project) = p.project {
+        params.insert("project".into(), Value::from(project.as_str()));
+        filters.push("t.project = $project");
+    }
+    if let Some(ref status) = p.status {
+        params.insert("status".into(), Value::from(status.as_str()));
+        filters.push("t.status = $status");
+    }
+    if let Some(ref proposer) = p.proposer_agent {
+        params.insert("proposer".into(), Value::from(proposer.as_str()));
+        filters.push("t.proposer_agent = $proposer");
+    }
+    if let Some(ref assignee) = p.assignee_agent {
+        params.insert("assignee".into(), Value::from(assignee.as_str()));
+        filters.push("t.assignee_agent = $assignee");
+    }
+
+    let limit = p.limit.unwrap_or(50).min(500);
+    params.insert("lim".into(), Value::Int(limit as i64));
+
+    let filter_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" FILTER {}", filters.join(" AND "))
+    };
+
+    let query = format!(
+        "MATCH (t:__Task){filter_clause} \
+         RETURN id(t) AS id, t.title AS title, t.status AS status, \
+         t.proposer_agent AS proposer, t.assignee_agent AS assignee, \
+         t.project AS project, t.priority AS priority, \
+         t.created_at AS created_at, t.updated_at AS updated_at \
+         ORDER BY t.updated_at DESC \
+         LIMIT $lim"
+    );
+
+    let gql_params = if params.is_empty() {
+        None
+    } else {
+        Some(&params)
+    };
+
+    let result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        &query,
+        gql_params,
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+    let text = format!("{} task(s):\n{data}", result.row_count);
+    Ok(CallToolResult::success(vec![Content::text(text)]))
 }
