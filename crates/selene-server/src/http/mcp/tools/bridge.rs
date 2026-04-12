@@ -21,39 +21,6 @@ use crate::http::mcp::params::*;
 use crate::ops;
 use crate::ops::gql::ResultFormat;
 
-// ── Resource limits ─────────────────────────────────────────────
-const MAX_SHARED_CONTEXTS: usize = 500;
-const MAX_INTENTS_PER_AGENT: usize = 50;
-const MAX_TASKS_PER_PROJECT: usize = 1000;
-
-/// Run a COUNT query and return the count, or 0 on error.
-fn count_entities(
-    state: &crate::state::ServerState,
-    auth: &crate::auth::handshake::AuthContext,
-    query: &str,
-    params: Option<&HashMap<String, Value>>,
-) -> usize {
-    let result =
-        ops::gql::execute_gql(state, auth, query, params, false, false, ResultFormat::Json);
-    match result {
-        Ok(r) => {
-            let rows: Vec<serde_json::Value> =
-                serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into()))
-                    .unwrap_or_default();
-            rows.first()
-                .and_then(|row| row.get("cnt"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize
-        }
-        Err(_) => 0,
-    }
-}
-
-/// Return the principal node ID as a string, suitable for ownership tracking.
-fn caller_identity(auth: &crate::auth::handshake::AuthContext) -> String {
-    auth.principal_node_id.0.to_string()
-}
-
 // ── Agent Session ───────────────────────────────────────────────────
 
 pub(super) async fn register_agent_impl(
