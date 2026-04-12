@@ -12,6 +12,7 @@ use selene_server::ops;
 use selene_server::quic::listener;
 use selene_server::tasks;
 use selene_server::tls;
+use tracing::Instrument;
 
 #[derive(Parser)]
 #[command(name = "selene-server", about = "Selene property graph server")]
@@ -196,23 +197,30 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         .get::<selene_server::federation::FederationService>()
     {
         let mgr = Arc::clone(&fed_svc.manager);
-        tokio::spawn(async move {
-            mgr.bootstrap().await;
-        });
+        tokio::spawn(
+            async move {
+                mgr.bootstrap().await;
+            }
+            .instrument(tracing::info_span!("federation_bootstrap")),
+        );
 
         let mgr = Arc::clone(&fed_svc.manager);
         let refresh_secs = state.config().federation.refresh_interval_secs;
         let cancel = bg.cancel.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => { mgr.prune(); }
-                    _ = cancel.cancelled() => { return; }
+        tokio::spawn(
+            async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => { mgr.prune(); }
+                        _ = cancel.cancelled() => { return; }
+                    }
                 }
             }
-        });
+            .instrument(tracing::info_span!("federation_refresh")),
+        );
     }
 
     // Replica replication task
@@ -220,11 +228,17 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         let replica_state = Arc::clone(&state);
         let addr = primary_addr.clone();
         let token = bg.cancel.clone();
-        tokio::spawn(async move {
-            if let Err(e) = selene_server::replica::run_replica(replica_state, &addr, token).await {
-                tracing::error!("replica replication failed: {e}");
+        let replica_span = tracing::info_span!("replica", primary = %primary_addr);
+        tokio::spawn(
+            async move {
+                if let Err(e) =
+                    selene_server::replica::run_replica(replica_state, &addr, token).await
+                {
+                    tracing::error!("replica replication failed: {e}");
+                }
             }
-        });
+            .instrument(replica_span),
+        );
         tracing::info!(primary = %primary_addr, "replica mode — mutations disabled");
     }
 
@@ -251,21 +265,27 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
 
     // QUIC listener (always on)
     let quic_state = Arc::clone(&state);
-    let quic_handle = tokio::spawn(async move {
-        if let Err(e) = listener::serve(quic_state, server_config).await {
-            tracing::error!("QUIC listener error: {e}");
+    let quic_handle = tokio::spawn(
+        async move {
+            if let Err(e) = listener::serve(quic_state, server_config).await {
+                tracing::error!("QUIC listener error: {e}");
+            }
         }
-    });
+        .instrument(tracing::info_span!("quic_listener")),
+    );
 
     // HTTP listener (runtime config toggle, with graceful shutdown)
     let http_handle = if state.config().http.enabled {
         let http_state = Arc::clone(&state);
         let http_cancel = bg.cancel.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = selene_server::http::serve(http_state, Some(http_cancel)).await {
-                tracing::error!("HTTP listener error: {e}");
+        Some(tokio::spawn(
+            async move {
+                if let Err(e) = selene_server::http::serve(http_state, Some(http_cancel)).await {
+                    tracing::error!("HTTP listener error: {e}");
+                }
             }
-        }))
+            .instrument(tracing::info_span!("http_listener")),
+        ))
     } else {
         None
     };

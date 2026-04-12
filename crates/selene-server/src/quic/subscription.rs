@@ -15,6 +15,8 @@ use selene_wire::io::read_frame;
 use selene_wire::msg_type::MsgType;
 use selene_wire::serialize::{deserialize_payload, serialize_payload};
 
+use tracing::Instrument;
+
 use crate::auth::Role;
 use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
@@ -133,14 +135,17 @@ pub async fn handle_subscription(
     // Sender task — drains the bounded channel and writes to the QUIC stream.
     // This decouples the broadcast receiver (producer) from QUIC send rate (consumer).
     let mut send_handle = send;
-    let sender = tokio::spawn(async move {
-        while let Some(encoded) = event_rx.recv().await {
-            if send_handle.write_all(&encoded).await.is_err() {
-                break;
+    let sender = tokio::spawn(
+        async move {
+            while let Some(encoded) = event_rx.recv().await {
+                if send_handle.write_all(&encoded).await.is_err() {
+                    break;
+                }
             }
+            let _ = send_handle.finish();
         }
-        let _ = send_handle.finish();
-    });
+        .instrument(tracing::info_span!("changelog_sender")),
+    );
 
     let result: anyhow::Result<()> = async {
         loop {
