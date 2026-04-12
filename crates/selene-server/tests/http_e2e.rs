@@ -4,48 +4,22 @@
 //! every endpoint through reqwest. Tests the complete lifecycle:
 //! schema import → node/edge CRUD → time-series → SQL → graph slice.
 
-use std::sync::Arc;
+mod support;
 
 use base64::Engine as _;
 use reqwest::StatusCode;
-use selene_server::bootstrap;
-use selene_server::config::SeleneConfig;
 use sha2::Digest as _;
+use support::*;
 
-/// Start a test HTTP server on a random port and return the base URL.
-async fn start_http_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = SeleneConfig::dev(dir.path());
-    config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
-
-    selene_server::ops::init_start_time();
-    let state = bootstrap::bootstrap(config, None).await.unwrap();
-    let state = Arc::new(state);
-
-    let app = selene_server::http::router(state.clone()).layer(axum::Extension(state));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Keep tempdir alive
-    std::mem::forget(dir);
-
-    format!("http://{addr}")
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::new()
+async fn start_http_server() -> (String, TestServer) {
+    start_server().await
 }
 
 // ── Health ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn health_check_dev_mode() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     // In dev mode, no auth header still gets full response (dev auto-admin).
     let resp = client().get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -61,7 +35,7 @@ async fn health_check_dev_mode() {
 
 #[tokio::test]
 async fn node_lifecycle() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     // Create — properties use tagged Value enum: {"String": "°F"}, {"Int": 3}
@@ -139,7 +113,7 @@ async fn node_lifecycle() {
 
 #[tokio::test]
 async fn node_not_found() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let resp = client()
         .get(format!("{base}/nodes/999"))
         .send()
@@ -152,7 +126,7 @@ async fn node_not_found() {
 
 #[tokio::test]
 async fn edge_lifecycle() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     // Create two nodes
@@ -225,7 +199,7 @@ async fn edge_lifecycle() {
 
 #[tokio::test]
 async fn create_node_with_parent_id() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     c.post(format!("{base}/nodes"))
@@ -261,7 +235,7 @@ async fn create_node_with_parent_id() {
 
 #[tokio::test]
 async fn ts_write_and_query() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     c.post(format!("{base}/nodes"))
@@ -303,7 +277,7 @@ async fn ts_write_and_query() {
 #[tokio::test]
 #[ignore = "SQL endpoint removed — use GQL"]
 async fn sql_query() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     c.post(format!("{base}/nodes"))
@@ -332,7 +306,7 @@ async fn sql_query() {
 #[tokio::test]
 #[ignore = "SQL endpoint removed — use GQL"]
 async fn sql_rejects_dml() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let resp = client()
         .post(format!("{base}/sql"))
         .json(&serde_json::json!({"sql": "DROP TABLE nodes"}))
@@ -347,7 +321,7 @@ async fn sql_rejects_dml() {
 #[tokio::test]
 #[ignore = "DSL endpoint removed — use GQL"]
 async fn dsl_query() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     c.post(format!("{base}/nodes"))
@@ -371,7 +345,7 @@ async fn dsl_query() {
 
 #[tokio::test]
 async fn graph_slice_full() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     c.post(format!("{base}/nodes"))
@@ -404,7 +378,7 @@ async fn graph_slice_full() {
 
 #[tokio::test]
 async fn graph_slice_with_pagination() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     for i in 0..5 {
@@ -431,7 +405,7 @@ async fn graph_slice_with_pagination() {
 
 #[tokio::test]
 async fn schema_lifecycle() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     // Register node schema
@@ -485,7 +459,7 @@ async fn schema_lifecycle() {
 
 #[tokio::test]
 async fn import_schema_pack() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     let toml = r#"
@@ -516,7 +490,7 @@ fields = { color = "string = 'blue'" }
 #[tokio::test]
 #[ignore = "uses removed CRUD HTTP endpoints — needs rewrite to GQL"]
 async fn full_building_lifecycle() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let c = client();
 
     // 1. Import common schema pack
@@ -667,31 +641,10 @@ async fn full_building_lifecycle() {
 /// Start a test HTTP server in production mode (dev_mode=false) with a
 /// configured API key. OAuth endpoints are still available because MCP
 /// is enabled.
-async fn start_oauth_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = SeleneConfig::dev(dir.path());
-    config.dev_mode = false;
-    config.mcp.enabled = true;
-    config.mcp.api_key = Some("test-key-12345".into());
-    config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
-
-    selene_server::ops::init_start_time();
-    let state = bootstrap::bootstrap(config, None).await.unwrap();
-    let state = Arc::new(state);
-
-    let app = selene_server::http::router(state.clone()).layer(axum::Extension(state));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Keep tempdir alive for the lifetime of the test.
-    std::mem::forget(dir);
-
-    format!("http://{addr}")
+async fn start_oauth_server() -> (String, TestServer) {
+    let server = TestServer::start_with_api_key("test-key-12345").await;
+    let url = server.base_url.clone();
+    (url, server)
 }
 
 /// Client that does not follow redirects (needed for authorize flow).
@@ -706,7 +659,7 @@ fn no_redirect_client() -> reqwest::Client {
 
 #[tokio::test]
 async fn oauth_metadata_discovery() {
-    let base = start_http_server().await;
+    let (base, _server) = start_http_server().await;
     let resp = client()
         .get(format!("{base}/.well-known/oauth-authorization-server"))
         .send()
@@ -747,7 +700,7 @@ async fn oauth_metadata_discovery() {
 
 #[tokio::test]
 async fn oauth_client_credentials_flow() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = client();
 
     // Register a new OAuth client.
@@ -805,7 +758,7 @@ async fn oauth_client_credentials_flow() {
 
 #[tokio::test]
 async fn oauth_token_refresh() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = client();
 
     // Register + get initial tokens.
@@ -878,7 +831,7 @@ async fn oauth_token_refresh() {
 
 #[tokio::test]
 async fn oauth_api_key_backward_compat() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = client();
 
     // The static API key should grant access to /mcp (not 401).
@@ -902,7 +855,7 @@ async fn oauth_api_key_backward_compat() {
 
 #[tokio::test]
 async fn oauth_unauthenticated_rejection() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = client();
 
     // No Authorization header on a non-dev-mode server.
@@ -920,7 +873,7 @@ async fn oauth_unauthenticated_rejection() {
 
 #[tokio::test]
 async fn oauth_authorization_code_pkce_flow() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = no_redirect_client();
 
     // 1. Register a client.
@@ -1023,7 +976,7 @@ async fn oauth_authorization_code_pkce_flow() {
 
 #[tokio::test]
 async fn oauth_auth_code_reuse_rejected() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = no_redirect_client();
 
     // 1. Register a client.
@@ -1115,7 +1068,7 @@ async fn oauth_auth_code_reuse_rejected() {
 
 #[tokio::test]
 async fn oauth_wrong_pkce_verifier_rejected() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = no_redirect_client();
 
     // 1. Register.
@@ -1191,7 +1144,7 @@ async fn oauth_wrong_pkce_verifier_rejected() {
 
 #[tokio::test]
 async fn oauth_wrong_client_secret_rejected() {
-    let base = start_oauth_server().await;
+    let (base, _server) = start_oauth_server().await;
     let c = client();
 
     // Register a client.

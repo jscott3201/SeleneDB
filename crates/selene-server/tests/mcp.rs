@@ -5,177 +5,15 @@
 //! Covers the MCP lifecycle: initialize handshake, tool listing and
 //! invocation, resource listing and reading, prompts, and logging.
 
-use std::sync::Arc;
-
+mod support;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use selene_server::bootstrap;
-use selene_server::config::SeleneConfig;
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-/// Start a test HTTP server on a random port and return the base URL.
-async fn start_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = SeleneConfig::dev(dir.path());
-    config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
-
-    selene_server::ops::init_start_time();
-    let state = bootstrap::bootstrap(config, None).await.unwrap();
-    let state = Arc::new(state);
-
-    let app = selene_server::http::router(state.clone()).layer(axum::Extension(state));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Keep tempdir alive for the process lifetime.
-    std::mem::forget(dir);
-
-    format!("http://{addr}")
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::new()
-}
-
-/// POST a JSON-RPC message to `/mcp` and return the raw SSE response body.
-/// Includes required headers for the MCP Streamable HTTP protocol.
-async fn mcp_post(
-    base: &str,
-    body: &serde_json::Value,
-    session_id: Option<&str>,
-) -> reqwest::Response {
-    let mut req = client()
-        .post(format!("{base}/mcp"))
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(body);
-
-    if let Some(sid) = session_id {
-        req = req.header("mcp-session-id", sid);
-    }
-
-    req.send().await.unwrap()
-}
-
-/// Extract JSON-RPC result objects from an SSE response body.
-///
-/// SSE lines look like:
-///   `data:{"jsonrpc":"2.0","id":1,"result":{...}}`
-///
-/// Priming events may contain `data:` (empty) which are skipped.
-fn parse_sse_results(body: &str) -> Vec<serde_json::Value> {
-    body.lines()
-        .filter_map(|line| {
-            let data = line.strip_prefix("data:")?;
-            let trimmed = data.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str(trimmed).ok()
-        })
-        .collect()
-}
-
-/// Run the initialize handshake and return the session ID.
-async fn initialize(base: &str) -> String {
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "selene-test",
-                "version": "0.1.0"
-            }
-        }
-    });
-
-    let resp = mcp_post(base, &init_req, None).await;
-    assert_eq!(resp.status(), 200, "initialize should return 200");
-
-    let session_id = resp
-        .headers()
-        .get("mcp-session-id")
-        .expect("initialize response must include mcp-session-id header")
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    // Verify the SSE body contains a valid initialize result.
-    let body = resp.text().await.unwrap();
-    let results = parse_sse_results(&body);
-    assert!(
-        !results.is_empty(),
-        "initialize SSE body should contain at least one JSON-RPC message"
-    );
-
-    let result = &results[0];
-    assert_eq!(result["jsonrpc"], "2.0");
-    assert_eq!(result["id"], 1);
-    assert!(
-        result.get("result").is_some(),
-        "initialize response must have a 'result' field"
-    );
-
-    // Send the `initialized` notification to complete the handshake.
-    let initialized_notification = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized"
-    });
-    let notif_resp = mcp_post(base, &initialized_notification, Some(&session_id)).await;
-    assert!(
-        notif_resp.status().is_success(),
-        "initialized notification should succeed"
-    );
-
-    session_id
-}
-
-/// Send a JSON-RPC request within an established session and return
-/// the first result object from the SSE response.
-async fn session_request(
-    base: &str,
-    session_id: &str,
-    id: u64,
-    method: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-
-    let resp = mcp_post(base, &body, Some(session_id)).await;
-    assert_eq!(
-        resp.status(),
-        200,
-        "{method} should return 200, got {}",
-        resp.status()
-    );
-
-    let text = resp.text().await.unwrap();
-    let results = parse_sse_results(&text);
-    assert!(
-        !results.is_empty(),
-        "{method} SSE body should contain at least one JSON-RPC message"
-    );
-    results[0].clone()
-}
+use support::*;
 
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn initialize_handshake() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let init_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -242,7 +80,7 @@ async fn initialize_handshake() {
 
 #[tokio::test]
 async fn tools_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(&base, &session_id, 2, "tools/list", serde_json::json!({})).await;
@@ -277,7 +115,7 @@ async fn tools_list() {
 
 #[tokio::test]
 async fn tools_call_gql_query() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     // First, create a node so we have data to query.
@@ -341,7 +179,7 @@ async fn tools_call_gql_query() {
 
 #[tokio::test]
 async fn resources_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -382,7 +220,7 @@ async fn resources_list() {
 
 #[tokio::test]
 async fn resources_read_health() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -412,7 +250,7 @@ async fn resources_read_health() {
 
 #[tokio::test]
 async fn prompts_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result =
@@ -447,7 +285,7 @@ async fn prompts_list() {
 
 #[tokio::test]
 async fn logging_set_level() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -476,7 +314,7 @@ async fn logging_set_level() {
 
 #[tokio::test]
 async fn missing_accept_header_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -506,7 +344,7 @@ async fn missing_accept_header_rejected() {
 
 #[tokio::test]
 async fn wrong_content_type_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     let resp = client()
         .post(format!("{base}/mcp"))
@@ -526,7 +364,7 @@ async fn wrong_content_type_rejected() {
 
 #[tokio::test]
 async fn request_without_session_requires_initialize() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     // Send a non-initialize request without a session ID.
     let body = serde_json::json!({
@@ -546,7 +384,7 @@ async fn request_without_session_requires_initialize() {
 
 #[tokio::test]
 async fn invalid_session_id_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -596,32 +434,23 @@ async fn invalid_session_id_rejected() {
 // ── Trace system tests ────────────────────────────────────────────
 
 /// Helper: call an MCP tool and return the text content from the result.
-async fn call_tool(base: &str, sid: &str, id: u64, name: &str, args: serde_json::Value) -> String {
-    let result = session_request(
-        base,
-        sid,
-        id,
-        "tools/call",
-        serde_json::json!({ "name": name, "arguments": args }),
-    )
-    .await;
-    assert!(
-        result.get("error").is_none(),
-        "{name} should not error: {result}"
-    );
-    let content = result["result"]["content"]
-        .as_array()
-        .expect("tool result must have content");
-    content[0]["text"].as_str().unwrap_or("").to_string()
+async fn call_tool_text(
+    base: &str,
+    sid: &str,
+    id: u64,
+    name: &str,
+    args: serde_json::Value,
+) -> String {
+    tool_text(&call_tool(base, sid, id, name, args).await)
 }
 
 #[tokio::test]
 async fn trace_log_with_thinking_and_user_query() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Log a trace with the new fields.
-    let text = call_tool(
+    let text = call_tool_text(
         &base,
         &sid,
         2,
@@ -641,7 +470,7 @@ async fn trace_log_with_thinking_and_user_query() {
     assert!(text.contains("traceId"), "should return traceId: {text}");
 
     // Export and verify the new fields appear.
-    let exported = call_tool(
+    let exported = call_tool_text(
         &base,
         &sid,
         3,
@@ -664,11 +493,11 @@ async fn trace_log_with_thinking_and_user_query() {
 
 #[tokio::test]
 async fn trace_about_edges() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Create an entity node and get its ID.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -680,7 +509,7 @@ async fn trace_about_edges() {
     .await;
 
     // Query back the zone ID.
-    let query_text = call_tool(
+    let query_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -701,7 +530,7 @@ async fn trace_about_edges() {
     };
 
     // Log a trace with about_node_ids pointing to the zone.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -718,7 +547,7 @@ async fn trace_about_edges() {
     .await;
 
     // Verify the :about edge exists.
-    let edge_text = call_tool(
+    let edge_text = call_tool_text(
         &base,
         &sid,
         5,
@@ -737,12 +566,12 @@ async fn trace_about_edges() {
 
 #[tokio::test]
 async fn trace_sequential_edges() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Log 3 sequential turns.
     for turn in 0..3 {
-        call_tool(
+        call_tool_text(
             &base,
             &sid,
             turn + 2,
@@ -759,7 +588,7 @@ async fn trace_sequential_edges() {
     }
 
     // Verify :next_turn edges exist.
-    let edge_text = call_tool(
+    let edge_text = call_tool_text(
         &base,
         &sid,
         5,
@@ -779,10 +608,10 @@ async fn trace_sequential_edges() {
 
 #[tokio::test]
 async fn trace_log_session() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
-    let text = call_tool(
+    let text = call_tool_text(
         &base,
         &sid,
         2,
@@ -803,7 +632,7 @@ async fn trace_log_session() {
     );
 
     // Verify node exists.
-    let query_text = call_tool(
+    let query_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -822,11 +651,11 @@ async fn trace_log_session() {
 
 #[tokio::test]
 async fn trace_log_session_idempotent() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Call log_session twice with different data.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -838,7 +667,7 @@ async fn trace_log_session_idempotent() {
     )
     .await;
 
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         3,
@@ -851,7 +680,7 @@ async fn trace_log_session_idempotent() {
     .await;
 
     // Should have exactly one node (MERGE), with updated building.
-    let query_text = call_tool(
+    let query_text = call_tool_text(
         &base,
         &sid,
         4,
@@ -873,10 +702,10 @@ async fn trace_log_session_idempotent() {
 
 #[tokio::test]
 async fn trace_log_outcome() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
-    let text = call_tool(
+    let text = call_tool_text(
         &base,
         &sid,
         2,
@@ -895,7 +724,7 @@ async fn trace_log_outcome() {
     );
 
     // Verify node exists.
-    let query_text = call_tool(
+    let query_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -914,11 +743,11 @@ async fn trace_log_outcome() {
 
 #[tokio::test]
 async fn trace_export_huggingface() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Set up session metadata.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -932,7 +761,7 @@ async fn trace_export_huggingface() {
     .await;
 
     // Log 2 traces.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         3,
@@ -950,7 +779,7 @@ async fn trace_export_huggingface() {
     )
     .await;
 
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -968,7 +797,7 @@ async fn trace_export_huggingface() {
     .await;
 
     // Log outcome.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -983,7 +812,7 @@ async fn trace_export_huggingface() {
     .await;
 
     // Export in HuggingFace format.
-    let exported = call_tool(
+    let exported = call_tool_text(
         &base,
         &sid,
         6,
@@ -1055,14 +884,14 @@ fn extract_id_from_response(text: &str) -> u64 {
 
 #[tokio::test]
 async fn bridge_register_agent_and_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    let text = call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-reg-list", "project": "test-project-reg", "supported_tools": ["code_review", "testing"], "domain_expertise": ["rust", "security"], "model_family": "claude-opus-4"})).await;
+    let text = call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-reg-list", "project": "test-project-reg", "supported_tools": ["code_review", "testing"], "domain_expertise": ["rust", "security"], "model_family": "claude-opus-4"})).await;
     assert!(
         text.contains("Agent registered"),
         "should confirm registration: {text}"
     );
-    let list_text = call_tool(
+    let list_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -1086,7 +915,7 @@ async fn bridge_register_agent_and_list() {
         list_text.contains("claude-opus-4"),
         "model_family missing: {list_text}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -1098,9 +927,9 @@ async fn bridge_register_agent_and_list() {
 
 #[tokio::test]
 async fn bridge_heartbeat_working_locally() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1108,7 +937,7 @@ async fn bridge_heartbeat_working_locally() {
         serde_json::json!({"agent_id": "test-hb-local", "project": "test-project-hb"}),
     )
     .await;
-    let text = call_tool(
+    let text = call_tool_text(
         &base,
         &sid,
         3,
@@ -1120,7 +949,7 @@ async fn bridge_heartbeat_working_locally() {
         text.contains("Heartbeat OK"),
         "heartbeat should succeed: {text}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -1132,9 +961,9 @@ async fn bridge_heartbeat_working_locally() {
 
 #[tokio::test]
 async fn bridge_deregister_releases_tasks() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1142,9 +971,9 @@ async fn bridge_deregister_releases_tasks() {
         serde_json::json!({"agent_id": "test-dereg-tasks", "project": "test-project-dereg"}),
     )
     .await;
-    let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-dereg-tasks", "project": "test-project-dereg", "title": "Deregister test task", "description": "Task for deregister test", "assignee_agent": "test-dereg-tasks"})).await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-dereg-tasks", "project": "test-project-dereg", "title": "Deregister test task", "description": "Task for deregister test", "assignee_agent": "test-dereg-tasks"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -1152,7 +981,7 @@ async fn bridge_deregister_releases_tasks() {
         serde_json::json!({"agent_id": "test-dereg-tasks", "task_id": task_id}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -1160,7 +989,7 @@ async fn bridge_deregister_releases_tasks() {
         serde_json::json!({"agent_id": "test-dereg-tasks"}),
     )
     .await;
-    let list_text = call_tool(
+    let list_text = call_tool_text(
         &base,
         &sid,
         6,
@@ -1176,9 +1005,9 @@ async fn bridge_deregister_releases_tasks() {
 
 #[tokio::test]
 async fn bridge_share_and_get_context() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1186,12 +1015,12 @@ async fn bridge_share_and_get_context() {
         serde_json::json!({"agent_id": "test-ctx-agent", "project": "test-project-ctx"}),
     )
     .await;
-    let share_text = call_tool(&base, &sid, 3, "share_context", serde_json::json!({"author": "test-ctx-agent", "context_type": "discovery", "scope": "test-project-ctx", "content": "Found a critical performance bottleneck in query planner"})).await;
+    let share_text = call_tool_text(&base, &sid, 3, "share_context", serde_json::json!({"author": "test-ctx-agent", "context_type": "discovery", "scope": "test-project-ctx", "content": "Found a critical performance bottleneck in query planner"})).await;
     assert!(
         share_text.contains("Context shared"),
         "should confirm sharing: {share_text}"
     );
-    let get_text = call_tool(
+    let get_text = call_tool_text(
         &base,
         &sid,
         4,
@@ -1203,7 +1032,7 @@ async fn bridge_share_and_get_context() {
         get_text.contains("critical performance bottleneck"),
         "should retrieve shared content: {get_text}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -1215,9 +1044,9 @@ async fn bridge_share_and_get_context() {
 
 #[tokio::test]
 async fn bridge_claim_and_release_intent() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1225,17 +1054,17 @@ async fn bridge_claim_and_release_intent() {
         serde_json::json!({"agent_id": "test-intent-a", "project": "test-project-intent"}),
     )
     .await;
-    let claim_text = call_tool(&base, &sid, 3, "claim_intent", serde_json::json!({"agent_id": "test-intent-a", "action": "refactoring optimizer", "targets": ["crates/selene-gql/src/optimizer"], "level": "exclusive"})).await;
+    let claim_text = call_tool_text(&base, &sid, 3, "claim_intent", serde_json::json!({"agent_id": "test-intent-a", "action": "refactoring optimizer", "targets": ["crates/selene-gql/src/optimizer"], "level": "exclusive"})).await;
     assert!(
         claim_text.contains("Intent claimed"),
         "should confirm claim: {claim_text}"
     );
-    let conflicts_text = call_tool(&base, &sid, 4, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer/rules.rs"]})).await;
+    let conflicts_text = call_tool_text(&base, &sid, 4, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer/rules.rs"]})).await;
     assert!(
         conflicts_text.contains("conflict"),
         "should detect overlap: {conflicts_text}"
     );
-    let release_text = call_tool(
+    let release_text = call_tool_text(
         &base,
         &sid,
         5,
@@ -1247,12 +1076,12 @@ async fn bridge_claim_and_release_intent() {
         release_text.contains("released"),
         "should confirm release: {release_text}"
     );
-    let no_conflicts = call_tool(&base, &sid, 6, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer"]})).await;
+    let no_conflicts = call_tool_text(&base, &sid, 6, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer"]})).await;
     assert!(
         no_conflicts.contains("No conflicts"),
         "no conflicts after release: {no_conflicts}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         7,
@@ -1264,11 +1093,11 @@ async fn bridge_claim_and_release_intent() {
 
 #[tokio::test]
 async fn bridge_find_capable_agent_scoring() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-cap-tester", "project": "test-project-cap", "supported_tools": ["testing", "benchmarking"], "domain_expertise": ["performance"]})).await;
-    call_tool(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-cap-security", "project": "test-project-cap", "supported_tools": ["code_review", "security_audit"], "domain_expertise": ["security", "cryptography"]})).await;
-    let find_text = call_tool(
+    call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-cap-tester", "project": "test-project-cap", "supported_tools": ["testing", "benchmarking"], "domain_expertise": ["performance"]})).await;
+    call_tool_text(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-cap-security", "project": "test-project-cap", "supported_tools": ["code_review", "security_audit"], "domain_expertise": ["security", "cryptography"]})).await;
+    let find_text = call_tool_text(
         &base,
         &sid,
         4,
@@ -1292,7 +1121,7 @@ async fn bridge_find_capable_agent_scoring() {
         agents[0]["agent_id"], "test-cap-tester",
         "tester should rank first"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -1300,7 +1129,7 @@ async fn bridge_find_capable_agent_scoring() {
         serde_json::json!({"agent_id": "test-cap-tester"}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         6,
@@ -1312,9 +1141,9 @@ async fn bridge_find_capable_agent_scoring() {
 
 #[tokio::test]
 async fn bridge_agent_stats_lifecycle() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1322,9 +1151,9 @@ async fn bridge_agent_stats_lifecycle() {
         serde_json::json!({"agent_id": "test-stats-agent", "project": "test-project-stats"}),
     )
     .await;
-    let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-stats-agent", "project": "test-project-stats", "title": "Stats test task", "description": "A task for stats testing", "assignee_agent": "test-stats-agent"})).await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-stats-agent", "project": "test-project-stats", "title": "Stats test task", "description": "A task for stats testing", "assignee_agent": "test-stats-agent"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         4,
@@ -1332,12 +1161,12 @@ async fn bridge_agent_stats_lifecycle() {
         serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id}),
     )
     .await;
-    let complete_text = call_tool(&base, &sid, 5, "complete_task", serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id, "success": true, "output_data": "{\"result\": \"all tests passed\"}"})).await;
+    let complete_text = call_tool_text(&base, &sid, 5, "complete_task", serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id, "success": true, "output_data": "{\"result\": \"all tests passed\"}"})).await;
     assert!(
         complete_text.contains("completed"),
         "should confirm completion: {complete_text}"
     );
-    let list_text = call_tool(
+    let list_text = call_tool_text(
         &base,
         &sid,
         6,
@@ -1349,7 +1178,7 @@ async fn bridge_agent_stats_lifecycle() {
         list_text.contains("completed"),
         "task should show completed: {list_text}"
     );
-    let stats_text = call_tool(
+    let stats_text = call_tool_text(
         &base,
         &sid,
         7,
@@ -1379,7 +1208,7 @@ async fn bridge_agent_stats_lifecycle() {
         stats.get("recent_tasks").is_some(),
         "should have recent_tasks field: {stats_text}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         8,
@@ -1391,12 +1220,12 @@ async fn bridge_agent_stats_lifecycle() {
 
 #[tokio::test]
 async fn bridge_task_lifecycle_happy_path() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-lifecycle-agent", "project": "test-project-lifecycle"})).await;
-    let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-lifecycle-agent", "project": "test-project-lifecycle", "title": "Lifecycle happy path", "description": "Full lifecycle test"})).await;
+    call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-lifecycle-agent", "project": "test-project-lifecycle"})).await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-lifecycle-agent", "project": "test-project-lifecycle", "title": "Lifecycle happy path", "description": "Full lifecycle test"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    let list1 = call_tool(
+    let list1 = call_tool_text(
         &base,
         &sid,
         4,
@@ -1408,7 +1237,7 @@ async fn bridge_task_lifecycle_happy_path() {
         list1.contains("proposed"),
         "task should be proposed: {list1}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -1416,7 +1245,7 @@ async fn bridge_task_lifecycle_happy_path() {
         serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id}),
     )
     .await;
-    let list2 = call_tool(
+    let list2 = call_tool_text(
         &base,
         &sid,
         6,
@@ -1428,12 +1257,12 @@ async fn bridge_task_lifecycle_happy_path() {
         list2.contains("accepted"),
         "task should be accepted: {list2}"
     );
-    let complete_text = call_tool(&base, &sid, 7, "complete_task", serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id, "success": true, "output_data": "{\"files_changed\": 3}"})).await;
+    let complete_text = call_tool_text(&base, &sid, 7, "complete_task", serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id, "success": true, "output_data": "{\"files_changed\": 3}"})).await;
     assert!(
         complete_text.contains("completed"),
         "should confirm completion: {complete_text}"
     );
-    let list3 = call_tool(
+    let list3 = call_tool_text(
         &base,
         &sid,
         8,
@@ -1445,7 +1274,7 @@ async fn bridge_task_lifecycle_happy_path() {
         list3.contains("completed"),
         "task should be completed: {list3}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         9,
@@ -1457,9 +1286,9 @@ async fn bridge_task_lifecycle_happy_path() {
 
 #[tokio::test]
 async fn bridge_task_reject_flow() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1467,14 +1296,14 @@ async fn bridge_task_reject_flow() {
         serde_json::json!({"agent_id": "test-reject-agent", "project": "test-project-reject"}),
     )
     .await;
-    let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-reject-agent", "project": "test-project-reject", "title": "Reject test task", "description": "This task will be rejected"})).await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-reject-agent", "project": "test-project-reject", "title": "Reject test task", "description": "This task will be rejected"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    let reject_text = call_tool(&base, &sid, 4, "reject_task", serde_json::json!({"agent_id": "test-reject-agent", "task_id": task_id, "reason": "Out of scope for current sprint"})).await;
+    let reject_text = call_tool_text(&base, &sid, 4, "reject_task", serde_json::json!({"agent_id": "test-reject-agent", "task_id": task_id, "reason": "Out of scope for current sprint"})).await;
     assert!(
         reject_text.contains("rejected"),
         "should confirm rejection: {reject_text}"
     );
-    let list_text = call_tool(
+    let list_text = call_tool_text(
         &base,
         &sid,
         5,
@@ -1486,7 +1315,7 @@ async fn bridge_task_reject_flow() {
         list_text.contains("rejected"),
         "task should be rejected: {list_text}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         6,
@@ -1498,9 +1327,9 @@ async fn bridge_task_reject_flow() {
 
 #[tokio::test]
 async fn bridge_task_accept_prevents_stealing() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1508,7 +1337,7 @@ async fn bridge_task_accept_prevents_stealing() {
         serde_json::json!({"agent_id": "test-steal-a", "project": "test-project-steal"}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         3,
@@ -1516,14 +1345,14 @@ async fn bridge_task_accept_prevents_stealing() {
         serde_json::json!({"agent_id": "test-steal-b", "project": "test-project-steal"}),
     )
     .await;
-    let propose_text = call_tool(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-steal-a", "project": "test-project-steal", "title": "Targeted task", "description": "Only agent A should accept", "assignee_agent": "test-steal-a"})).await;
+    let propose_text = call_tool_text(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-steal-a", "project": "test-project-steal", "title": "Targeted task", "description": "Only agent A should accept", "assignee_agent": "test-steal-a"})).await;
     let task_id = extract_id_from_response(&propose_text);
     let result = session_request(&base, &sid, 5, "tools/call", serde_json::json!({"name": "accept_task", "arguments": {"agent_id": "test-steal-b", "task_id": task_id}})).await;
     assert!(
         result.get("error").is_some(),
         "agent B should not accept task targeted at A: {result}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         6,
@@ -1531,7 +1360,7 @@ async fn bridge_task_accept_prevents_stealing() {
         serde_json::json!({"agent_id": "test-steal-a"}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         7,
@@ -1543,9 +1372,9 @@ async fn bridge_task_accept_prevents_stealing() {
 
 #[tokio::test]
 async fn bridge_task_complete_requires_assignee() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1553,7 +1382,7 @@ async fn bridge_task_complete_requires_assignee() {
         serde_json::json!({"agent_id": "test-complete-a", "project": "test-project-complete"}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         3,
@@ -1561,9 +1390,9 @@ async fn bridge_task_complete_requires_assignee() {
         serde_json::json!({"agent_id": "test-complete-b", "project": "test-project-complete"}),
     )
     .await;
-    let propose_text = call_tool(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-complete-a", "project": "test-project-complete", "title": "Assignee-only completion", "description": "Only agent A should complete", "assignee_agent": "test-complete-a"})).await;
+    let propose_text = call_tool_text(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-complete-a", "project": "test-project-complete", "title": "Assignee-only completion", "description": "Only agent A should complete", "assignee_agent": "test-complete-a"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         5,
@@ -1576,7 +1405,7 @@ async fn bridge_task_complete_requires_assignee() {
         result.get("error").is_some(),
         "agent B should not complete task assigned to A: {result}"
     );
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         7,
@@ -1584,7 +1413,7 @@ async fn bridge_task_complete_requires_assignee() {
         serde_json::json!({"agent_id": "test-complete-a"}),
     )
     .await;
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         8,
@@ -1598,11 +1427,11 @@ async fn bridge_task_complete_requires_assignee() {
 
 #[tokio::test]
 async fn investigation_lifecycle() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Register an agent first.
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1612,7 +1441,7 @@ async fn investigation_lifecycle() {
     .await;
 
     // Start an investigation.
-    let start_text = call_tool(
+    let start_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -1639,7 +1468,7 @@ async fn investigation_lifecycle() {
         .expect("should have investigation_id string field");
 
     // Share context linked to the investigation.
-    let share_text = call_tool(
+    let share_text = call_tool_text(
         &base,
         &sid,
         4,
@@ -1663,7 +1492,7 @@ async fn investigation_lifecycle() {
     );
 
     // List investigations — should find the open one.
-    let list_text = call_tool(
+    let list_text = call_tool_text(
         &base,
         &sid,
         5,
@@ -1677,7 +1506,7 @@ async fn investigation_lifecycle() {
     );
 
     // Close the investigation.
-    let close_text = call_tool(
+    let close_text = call_tool_text(
         &base,
         &sid,
         6,
@@ -1695,7 +1524,7 @@ async fn investigation_lifecycle() {
     );
 
     // Verify it's now listed as closed.
-    let list_closed = call_tool(
+    let list_closed = call_tool_text(
         &base,
         &sid,
         7,
@@ -1734,7 +1563,7 @@ async fn investigation_lifecycle() {
     );
 
     // Get context filtered by investigation_id.
-    let ctx_text = call_tool(
+    let ctx_text = call_tool_text(
         &base,
         &sid,
         9,
@@ -1747,7 +1576,7 @@ async fn investigation_lifecycle() {
         "should find linked context: {ctx_text}"
     );
 
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         10,
@@ -1761,10 +1590,10 @@ async fn investigation_lifecycle() {
 
 #[tokio::test]
 async fn context_confidence_and_response_tracking() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         2,
@@ -1774,7 +1603,7 @@ async fn context_confidence_and_response_tracking() {
     .await;
 
     // Share context with confidence and response tracking.
-    let share_text = call_tool(
+    let share_text = call_tool_text(
         &base,
         &sid,
         3,
@@ -1796,7 +1625,7 @@ async fn context_confidence_and_response_tracking() {
     );
 
     // Retrieve and verify confidence + response tracking fields via JSON parsing.
-    let get_text = call_tool(
+    let get_text = call_tool_text(
         &base,
         &sid,
         4,
@@ -1860,7 +1689,7 @@ async fn context_confidence_and_response_tracking() {
     );
 
     // Auto-infer response_requested from deadline.
-    let auto_text = call_tool(
+    let auto_text = call_tool_text(
         &base,
         &sid,
         6,
@@ -1878,7 +1707,7 @@ async fn context_confidence_and_response_tracking() {
         "deadline-only should auto-infer response_requested: {auto_text}"
     );
 
-    call_tool(
+    call_tool_text(
         &base,
         &sid,
         7,
@@ -1892,11 +1721,11 @@ async fn context_confidence_and_response_tracking() {
 
 #[tokio::test]
 async fn memory_ttl_tier_config_and_validation() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
     // Configure memory namespace with TTL tiers.
-    let config_text = call_tool(
+    let config_text = call_tool_text(
         &base,
         &sid,
         2,
@@ -1914,7 +1743,7 @@ async fn memory_ttl_tier_config_and_validation() {
     );
 
     // Verify tiers stored via GQL.
-    let verify_text = call_tool(
+    let verify_text = call_tool_text(
         &base,
         &sid,
         3,
