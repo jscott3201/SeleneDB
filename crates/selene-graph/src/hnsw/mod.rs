@@ -168,6 +168,9 @@ impl HnswIndex {
                 wg.reconnect_neighbors(idx, &self.params);
             }
         }
+        // Note: RoaringBitmap uses u32 keys, creating a ceiling at ~4 billion nodes.
+        // For the target domain (IoT/smart buildings, 10K-100K vectors) this is unreachable.
+        // Consider roaring::RoaringTreemap (u64) if graph scale grows beyond u32::MAX.
         self.tombstones.lock().insert(node_id.0 as u32);
         self.generation.fetch_add(1, Ordering::Release);
     }
