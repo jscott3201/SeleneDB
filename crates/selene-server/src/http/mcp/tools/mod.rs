@@ -2417,7 +2417,7 @@ impl SeleneTools {
 
     #[tool(
         name = "check_conflicts",
-        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets. Does not create any state — read-only check.",
+        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets (including cascaded expanded_targets). Does not expand the caller's targets — use the same targets you would pass to claim_intent. Does not create any state — read-only check.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

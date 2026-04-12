@@ -558,7 +558,16 @@ pub(super) async fn share_context_impl(
     );
 
     // Response tracking
-    let resp_req = p.response_requested.unwrap_or(false);
+    if let Some(ms) = p.response_deadline_ms
+        && ms <= 0
+    {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "response_deadline_ms must be a positive value".into(),
+            data: None,
+        });
+    }
+    let resp_req = p.response_requested.unwrap_or(false) || p.response_deadline_ms.is_some();
     params.insert("resp_req".into(), Value::Bool(resp_req));
     let resp_deadline_at = if resp_req {
         p.response_deadline_ms.map_or(0, |ms| now_ms + ms)
@@ -683,6 +692,7 @@ pub(super) async fn share_context_impl(
     }
 
     // Link to investigation thread if provided
+    let mut inv_warning = String::new();
     if let Some(ref inv_id) = inv_id_for_edge {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
         if let Some(ctx_id) = rows
@@ -696,11 +706,12 @@ pub(super) async fn share_context_impl(
 
             let inv_query = "MATCH (inv:__Investigation {investigation_id: $inv_id}) \
                               MATCH (c) WHERE id(c) = $cid \
-                              INSERT (c)-[:belongs_to]->(inv)";
+                              INSERT (c)-[:belongs_to]->(inv) \
+                              RETURN id(inv) AS inv_node_id";
 
             let st = Arc::clone(&tools.state);
             let auth2 = auth.clone();
-            let _ = tools
+            match tools
                 .submit_mut(move || {
                     ops::gql::execute_gql(
                         &st,
@@ -712,12 +723,27 @@ pub(super) async fn share_context_impl(
                         ResultFormat::Json,
                     )
                 })
-                .await;
+                .await
+            {
+                Ok(r) if r.row_count == 0 => {
+                    let _ = write!(
+                        inv_warning,
+                        " WARNING: investigation '{inv_id}' not found — context not linked"
+                    );
+                }
+                Err(_) => {
+                    let _ = write!(
+                        inv_warning,
+                        " WARNING: failed to link context to investigation '{inv_id}'"
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
     Ok(CallToolResult::success(vec![Content::text(format!(
-        "Context shared: {data}"
+        "Context shared: {data}{inv_warning}"
     ))]))
 }
 
@@ -859,7 +885,9 @@ pub(super) async fn start_investigation_impl(
     }
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
-    let inv_id = format!("inv-{now_ms}-{}", &p.author[..p.author.len().min(8)]);
+    let author_prefix: String = p.author.chars().take(8).collect();
+    let rand_suffix: u16 = (now_ms as u16) ^ (p.subject.len() as u16).wrapping_mul(31);
+    let inv_id = format!("inv-{now_ms}-{author_prefix}-{rand_suffix:04x}");
 
     let mut params = HashMap::new();
     params.insert("inv_id".into(), Value::from(inv_id.as_str()));
@@ -959,6 +987,7 @@ pub(super) async fn close_investigation_impl(
     params.insert("now".into(), Value::Int(now_ms));
 
     let query = "MATCH (i:__Investigation {investigation_id: $inv_id}) \
+                  FILTER i.status = 'open' \
                   SET i.status = 'closed', \
                   i.conclusion = $conclusion, \
                   i.outcome = $outcome, \
@@ -984,9 +1013,23 @@ pub(super) async fn close_investigation_impl(
 
     let data = result.data_json.unwrap_or_else(|| "[]".into());
     if result.row_count == 0 {
+        // Distinguish "not found" from "already closed".
+        let mut check_params = HashMap::new();
+        check_params.insert("inv_id".into(), Value::from(p.investigation_id.as_str()));
+        let exists = count_entities(
+            &tools.state,
+            &auth,
+            "MATCH (i:__Investigation {investigation_id: $inv_id}) RETURN count(i) AS cnt",
+            Some(&check_params),
+        );
+        let msg = if exists > 0 {
+            format!("investigation '{}' is already closed", p.investigation_id)
+        } else {
+            format!("investigation '{}' not found", p.investigation_id)
+        };
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: format!("investigation '{}' not found", p.investigation_id).into(),
+            message: msg.into(),
             data: None,
         });
     }
@@ -1103,54 +1146,9 @@ pub(super) async fn claim_intent_impl(
     }
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
-
-    // Expand node-backed targets via :contains edges when cascade is requested.
-    let mut expanded_targets = p.targets.clone();
     let cascade = p.cascade.unwrap_or(false);
-    if cascade {
-        let mut children = Vec::new();
-        for target in &p.targets {
-            if let Some(id_str) = target.strip_prefix("node:")
-                && let Ok(node_id) = id_str.parse::<i64>()
-            {
-                let mut exp_params = HashMap::new();
-                exp_params.insert("nid".into(), Value::Int(node_id));
-                let exp_query = "MATCH (n)-[:contains*1..5]->(c) WHERE id(n) = $nid \
-                                 RETURN id(c) AS child_id";
-                if let Ok(exp_result) = ops::gql::execute_gql(
-                    &tools.state,
-                    &auth,
-                    exp_query,
-                    Some(&exp_params),
-                    false,
-                    false,
-                    ResultFormat::Json,
-                ) {
-                    let rows: Vec<serde_json::Value> =
-                        serde_json::from_str(&exp_result.data_json.unwrap_or_else(|| "[]".into()))
-                            .unwrap_or_default();
-                    for row in &rows {
-                        if let Some(cid) = row.get("child_id").and_then(|v| v.as_i64()) {
-                            children.push(format!("node:{cid}"));
-                        }
-                    }
-                }
-            }
-        }
-        // Deduplicate: only add children not already in the original targets.
-        for child in children {
-            if !expanded_targets.contains(&child) {
-                expanded_targets.push(child);
-            }
-        }
-    }
 
     let targets_str = serde_json::to_string(&p.targets).unwrap_or_else(|_| "[]".into());
-    let expanded_str = if cascade && expanded_targets.len() > p.targets.len() {
-        serde_json::to_string(&expanded_targets).unwrap_or_else(|_| "[]".into())
-    } else {
-        String::new()
-    };
 
     // Prepare insert params (used inside the atomic closure below).
     let mut insert_params = HashMap::new();
@@ -1164,24 +1162,65 @@ pub(super) async fn claim_intent_impl(
         "reason".into(),
         p.reason.as_deref().map_or(Value::Null, Value::from),
     );
-    // Store expanded targets if cascading produced additional targets.
-    insert_params.insert(
-        "expanded".into(),
-        if expanded_str.is_empty() {
-            Value::Null
-        } else {
-            Value::from(expanded_str.as_str())
-        },
-    );
 
-    // Atomic conflict-check-then-insert inside a single submit_mut to prevent TOCTOU race.
+    // Atomic cascade-expand + conflict-check + insert inside a single submit_mut
+    // to prevent TOCTOU races on the containment hierarchy.
     let check_non_advisory = level != "advisory";
-    let my_targets = expanded_targets;
+    let original_targets = p.targets.clone();
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
     let (conflict_text, insert_data) = tools
         .submit_mut(move || {
             let mut conflict_text = String::new();
+
+            // Step 0: cascade expansion inside the atomic closure to prevent TOCTOU.
+            let mut my_targets = original_targets.clone();
+            if cascade {
+                let mut children = Vec::new();
+                for target in &original_targets {
+                    if let Some(id_str) = target.strip_prefix("node:")
+                        && let Ok(node_id) = id_str.parse::<i64>()
+                    {
+                        let mut exp_params = HashMap::new();
+                        exp_params.insert("nid".into(), Value::Int(node_id));
+                        let exp_query = "MATCH (n)-[:contains]->{1,5}(c) WHERE id(n) = $nid \
+                                         RETURN id(c) AS child_id";
+                        if let Ok(exp_result) = ops::gql::execute_gql(
+                            &st,
+                            &auth2,
+                            exp_query,
+                            Some(&exp_params),
+                            false,
+                            false,
+                            ResultFormat::Json,
+                        ) {
+                            let rows: Vec<serde_json::Value> = serde_json::from_str(
+                                &exp_result.data_json.unwrap_or_else(|| "[]".into()),
+                            )
+                            .unwrap_or_default();
+                            for row in &rows {
+                                if let Some(cid) = row.get("child_id").and_then(|v| v.as_i64()) {
+                                    children.push(format!("node:{cid}"));
+                                }
+                            }
+                        }
+                    }
+                }
+                for child in children {
+                    if !my_targets.contains(&child) {
+                        my_targets.push(child);
+                    }
+                }
+            }
+
+            // Store expanded targets in insert params if cascade added any.
+            if cascade && my_targets.len() > original_targets.len() {
+                let expanded_str =
+                    serde_json::to_string(&my_targets).unwrap_or_else(|_| "[]".into());
+                insert_params.insert("expanded".into(), Value::from(expanded_str.as_str()));
+            } else {
+                insert_params.insert("expanded".into(), Value::Null);
+            }
 
             // Step 1: conflict check for exclusive/locked levels.
             if check_non_advisory {
