@@ -992,7 +992,8 @@ pub(super) async fn find_capable_agent_impl(
     let trust_data: HashMap<String, (u64, u64)> = {
         let trust_query = "MATCH (t:__Task) \
                             FILTER t.status = 'completed' OR t.status = 'failed' \
-                            RETURN t.assignee_agent AS agent_id, t.status AS status";
+                            RETURN t.assignee_agent AS agent_id, t.status AS status \
+                            LIMIT 5000";
 
         ops::gql::execute_gql(
             &tools.state,
@@ -1084,7 +1085,7 @@ pub(super) async fn find_capable_agent_impl(
             }
 
             // Trust bonus based on task completion history (up to 10 points).
-            // Requires >= 3 completed tasks. 80% success → 0, 100% → 10.
+            // Requires >= 3 total tasks (completed + failed). 80% success → 0, 100% → 10.
             if let Some(aid) = row.get("agent_id").and_then(|v| v.as_str())
                 && let Some(&(comp, fail)) = trust_data.get(aid)
             {
@@ -1169,7 +1170,8 @@ pub(super) async fn agent_stats_impl(
 
     let mut completed = 0u64;
     let mut failed = 0u64;
-    let mut durations = Vec::new();
+    let mut duration_sum = 0i64;
+    let mut duration_count = 0u64;
 
     for row in &rows {
         match row.get("status").and_then(|v| v.as_str()) {
@@ -1180,7 +1182,8 @@ pub(super) async fn agent_stats_impl(
                     row.get("created_at").and_then(|v| v.as_i64()),
                 ) && end > start
                 {
-                    durations.push(end - start);
+                    duration_sum += end - start;
+                    duration_count += 1;
                 }
             }
             Some("failed") => failed += 1,
@@ -1194,10 +1197,10 @@ pub(super) async fn agent_stats_impl(
     } else {
         0.0
     };
-    let avg_duration_ms = if durations.is_empty() {
-        0
+    let avg_duration_ms = if duration_count > 0 {
+        duration_sum / duration_count as i64
     } else {
-        durations.iter().sum::<i64>() / durations.len() as i64
+        0
     };
 
     // Query 2: recent tasks (all statuses, for context)
