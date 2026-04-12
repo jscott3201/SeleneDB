@@ -1630,12 +1630,13 @@ async fn investigation_lifecycle() {
         "should return investigation_id: {start_text}"
     );
 
-    // Extract the investigation_id from the response.
-    let inv_id = start_text
-        .split("\"investigation_id\": \"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .expect("should contain investigation_id");
+    // Extract the investigation_id by parsing the embedded JSON.
+    let json_start = start_text.find('{').expect("response should contain JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&start_text[json_start..])
+        .unwrap_or_else(|e| panic!("should parse investigation JSON: {e}; body: {start_text}"));
+    let inv_id = parsed["investigation_id"]
+        .as_str()
+        .expect("should have investigation_id string field");
 
     // Share context linked to the investigation.
     let share_text = call_tool(
@@ -1794,7 +1795,7 @@ async fn context_confidence_and_response_tracking() {
         "should confirm sharing: {share_text}"
     );
 
-    // Retrieve and verify confidence + response tracking fields.
+    // Retrieve and verify confidence + response tracking fields via JSON parsing.
     let get_text = call_tool(
         &base,
         &sid,
@@ -1807,14 +1808,34 @@ async fn context_confidence_and_response_tracking() {
         get_text.contains("heat exchanger fouling"),
         "should find content: {get_text}"
     );
+
+    // Parse the JSON array from the response to assert typed fields.
+    let json_start = get_text
+        .find('[')
+        .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
+    let json_end = get_text
+        .rfind(']')
+        .map(|i| i + 1)
+        .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&get_text[json_start..json_end])
+        .unwrap_or_else(|e| panic!("should parse context JSON: {e}; body: {get_text}"));
+    let entry = entries
+        .first()
+        .and_then(|e| e.as_object())
+        .unwrap_or_else(|| panic!("should have at least one entry: {get_text}"));
+    let confidence = entry
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| panic!("should have numeric confidence: {get_text}"));
     assert!(
-        get_text.contains("0.72") || get_text.contains("0.7199"),
-        "should include confidence value: {get_text}"
+        (confidence - 0.72).abs() < 0.001,
+        "confidence should be ~0.72, got {confidence}"
     );
-    assert!(
-        get_text.contains("true") || get_text.contains("response_requested"),
-        "should include response_requested: {get_text}"
-    );
+    let response_requested = entry
+        .get("response_requested")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| panic!("should have boolean response_requested: {get_text}"));
+    assert!(response_requested, "response_requested should be true");
 
     // Test validation: negative deadline should be rejected.
     let bad_result = session_request(
