@@ -13,7 +13,7 @@ on:
 # Use a distinct prefix to avoid colliding with the CI reusable workflow's
 # concurrency group, which also evaluates github.workflow in the caller context.
 concurrency:
-  group: release-deploy-${{ github.ref }}
+  group: release-deploy-${{ inputs.version || github.ref }}
 
 permissions:
   contents: read
