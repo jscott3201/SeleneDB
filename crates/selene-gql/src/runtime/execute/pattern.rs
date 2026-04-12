@@ -248,14 +248,16 @@ pub(super) fn execute_pattern_ops_as_factorized_chunk(
     graph: &SeleneGraph,
     scope: Option<&RoaringBitmap>,
     csr: Option<&selene_graph::CsrAdjacency>,
+    caller_eval_ctx: Option<&crate::runtime::eval::EvalContext<'_>>,
 ) -> Option<Result<FactorizedChunk, GqlError>> {
     if !is_factorizable(ops) {
         return None;
     }
 
     let registry = crate::runtime::functions::FunctionRegistry::builtins();
-    let eval_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
-    Some(execute_factorized_core(ops, graph, scope, csr, &eval_ctx))
+    let default_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
+    let eval_ctx = caller_eval_ctx.unwrap_or(&default_ctx);
+    Some(execute_factorized_core(ops, graph, scope, csr, eval_ctx))
 }
 
 /// Core factorized execution: threads a FactorizedChunk through
