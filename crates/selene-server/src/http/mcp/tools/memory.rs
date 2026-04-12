@@ -26,14 +26,24 @@ pub(super) async fn remember_impl(
     let memory_type = p.memory_type;
     let entities = p.entities.unwrap_or_default();
 
+    // Validate: tier and valid_until are mutually exclusive.
+    if p.tier.is_some() && p.valid_until.is_some() {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "tier and valid_until are mutually exclusive — use one or the other".into(),
+            data: None,
+        });
+    }
+
     // 1. Read __MemoryConfig for namespace (defaults if absent)
-    let (max_memories, default_ttl_ms, eviction_policy) = {
+    let (max_memories, default_ttl_ms, eviction_policy, ttl_tiers) = {
         let mut config_params = HashMap::new();
         config_params.insert("ns".into(), Value::from(namespace.as_str()));
         let config_query = "MATCH (c:__MemoryConfig {namespace: $ns}) \
                             RETURN c.max_memories AS max_memories, \
                             c.default_ttl_ms AS default_ttl_ms, \
-                            c.eviction_policy AS eviction_policy";
+                            c.eviction_policy AS eviction_policy, \
+                            c.ttl_tiers AS ttl_tiers";
         let config_result = ops::gql::execute_gql(
             &tools.state,
             &auth,
@@ -62,9 +72,14 @@ pub(super) async fn remember_impl(
                 .and_then(|v| v.as_str())
                 .unwrap_or("clock")
                 .to_string();
-            (max, ttl, policy)
+            let tiers: HashMap<String, i64> = row
+                .get("ttl_tiers")
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            (max, ttl, policy, tiers)
         } else {
-            (1000i64, 0i64, "clock".to_string())
+            (1000i64, 0i64, "clock".to_string(), HashMap::new())
         }
     };
 
@@ -198,13 +213,25 @@ pub(super) async fn remember_impl(
         }
     }
 
-    // 4. Compute valid_until
+    // 4. Compute valid_until (tier → TTL resolution, then explicit, then default)
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
 
-    let valid_until = if let Some(vu) = p.valid_until {
+    let valid_until = if let Some(ref tier_name) = p.tier {
+        // Resolve tier name to TTL via namespace config.
+        let tier_ttl = ttl_tiers.get(tier_name.as_str()).copied().ok_or_else(|| {
+            let available: Vec<&str> = ttl_tiers.keys().map(String::as_str).collect();
+            McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: format!("unknown tier '{tier_name}'; configured tiers: {available:?}")
+                    .into(),
+                data: None,
+            }
+        })?;
+        if tier_ttl > 0 { now_ms + tier_ttl } else { 0 }
+    } else if let Some(vu) = p.valid_until {
         vu
     } else if default_ttl_ms > 0 {
         now_ms + default_ttl_ms
@@ -526,6 +553,20 @@ pub(super) async fn configure_memory_impl(
         }
     }
 
+    // Validate ttl_tiers JSON if provided.
+    if let Some(ref tiers_json) = p.ttl_tiers {
+        let parsed: Result<HashMap<String, i64>, _> = serde_json::from_str(tiers_json);
+        if parsed.is_err() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: "ttl_tiers must be a JSON object mapping tier names to TTL in \
+                          milliseconds (e.g., {\"ephemeral\": 3600000, \"persistent\": 0})"
+                    .into(),
+                data: None,
+            });
+        }
+    }
+
     let namespace = p.namespace;
 
     let mut gql_params = HashMap::new();
@@ -541,11 +582,16 @@ pub(super) async fn configure_memory_impl(
             .as_deref()
             .map_or(Value::Null, Value::from),
     );
+    gql_params.insert(
+        "tiers".into(),
+        p.ttl_tiers.as_deref().map_or(Value::Null, Value::from),
+    );
 
     let query = "MERGE (c:__MemoryConfig {namespace: $ns}) \
                  SET c.max_memories = COALESCE($max, c.max_memories), \
                  c.default_ttl_ms = COALESCE($ttl, c.default_ttl_ms), \
-                 c.eviction_policy = COALESCE($policy, c.eviction_policy)";
+                 c.eviction_policy = COALESCE($policy, c.eviction_policy), \
+                 c.ttl_tiers = COALESCE($tiers, c.ttl_tiers)";
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();

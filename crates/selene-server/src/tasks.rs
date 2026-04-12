@@ -1478,7 +1478,87 @@ async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken
         // Sweep 2: working_locally sessions past the 30-minute safety threshold
         let local_threshold = now_ms - AGENT_WORKING_LOCALLY_THRESHOLD_MS;
         reap_stale_agents(&state, &auth, "working_locally", local_threshold).await;
+
+        // Sweep 3: mark overdue response-requested context
+        mark_overdue_responses(&state, &auth, now_ms).await;
     }
+}
+
+/// Mark `__SharedContext` nodes as overdue when their response deadline has passed.
+async fn mark_overdue_responses(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::handshake::AuthContext,
+    now_ms: i64,
+) {
+    use std::collections::HashMap;
+
+    let mut params = HashMap::new();
+    params.insert("now".into(), selene_core::Value::Int(now_ms));
+
+    let query = "MATCH (c:__SharedContext) \
+                 FILTER c.response_requested = true \
+                 AND c.response_deadline_at > 0 \
+                 AND c.response_deadline_at < $now \
+                 AND c.response_overdue IS NULL \
+                 RETURN id(c) AS id";
+
+    let result = crate::ops::gql::execute_gql(
+        state,
+        auth,
+        query,
+        Some(&params),
+        false,
+        false,
+        crate::ops::gql::ResultFormat::Json,
+    );
+
+    let rows: Vec<serde_json::Value> = match result {
+        Ok(r) => {
+            serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default()
+        }
+        Err(e) => {
+            tracing::warn!("response deadline sweep query failed: {e}");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    for row in &rows {
+        let Some(node_id) = row.get("id").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+
+        let mut update_params = HashMap::new();
+        update_params.insert("nid".into(), selene_core::Value::Int(node_id));
+
+        let update_query = "MATCH (c) WHERE id(c) = $nid SET c.response_overdue = true";
+
+        let st = Arc::clone(state);
+        let auth2 = auth.clone();
+        let mark_result = state
+            .mutation_batcher
+            .submit(move || {
+                crate::ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    update_query,
+                    Some(&update_params),
+                    false,
+                    false,
+                    crate::ops::gql::ResultFormat::Json,
+                )
+            })
+            .await;
+
+        if let Err(e) = mark_result {
+            tracing::warn!("failed to mark response overdue for node {node_id}: {e}");
+        }
+    }
+
+    tracing::debug!("marked {} context(s) as response overdue", rows.len());
 }
 
 /// Find agents with the given `status` whose heartbeat is older than

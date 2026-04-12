@@ -630,6 +630,11 @@ pub(crate) struct RememberParams {
     /// Entity names mentioned in this memory. Creates __Entity nodes and __MENTIONS edges.
     #[serde(default)]
     pub(crate) entities: Option<Vec<String>>,
+    /// Named TTL tier (e.g., "ephemeral", "session", "persistent"). Resolves to
+    /// a TTL value via the namespace's configured ttl_tiers. Mutually exclusive
+    /// with valid_until.
+    #[serde(default)]
+    pub(crate) tier: Option<String>,
 }
 
 fn default_memory_type() -> String {
@@ -847,6 +852,11 @@ pub(crate) struct ConfigureMemoryParams {
     /// Eviction policy: "clock" (default), "oldest", or "lowest_confidence".
     #[serde(default)]
     pub(crate) eviction_policy: Option<String>,
+    /// Named TTL tiers as a JSON object mapping tier names to TTL in milliseconds.
+    /// Example: `{"ephemeral": 3600000, "session": 86400000, "persistent": 0}`.
+    /// Memories can reference these tiers by name via the `tier` param in remember.
+    #[serde(default)]
+    pub(crate) ttl_tiers: Option<String>,
 }
 
 // ── Principal management params ──────────────────────────────────────
@@ -993,6 +1003,20 @@ pub(crate) struct ShareContextParams {
     /// Optional node IDs this context is about (creates edges).
     #[serde(default)]
     pub(crate) about_node_ids: Option<Vec<u64>>,
+    /// Author's confidence in this context (0.0–1.0). Helps receivers calibrate
+    /// how much to re-investigate vs. extend findings.
+    #[serde(default)]
+    pub(crate) confidence: Option<f64>,
+    /// If true, signals that the author expects a response from the target agent.
+    #[serde(default)]
+    pub(crate) response_requested: Option<bool>,
+    /// Deadline for response in milliseconds from now. Only meaningful when
+    /// response_requested is true. The reaper marks context as overdue after this.
+    #[serde(default)]
+    pub(crate) response_deadline_ms: Option<i64>,
+    /// Link this context to an open investigation thread (investigation_id from start_investigation).
+    #[serde(default)]
+    pub(crate) investigation_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1015,6 +1039,12 @@ pub(crate) struct GetSharedContextParams {
     /// Maximum results. Default: 50.
     #[serde(default)]
     pub(crate) limit: Option<usize>,
+    /// Filter by investigation thread ID.
+    #[serde(default)]
+    pub(crate) investigation_id: Option<String>,
+    /// Filter by publishing agent.
+    #[serde(default)]
+    pub(crate) author: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1031,6 +1061,10 @@ pub(crate) struct ClaimIntentParams {
     /// Reason for the claim.
     #[serde(default)]
     pub(crate) reason: Option<String>,
+    /// If true and targets contain `node:<id>` entries, expand via `:contains` edges
+    /// to also claim all descendant nodes. Works with any containment hierarchy.
+    #[serde(default)]
+    pub(crate) cascade: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1048,6 +1082,48 @@ pub(crate) struct CheckConflictsParams {
     pub(crate) agent_id: String,
     /// Target paths to check for conflicting intents.
     pub(crate) targets: Vec<String>,
+}
+
+// ── Investigation sessions ──────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct StartInvestigationParams {
+    /// Agent starting the investigation.
+    pub(crate) author: String,
+    /// Project scope for this investigation.
+    pub(crate) scope: String,
+    /// Brief subject line describing what is being investigated.
+    pub(crate) subject: String,
+    /// Initial findings or observations that triggered the investigation.
+    #[serde(default)]
+    pub(crate) initial_findings: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct CloseInvestigationParams {
+    /// The investigation_id returned by start_investigation.
+    pub(crate) investigation_id: String,
+    /// Conclusion summarizing the investigation outcome.
+    pub(crate) conclusion: String,
+    /// Outcome classification (e.g., "resolved", "escalated", "inconclusive").
+    #[serde(default)]
+    pub(crate) outcome: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ListInvestigationsParams {
+    /// Filter by project scope.
+    #[serde(default)]
+    pub(crate) scope: Option<String>,
+    /// Filter by status: "open" or "closed".
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    /// Filter by author agent ID.
+    #[serde(default)]
+    pub(crate) author: Option<String>,
+    /// Maximum results. Default: 50.
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
 }
 
 // ── Agent capability discovery ──────────────────────────────────────

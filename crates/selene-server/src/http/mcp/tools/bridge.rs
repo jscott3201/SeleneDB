@@ -6,6 +6,7 @@
 //! Node types:
 //! - `__AgentSession`: agent presence and liveness
 //! - `__SharedContext`: published discoveries, decisions, warnings
+//! - `__Investigation`: threaded investigation sessions grouping related context
 //! - `__Intent`: work claims with advisory/exclusive/locked levels
 
 use std::collections::HashMap;
@@ -25,6 +26,7 @@ use crate::ops::gql::ResultFormat;
 const MAX_SHARED_CONTEXTS: usize = 500;
 const MAX_INTENTS_PER_AGENT: usize = 50;
 const MAX_TASKS_PER_PROJECT: usize = 1000;
+const MAX_INVESTIGATIONS_PER_SCOPE: usize = 100;
 
 /// Run a COUNT query and return the count, or 0 on error.
 fn count_entities(
@@ -548,6 +550,31 @@ pub(super) async fn share_context_impl(
     let expires_at = if ttl > 0 { now_ms + ttl } else { 0 };
     params.insert("expires_at".into(), Value::Int(expires_at));
 
+    // Confidence (0.0–1.0)
+    params.insert(
+        "confidence".into(),
+        p.confidence
+            .map_or(Value::Null, |c| Value::Float(c.clamp(0.0, 1.0))),
+    );
+
+    // Response tracking
+    let resp_req = p.response_requested.unwrap_or(false);
+    params.insert("resp_req".into(), Value::Bool(resp_req));
+    let resp_deadline_at = if resp_req {
+        p.response_deadline_ms.map_or(0, |ms| now_ms + ms)
+    } else {
+        0
+    };
+    params.insert("resp_deadline_at".into(), Value::Int(resp_deadline_at));
+
+    // Investigation thread
+    params.insert(
+        "inv_id".into(),
+        p.investigation_id
+            .as_deref()
+            .map_or(Value::Null, Value::from),
+    );
+
     let query = "INSERT (c:__SharedContext { \
                   author: $author, \
                   context_type: $ctype, \
@@ -557,12 +584,17 @@ pub(super) async fn share_context_impl(
                   visibility: $visibility, \
                   ttl_ms: $ttl, \
                   created_at: $now, \
-                  expires_at: $expires_at \
+                  expires_at: $expires_at, \
+                  confidence: $confidence, \
+                  response_requested: $resp_req, \
+                  response_deadline_at: $resp_deadline_at, \
+                  investigation_id: $inv_id \
                   }) RETURN id(c) AS id";
 
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
     let about_ids = p.about_node_ids.clone();
+    let inv_id_for_edge = p.investigation_id.clone();
     let result = tools
         .submit_mut(move || {
             ops::gql::execute_gql(
@@ -650,6 +682,40 @@ pub(super) async fn share_context_impl(
             .await;
     }
 
+    // Link to investigation thread if provided
+    if let Some(ref inv_id) = inv_id_for_edge {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        if let Some(ctx_id) = rows
+            .first()
+            .and_then(|r| r.get("id"))
+            .and_then(|v| v.as_u64())
+        {
+            let mut inv_params = HashMap::new();
+            inv_params.insert("inv_id".into(), Value::from(inv_id.as_str()));
+            inv_params.insert("cid".into(), Value::Int(ctx_id as i64));
+
+            let inv_query = "MATCH (inv:__Investigation {investigation_id: $inv_id}) \
+                              MATCH (c) WHERE id(c) = $cid \
+                              INSERT (c)-[:belongs_to]->(inv)";
+
+            let st = Arc::clone(&tools.state);
+            let auth2 = auth.clone();
+            let _ = tools
+                .submit_mut(move || {
+                    ops::gql::execute_gql(
+                        &st,
+                        &auth2,
+                        inv_query,
+                        Some(&inv_params),
+                        false,
+                        false,
+                        ResultFormat::Json,
+                    )
+                })
+                .await;
+        }
+    }
+
     Ok(CallToolResult::success(vec![Content::text(format!(
         "Context shared: {data}"
     ))]))
@@ -684,6 +750,14 @@ pub(super) async fn get_shared_context_impl(
         params.insert("now".into(), Value::Int(now_ms));
         filters.push("(c.expires_at = 0 OR c.expires_at > $now)");
     }
+    if let Some(ref inv_id) = p.investigation_id {
+        params.insert("inv_id".into(), Value::from(inv_id.as_str()));
+        filters.push("c.investigation_id = $inv_id");
+    }
+    if let Some(ref author) = p.author {
+        params.insert("author".into(), Value::from(author.as_str()));
+        filters.push("c.author = $author");
+    }
 
     // Enforce visibility: only return project/global context by default.
     // Directed visibility (agent:<id>) is private and not exposed here.
@@ -702,7 +776,11 @@ pub(super) async fn get_shared_context_impl(
          RETURN id(c) AS id, c.author AS author, c.context_type AS context_type, \
          c.scope AS scope, c.targets AS targets, c.content AS content, \
          c.visibility AS visibility, c.created_at AS created_at, \
-         c.expires_at AS expires_at \
+         c.expires_at AS expires_at, c.confidence AS confidence, \
+         c.response_requested AS response_requested, \
+         c.response_deadline_at AS response_deadline_at, \
+         c.response_overdue AS response_overdue, \
+         c.investigation_id AS investigation_id \
          ORDER BY c.created_at DESC \
          LIMIT $lim"
     );
@@ -748,6 +826,241 @@ pub(super) async fn get_shared_context_impl(
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
+// ── Investigation Sessions ──────────────────────────────────────────
+
+pub(super) async fn start_investigation_impl(
+    tools: &SeleneTools,
+    p: StartInvestigationParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    // Resource limit per scope.
+    let mut limit_params = HashMap::new();
+    limit_params.insert("scope".into(), Value::from(p.scope.as_str()));
+    let inv_count = count_entities(
+        &tools.state,
+        &auth,
+        "MATCH (i:__Investigation {scope: $scope}) FILTER i.status = 'open' \
+         RETURN count(i) AS cnt",
+        Some(&limit_params),
+    );
+    if inv_count >= MAX_INVESTIGATIONS_PER_SCOPE {
+        return Err(McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: format!(
+                "open investigation limit reached for scope '{}' ({MAX_INVESTIGATIONS_PER_SCOPE}); \
+                 close existing investigations before starting new ones",
+                p.scope
+            )
+            .into(),
+            data: None,
+        });
+    }
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+    let inv_id = format!("inv-{now_ms}-{}", &p.author[..p.author.len().min(8)]);
+
+    let mut params = HashMap::new();
+    params.insert("inv_id".into(), Value::from(inv_id.as_str()));
+    params.insert("author".into(), Value::from(p.author.as_str()));
+    params.insert("scope".into(), Value::from(p.scope.as_str()));
+    params.insert("subject".into(), Value::from(p.subject.as_str()));
+    params.insert(
+        "findings".into(),
+        p.initial_findings
+            .as_deref()
+            .map_or(Value::Null, Value::from),
+    );
+    params.insert("now".into(), Value::Int(now_ms));
+
+    let query = "INSERT (i:__Investigation { \
+                  investigation_id: $inv_id, \
+                  author: $author, \
+                  scope: $scope, \
+                  subject: $subject, \
+                  initial_findings: $findings, \
+                  status: 'open', \
+                  created_at: $now, \
+                  updated_at: $now \
+                  }) RETURN id(i) AS id";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    let data = result.data_json.unwrap_or_else(|| "{}".into());
+
+    // Link investigation to the author's agent session.
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+    if let Some(node_id) = rows
+        .first()
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_u64())
+    {
+        let mut link_params = HashMap::new();
+        link_params.insert("aid".into(), Value::from(p.author.as_str()));
+        link_params.insert("iid".into(), Value::Int(node_id as i64));
+
+        let link_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
+                           MATCH (i) WHERE id(i) = $iid \
+                           INSERT (a)-[:started]->(i)";
+
+        let st = Arc::clone(&tools.state);
+        let auth2 = auth.clone();
+        let _ = tools
+            .submit_mut(move || {
+                ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    link_query,
+                    Some(&link_params),
+                    false,
+                    false,
+                    ResultFormat::Json,
+                )
+            })
+            .await;
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Investigation started: {{\"investigation_id\": \"{inv_id}\", \"node\": {data}}}"
+    ))]))
+}
+
+pub(super) async fn close_investigation_impl(
+    tools: &SeleneTools,
+    p: CloseInvestigationParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+    reject_replica(&tools.state)?;
+
+    let now_ms = selene_core::now_nanos() / 1_000_000;
+
+    let mut params = HashMap::new();
+    params.insert("inv_id".into(), Value::from(p.investigation_id.as_str()));
+    params.insert("conclusion".into(), Value::from(p.conclusion.as_str()));
+    params.insert(
+        "outcome".into(),
+        p.outcome.as_deref().map_or(Value::Null, Value::from),
+    );
+    params.insert("now".into(), Value::Int(now_ms));
+
+    let query = "MATCH (i:__Investigation {investigation_id: $inv_id}) \
+                  SET i.status = 'closed', \
+                  i.conclusion = $conclusion, \
+                  i.outcome = $outcome, \
+                  i.closed_at = $now, \
+                  i.updated_at = $now \
+                  RETURN id(i) AS id, i.subject AS subject";
+
+    let st = Arc::clone(&tools.state);
+    let auth2 = auth.clone();
+    let result = tools
+        .submit_mut(move || {
+            ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                ResultFormat::Json,
+            )
+        })
+        .await?;
+
+    let data = result.data_json.unwrap_or_else(|| "[]".into());
+    if result.row_count == 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!("investigation '{}' not found", p.investigation_id).into(),
+            data: None,
+        });
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "Investigation closed: {data}"
+    ))]))
+}
+
+pub(super) async fn list_investigations_impl(
+    tools: &SeleneTools,
+    p: ListInvestigationsParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+
+    let limit = p.limit.unwrap_or(50).min(200);
+    let mut params = HashMap::new();
+    let mut filters = Vec::new();
+
+    if let Some(ref scope) = p.scope {
+        params.insert("scope".into(), Value::from(scope.as_str()));
+        filters.push("i.scope = $scope");
+    }
+    if let Some(ref status) = p.status {
+        params.insert("status".into(), Value::from(status.as_str()));
+        filters.push("i.status = $status");
+    }
+    if let Some(ref author) = p.author {
+        params.insert("author".into(), Value::from(author.as_str()));
+        filters.push("i.author = $author");
+    }
+
+    params.insert("lim".into(), Value::Int(limit as i64));
+
+    let filter_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" FILTER {}", filters.join(" AND "))
+    };
+
+    let query = format!(
+        "MATCH (i:__Investigation){filter_clause} \
+         RETURN id(i) AS id, i.investigation_id AS investigation_id, \
+         i.author AS author, i.scope AS scope, i.subject AS subject, \
+         i.status AS status, i.initial_findings AS initial_findings, \
+         i.conclusion AS conclusion, i.outcome AS outcome, \
+         i.created_at AS created_at, i.closed_at AS closed_at \
+         ORDER BY i.created_at DESC \
+         LIMIT $lim"
+    );
+
+    let gql_params = if params.is_empty() {
+        None
+    } else {
+        Some(&params)
+    };
+
+    let result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        &query,
+        gql_params,
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let data = result.data_json.unwrap_or_else(|| "[]".into());
+    let mut text = format!("Investigations ({} found):\n", result.row_count);
+    let _ = write!(text, "{data}");
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
 // ── Intents & Conflict Detection ────────────────────────────────────
 
 pub(super) async fn claim_intent_impl(
@@ -790,7 +1103,55 @@ pub(super) async fn claim_intent_impl(
     }
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
+
+    // Expand node-backed targets via :contains edges when cascade is requested.
+    let mut expanded_targets = p.targets.clone();
+    let cascade = p.cascade.unwrap_or(false);
+    if cascade {
+        let mut children = Vec::new();
+        for target in &p.targets {
+            if let Some(id_str) = target.strip_prefix("node:")
+                && let Ok(node_id) = id_str.parse::<i64>()
+            {
+                let mut exp_params = HashMap::new();
+                exp_params.insert("nid".into(), Value::Int(node_id));
+                let exp_query = "MATCH (n)-[:contains*1..5]->(c) WHERE id(n) = $nid \
+                                 RETURN id(c) AS child_id";
+                if let Ok(exp_result) = ops::gql::execute_gql(
+                    &tools.state,
+                    &auth,
+                    exp_query,
+                    Some(&exp_params),
+                    false,
+                    false,
+                    ResultFormat::Json,
+                ) {
+                    let rows: Vec<serde_json::Value> = serde_json::from_str(
+                        &exp_result.data_json.unwrap_or_else(|| "[]".into()),
+                    )
+                    .unwrap_or_default();
+                    for row in &rows {
+                        if let Some(cid) = row.get("child_id").and_then(|v| v.as_i64()) {
+                            children.push(format!("node:{cid}"));
+                        }
+                    }
+                }
+            }
+        }
+        // Deduplicate: only add children not already in the original targets.
+        for child in children {
+            if !expanded_targets.contains(&child) {
+                expanded_targets.push(child);
+            }
+        }
+    }
+
     let targets_str = serde_json::to_string(&p.targets).unwrap_or_else(|_| "[]".into());
+    let expanded_str = if cascade && expanded_targets.len() > p.targets.len() {
+        serde_json::to_string(&expanded_targets).unwrap_or_else(|_| "[]".into())
+    } else {
+        String::new()
+    };
 
     // Prepare insert params (used inside the atomic closure below).
     let mut insert_params = HashMap::new();
@@ -804,10 +1165,19 @@ pub(super) async fn claim_intent_impl(
         "reason".into(),
         p.reason.as_deref().map_or(Value::Null, Value::from),
     );
+    // Store expanded targets if cascading produced additional targets.
+    insert_params.insert(
+        "expanded".into(),
+        if expanded_str.is_empty() {
+            Value::Null
+        } else {
+            Value::from(expanded_str.as_str())
+        },
+    );
 
     // Atomic conflict-check-then-insert inside a single submit_mut to prevent TOCTOU race.
     let check_non_advisory = level != "advisory";
-    let my_targets = p.targets.clone();
+    let my_targets = expanded_targets;
     let st = Arc::clone(&tools.state);
     let auth2 = auth.clone();
     let (conflict_text, insert_data) = tools
@@ -823,7 +1193,8 @@ pub(super) async fn claim_intent_impl(
                                     FILTER i.status = 'claimed' AND i.agent_id <> $aid \
                                     AND (i.level = 'exclusive' OR i.level = 'locked') \
                                     RETURN i.agent_id AS agent_id, i.action AS action, \
-                                    i.targets AS targets, i.level AS level";
+                                    i.targets AS targets, i.expanded_targets AS expanded_targets, \
+                                    i.level AS level";
 
                 let check_result = ops::gql::execute_gql(
                     &st,
@@ -842,10 +1213,17 @@ pub(super) async fn claim_intent_impl(
 
                 let mut has_locked_overlap = false;
                 for row in &rows {
+                    // Use expanded_targets if available (from cascading claims),
+                    // otherwise fall back to the original targets.
                     let their_targets: Vec<String> = row
-                        .get("targets")
+                        .get("expanded_targets")
                         .and_then(|t| t.as_str())
-                        .and_then(|s| serde_json::from_str(s).ok())
+                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                        .or_else(|| {
+                            row.get("targets")
+                                .and_then(|t| t.as_str())
+                                .and_then(|s| serde_json::from_str(s).ok())
+                        })
                         .unwrap_or_default();
 
                     let their_level = row
@@ -891,6 +1269,7 @@ pub(super) async fn claim_intent_impl(
                                   agent_id: $aid, \
                                   action: $action, \
                                   targets: $targets, \
+                                  expanded_targets: $expanded, \
                                   level: $level, \
                                   status: $status, \
                                   claimed_at: $now, \
@@ -1013,7 +1392,8 @@ pub(super) async fn check_conflicts_impl(
                   FILTER i.status = 'claimed' AND i.agent_id <> $aid \
                   AND (i.level = 'exclusive' OR i.level = 'locked') \
                   RETURN i.agent_id AS agent_id, i.action AS action, \
-                  i.targets AS targets, i.level AS level, i.claimed_at AS claimed_at";
+                  i.targets AS targets, i.expanded_targets AS expanded_targets, \
+                  i.level AS level, i.claimed_at AS claimed_at";
 
     let result = ops::gql::execute_gql(
         &tools.state,
@@ -1029,13 +1409,19 @@ pub(super) async fn check_conflicts_impl(
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
 
-    // Filter to only intents with overlapping targets
+    // Filter to only intents with overlapping targets.
+    // Use expanded_targets (from cascading claims) when available.
     let mut conflicts = Vec::new();
     for row in &rows {
         let their_targets: Vec<String> = row
-            .get("targets")
+            .get("expanded_targets")
             .and_then(|t| t.as_str())
-            .and_then(|s| serde_json::from_str(s).ok())
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .or_else(|| {
+                row.get("targets")
+                    .and_then(|t| t.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+            })
             .unwrap_or_default();
 
         let overlaps: bool = p.targets.iter().any(|my_t| {
