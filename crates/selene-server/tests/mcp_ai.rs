@@ -7,15 +7,8 @@
 //! Run: `cargo test -p selene-server --test mcp_ai`
 //! Run ignored: `cargo test -p selene-server --test mcp_ai -- --ignored`
 
-use std::sync::Arc;
-
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use selene_server::bootstrap;
-use selene_server::config::SeleneConfig;
-
-// ---------------------------------------------------------------------------
-// Helpers (same pattern as mcp.rs)
-// ---------------------------------------------------------------------------
+mod support;
+use support::*;
 
 fn has_model() -> bool {
     let path = std::env::var("SELENE_MODEL_PATH")
@@ -25,142 +18,13 @@ fn has_model() -> bool {
         .exists()
 }
 
-async fn start_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = SeleneConfig::dev(dir.path());
-    config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
-
-    selene_server::ops::init_start_time();
-    let state = bootstrap::bootstrap(config, None).await.unwrap();
-    let state = Arc::new(state);
-
-    let app = selene_server::http::router(state.clone()).layer(axum::Extension(state));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    std::mem::forget(dir);
-    format!("http://{addr}")
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::new()
-}
-
-async fn mcp_post(
-    base: &str,
-    body: &serde_json::Value,
-    session_id: Option<&str>,
-) -> reqwest::Response {
-    let mut req = client()
-        .post(format!("{base}/mcp"))
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(body);
-
-    if let Some(sid) = session_id {
-        req = req.header("mcp-session-id", sid);
-    }
-
-    req.send().await.unwrap()
-}
-
-fn parse_sse_results(body: &str) -> Vec<serde_json::Value> {
-    body.lines()
-        .filter_map(|line| {
-            let data = line.strip_prefix("data:")?;
-            let trimmed = data.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str(trimmed).ok()
-        })
-        .collect()
-}
-
-async fn initialize(base: &str) -> String {
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "selene-ai-test",
-                "version": "0.1.0"
-            }
-        }
-    });
-
-    let resp = mcp_post(base, &init_req, None).await;
-    let session_id = resp
-        .headers()
-        .get("mcp-session-id")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let body = resp.text().await.unwrap();
-    let _ = parse_sse_results(&body);
-
-    let initialized = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized"
-    });
-    mcp_post(base, &initialized, Some(&session_id)).await;
-
-    session_id
-}
-
-async fn call_tool(
-    base: &str,
-    session_id: &str,
-    id: u64,
-    tool_name: &str,
-    arguments: serde_json::Value,
-) -> serde_json::Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        }
-    });
-
-    let resp = mcp_post(base, &body, Some(session_id)).await;
-    assert_eq!(resp.status(), 200, "{tool_name} should return 200");
-
-    let text = resp.text().await.unwrap();
-    let results = parse_sse_results(&text);
-    assert!(
-        !results.is_empty(),
-        "{tool_name} should return at least one SSE message"
-    );
-    results[0].clone()
-}
-
-fn tool_text(result: &serde_json::Value) -> String {
-    result["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Test 1: schema_dump returns schema over MCP
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn schema_dump_tool_returns_schema() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     call_tool(
@@ -188,7 +52,7 @@ async fn schema_dump_tool_returns_schema() {
 
 #[tokio::test]
 async fn gql_parse_check_validates_queries() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     let valid = call_tool(
@@ -226,7 +90,7 @@ async fn gql_parse_check_validates_queries() {
 
 #[tokio::test]
 async fn text2gql_workflow_schema_then_parse() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     let schema_result = call_tool(&base, &session, 2, "schema_dump", serde_json::json!({})).await;
@@ -254,7 +118,7 @@ async fn text2gql_workflow_schema_then_parse() {
 
 #[tokio::test]
 async fn configure_memory_sets_config() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     let config_result = call_tool(
@@ -303,7 +167,7 @@ async fn configure_memory_sets_config() {
 
 #[tokio::test]
 async fn build_communities_creates_summaries() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     for query in &[
@@ -364,7 +228,7 @@ async fn build_communities_creates_summaries() {
 
 #[tokio::test]
 async fn gql_examples_resource_readable() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     let body = serde_json::json!({
@@ -408,7 +272,7 @@ async fn remember_then_recall() {
         return;
     }
 
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     let remember_result = call_tool(
@@ -463,7 +327,7 @@ async fn remember_then_forget() {
         return;
     }
 
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session = initialize(&base).await;
 
     call_tool(
