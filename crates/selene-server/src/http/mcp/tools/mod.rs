@@ -21,7 +21,7 @@ use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
 use crate::ops::json_to_value;
-use selene_core::Value;
+use selene_core::{IStr, NodeId, Value};
 
 #[tool_router]
 impl SeleneTools {
@@ -1353,6 +1353,11 @@ impl SeleneTools {
         // full mode returns complete node properties.
         let max_prop_len = p.max_property_length.unwrap_or(0);
 
+        // Load graph snapshot once to avoid per-node ArcSwap::load.
+        // Refresh auth scope first so in_scope() checks are current.
+        let auth = ops::refresh_scope_if_stale(&self.state, &auth);
+        let snapshot = self.state.graph.load_snapshot();
+
         let enriched: Vec<serde_json::Value> = rows
             .into_iter()
             .map(|row| {
@@ -1361,20 +1366,21 @@ impl SeleneTools {
                     .and_then(|v| v.as_i64())
                     .map_or(0, |v| v as u64);
                 let mut enriched = row;
-                if let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id) {
+                let nid = NodeId(node_id);
+                if auth.in_scope(nid)
+                    && let Some(node) = snapshot.get_node(nid)
+                {
                     if summary {
-                        // Lightweight: only name and labels
-                        let name = node
-                            .properties
-                            .iter()
-                            .find(|(k, _)| k.as_str() == "name")
-                            .map(|(_, v)| serde_json::to_value(v).unwrap_or_default());
-                        if let Some(n) = name {
-                            enriched["name"] = n;
+                        // Lightweight: read name + labels directly from NodeRef,
+                        // avoiding full node_to_dto clone.
+                        if let Some(name_val) = node.properties.get(IStr::new("name")) {
+                            enriched["name"] = serde_json::to_value(name_val).unwrap_or_default();
                         }
-                        enriched["labels"] = serde_json::to_value(&node.labels).unwrap_or_default();
+                        let labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+                        enriched["labels"] = serde_json::to_value(&labels).unwrap_or_default();
                     } else {
-                        let mut node_json = serde_json::to_value(&node).unwrap_or_default();
+                        let dto = ops::node_to_dto(node);
+                        let mut node_json = serde_json::to_value(&dto).unwrap_or_default();
                         if max_prop_len > 0 {
                             truncate_property_values(&mut node_json, max_prop_len);
                         }
