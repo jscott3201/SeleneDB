@@ -2292,7 +2292,7 @@ impl SeleneTools {
 
     #[tool(
         name = "heartbeat",
-        description = "Update agent session liveness. Must be called periodically (recommended: every 60s) to prevent the session from being marked stale. Optionally update working_on and files_touched.",
+        description = "Update agent session liveness. Must be called periodically (recommended: every 60s) to prevent the session from being marked stale (10 min threshold). Set status to 'working_locally' during extended local work to pause stale detection (safety-reaped after 30 min). Optionally update working_on and files_touched.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2441,6 +2441,23 @@ impl SeleneTools {
         params: Parameters<FindCapableAgentParams>,
     ) -> Result<CallToolResult, McpError> {
         bridge::find_capable_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "agent_stats",
+        description = "Get performance metrics for an agent based on task history. Returns tasks_completed, tasks_failed, success_rate (percentage), avg_duration_ms, and recent_tasks (last 5). Computed from __Task nodes. Use for evaluating agent reliability before delegation.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn agent_stats(
+        &self,
+        params: Parameters<AgentStatsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::agent_stats_impl(self, params.0).await
     }
 
     // ── Task Delegation ───────────────────────────────────────────────

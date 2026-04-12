@@ -947,6 +947,11 @@ pub(crate) struct HeartbeatParams {
     /// Optional update to files being touched.
     #[serde(default)]
     pub(crate) files_touched: Option<Vec<String>>,
+    /// Session status: 'active' (default) or 'working_locally'.
+    /// Use 'working_locally' during extended local work to prevent stale marking
+    /// (safety-reaped after 30 minutes without heartbeat).
+    #[serde(default)]
+    pub(crate) status: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1064,6 +1069,17 @@ pub(crate) struct FindCapableAgentParams {
     /// Only return agents active within this many milliseconds. Default: 300000 (5 min).
     #[serde(default)]
     pub(crate) active_within_ms: Option<i64>,
+}
+
+// ── Agent performance tracking ──────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct AgentStatsParams {
+    /// Agent identifier to get stats for.
+    pub(crate) agent_id: String,
+    /// Optional project scope. If omitted, stats cover all projects.
+    #[serde(default)]
+    pub(crate) project: Option<String>,
 }
 
 // ── Task Delegation ─────────────────────────────────────────────────
