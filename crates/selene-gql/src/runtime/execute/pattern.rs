@@ -254,10 +254,19 @@ pub(super) fn execute_pattern_ops_as_factorized_chunk(
         return None;
     }
 
-    let registry = crate::runtime::functions::FunctionRegistry::builtins();
-    let default_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
-    let eval_ctx = caller_eval_ctx.unwrap_or(&default_ctx);
-    Some(execute_factorized_core(ops, graph, scope, csr, eval_ctx))
+    if let Some(ctx) = caller_eval_ctx {
+        Some(execute_factorized_core(ops, graph, scope, csr, ctx))
+    } else {
+        let registry = crate::runtime::functions::FunctionRegistry::builtins();
+        let default_ctx = crate::runtime::eval::EvalContext::new(graph, registry).with_scope(scope);
+        Some(execute_factorized_core(
+            ops,
+            graph,
+            scope,
+            csr,
+            &default_ctx,
+        ))
+    }
 }
 
 /// Core factorized execution: threads a FactorizedChunk through
