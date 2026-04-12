@@ -21,11 +21,19 @@ pub use selene_testing::helpers::{labels, props};
 
 /// A test HTTP server that owns its data directory.
 ///
-/// Cleans up the `TempDir` on drop instead of leaking via `std::mem::forget`.
+/// Aborts the server task and cleans up the `TempDir` on drop instead of
+/// leaking via `std::mem::forget`.
 pub struct TestServer {
     pub base_url: String,
     pub state: Arc<ServerState>,
+    _handle: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self._handle.abort();
+    }
 }
 
 impl TestServer {
@@ -39,18 +47,19 @@ impl TestServer {
         let state = bootstrap::bootstrap(config, None).await.unwrap();
         let state = Arc::new(state);
 
-        let app = selene_server::http::router(state.clone()).layer(axum::Extension(state.clone()));
+        let app = selene_server::http::router(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
         Self {
             base_url: format!("http://{addr}"),
             state,
+            _handle: handle,
             _dir: dir,
         }
     }
@@ -68,18 +77,19 @@ impl TestServer {
         let state = bootstrap::bootstrap(config, None).await.unwrap();
         let state = Arc::new(state);
 
-        let app = selene_server::http::router(state.clone()).layer(axum::Extension(state.clone()));
+        let app = selene_server::http::router(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
         Self {
             base_url: format!("http://{addr}"),
             state,
+            _handle: handle,
             _dir: dir,
         }
     }
@@ -104,10 +114,16 @@ pub fn reader() -> AuthContext {
 }
 
 /// Operator context scoped to the given node IDs.
+///
+/// # Panics
+/// Panics if any ID exceeds `u32::MAX` (RoaringBitmap limitation).
 pub fn scoped(scope_ids: &[u64]) -> AuthContext {
     let mut scope = roaring::RoaringBitmap::new();
     for &id in scope_ids {
-        scope.insert(id as u32);
+        let id32 = u32::try_from(id).unwrap_or_else(|_| {
+            panic!("scoped() node ID {id} exceeds u32::MAX — RoaringBitmap cannot represent it")
+        });
+        scope.insert(id32);
     }
     AuthContext {
         principal_node_id: NodeId(999),
@@ -264,10 +280,21 @@ pub async fn call_tool(
 }
 
 /// Extract the text content from an MCP tool result.
+///
+/// Panics with a clear message if the response shape is unexpected.
 pub fn tool_text(result: &serde_json::Value) -> String {
-    result["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("")
+    let content = result
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+        .expect("expected MCP tool response result.content to be an array");
+    let first = content
+        .first()
+        .expect("expected MCP tool response result.content to have at least one item");
+    first
+        .get("text")
+        .and_then(|t| t.as_str())
+        .expect("expected MCP tool response result.content[0].text to be a string")
         .to_string()
 }
 
