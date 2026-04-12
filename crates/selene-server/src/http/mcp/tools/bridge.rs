@@ -919,8 +919,19 @@ pub(super) async fn find_capable_agent_impl(
     let now_ms = selene_core::now_nanos() / 1_000_000;
     let active_within = p.active_within_ms.unwrap_or(300_000);
 
+    if active_within < 0 {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "active_within_ms must be non-negative".into(),
+            data: None,
+        });
+    }
+
     let mut params = HashMap::new();
-    params.insert("cutoff".into(), Value::Int(now_ms - active_within));
+    params.insert(
+        "cutoff".into(),
+        Value::Int(now_ms.saturating_sub(active_within)),
+    );
 
     let mut filters = vec![
         "a.status = 'active'".to_string(),
@@ -1185,8 +1196,11 @@ pub(super) async fn accept_task_impl(
     params.insert("aid".into(), Value::from(p.agent_id.as_str()));
     params.insert("now".into(), Value::Int(now_ms));
 
+    // Only accept if the task is proposed AND either untargeted or targeted
+    // at this agent (prevents task stealing from targeted assignees).
     let query = "MATCH (t:__Task) WHERE id(t) = $tid \
                   FILTER t.status = 'proposed' \
+                      AND (t.assignee_agent IS NULL OR t.assignee_agent = $aid) \
                   SET t.status = 'accepted', t.assignee_agent = $aid, \
                       t.updated_at = $now \
                   RETURN id(t) AS id, t.title AS title";

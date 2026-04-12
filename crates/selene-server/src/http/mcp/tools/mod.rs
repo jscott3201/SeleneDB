@@ -1294,9 +1294,14 @@ impl SeleneTools {
             });
         }
 
+        // Request k + offset from the engine so pagination can reach beyond
+        // the first k results.
+        let offset = p.offset.unwrap_or(0).max(0) as usize;
+        let effective_k = p.k + offset as i64;
+
         let mut gql_params = HashMap::new();
         gql_params.insert("queryText".into(), Value::from(p.query_text.as_str()));
-        gql_params.insert("k".into(), Value::Int(p.k));
+        gql_params.insert("k".into(), Value::Int(effective_k));
 
         let query = if let Some(ref label) = p.label {
             gql_params.insert("label".into(), Value::from(label.as_str()));
@@ -1319,14 +1324,15 @@ impl SeleneTools {
         .map_err(op_err)?;
 
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        let mut rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-        let total = rows.len();
+        let all_rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        let total = all_rows.len();
 
-        // Apply offset for pagination
-        let offset = p.offset.unwrap_or(0).max(0) as usize;
-        if offset > 0 {
-            rows = rows.into_iter().skip(offset).collect();
-        }
+        // Apply offset — we requested k+offset from the engine, now slice.
+        let rows: Vec<serde_json::Value> = all_rows
+            .into_iter()
+            .skip(offset)
+            .take(p.k as usize)
+            .collect();
 
         let summary = p.summary_mode.unwrap_or(false);
         let include_props = p.include_properties.unwrap_or(false);
@@ -1388,10 +1394,16 @@ impl SeleneTools {
             format_json(&enriched)
         );
 
-        // Response size guard
-        const MAX_RESPONSE_CHARS: usize = 50_000;
-        if text.len() > MAX_RESPONSE_CHARS {
-            text.truncate(MAX_RESPONSE_CHARS);
+        // Response size guard (char-boundary safe)
+        const MAX_RESPONSE_BYTES: usize = 50_000;
+        if text.len() > MAX_RESPONSE_BYTES {
+            let truncate_at = text
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .take_while(|&idx| idx <= MAX_RESPONSE_BYTES)
+                .last()
+                .unwrap_or(0);
+            text.truncate(truncate_at);
             text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
         }
 
