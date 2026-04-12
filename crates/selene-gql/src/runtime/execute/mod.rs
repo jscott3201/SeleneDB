@@ -710,8 +710,13 @@ fn execute_plan_inner(
     // Offset, Limit) and only flattened when a non-streaming op is reached
     // (Sort, GroupBy, RETURN, CALL, Subquery, TopK).
     let (mut chunk, mut factorized) = if options.factorized && plan.mutations.is_empty() {
-        match pattern::execute_pattern_ops_as_factorized_chunk(&plan.pattern_ops, graph, scope, csr)
-        {
+        match pattern::execute_pattern_ops_as_factorized_chunk(
+            &plan.pattern_ops,
+            graph,
+            scope,
+            csr,
+            Some(&ctx),
+        ) {
             Some(Ok(fc)) => (None, Some(fc)),
             Some(Err(e)) => return Err(e),
             None => {

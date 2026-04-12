@@ -4,51 +4,16 @@
 //! Complements `tests/ops.rs` (basic CRUD + auth scope) with deeper coverage
 //! of error paths, boundary values, and data transformations.
 
+mod support;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use selene_core::{IStr, LabelSet, NodeId, PropertyMap, Value};
-use selene_server::auth::Role;
-use selene_server::auth::handshake::AuthContext;
+use selene_core::{IStr, NodeId, PropertyMap, Value};
 use selene_server::bootstrap::ServerState;
 use selene_server::ops;
 use smol_str::SmolStr;
-
-// ── Test helpers ────────────────────────────────────────────────────
-
-fn admin() -> AuthContext {
-    AuthContext::dev_admin()
-}
-
-fn reader() -> AuthContext {
-    AuthContext {
-        principal_node_id: NodeId(999),
-        role: Role::Reader,
-        scope: roaring::RoaringBitmap::new(),
-        scope_generation: 0,
-    }
-}
-
-fn scoped(scope_ids: &[u64]) -> AuthContext {
-    let mut scope = roaring::RoaringBitmap::new();
-    for &id in scope_ids {
-        scope.insert(id as u32);
-    }
-    AuthContext {
-        principal_node_id: NodeId(999),
-        role: Role::Operator,
-        scope,
-        scope_generation: 0,
-    }
-}
-
-fn labels(names: &[&str]) -> LabelSet {
-    LabelSet::from_strs(names)
-}
-
-fn props(pairs: &[(&str, Value)]) -> PropertyMap {
-    PropertyMap::from_pairs(pairs.iter().map(|(k, v)| (IStr::new(k), v.clone())))
-}
+use support::*;
 
 // ── OpError Display formatting ──────────────────────────────────────
 

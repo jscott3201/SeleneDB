@@ -5,177 +5,15 @@
 //! Covers the MCP lifecycle: initialize handshake, tool listing and
 //! invocation, resource listing and reading, prompts, and logging.
 
-use std::sync::Arc;
-
+mod support;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use selene_server::bootstrap;
-use selene_server::config::SeleneConfig;
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-/// Start a test HTTP server on a random port and return the base URL.
-async fn start_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = SeleneConfig::dev(dir.path());
-    config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
-
-    selene_server::ops::init_start_time();
-    let state = bootstrap::bootstrap(config, None).await.unwrap();
-    let state = Arc::new(state);
-
-    let app = selene_server::http::router(state.clone()).layer(axum::Extension(state));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    // Keep tempdir alive for the process lifetime.
-    std::mem::forget(dir);
-
-    format!("http://{addr}")
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::new()
-}
-
-/// POST a JSON-RPC message to `/mcp` and return the raw SSE response body.
-/// Includes required headers for the MCP Streamable HTTP protocol.
-async fn mcp_post(
-    base: &str,
-    body: &serde_json::Value,
-    session_id: Option<&str>,
-) -> reqwest::Response {
-    let mut req = client()
-        .post(format!("{base}/mcp"))
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(body);
-
-    if let Some(sid) = session_id {
-        req = req.header("mcp-session-id", sid);
-    }
-
-    req.send().await.unwrap()
-}
-
-/// Extract JSON-RPC result objects from an SSE response body.
-///
-/// SSE lines look like:
-///   `data:{"jsonrpc":"2.0","id":1,"result":{...}}`
-///
-/// Priming events may contain `data:` (empty) which are skipped.
-fn parse_sse_results(body: &str) -> Vec<serde_json::Value> {
-    body.lines()
-        .filter_map(|line| {
-            let data = line.strip_prefix("data:")?;
-            let trimmed = data.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str(trimmed).ok()
-        })
-        .collect()
-}
-
-/// Run the initialize handshake and return the session ID.
-async fn initialize(base: &str) -> String {
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "selene-test",
-                "version": "0.1.0"
-            }
-        }
-    });
-
-    let resp = mcp_post(base, &init_req, None).await;
-    assert_eq!(resp.status(), 200, "initialize should return 200");
-
-    let session_id = resp
-        .headers()
-        .get("mcp-session-id")
-        .expect("initialize response must include mcp-session-id header")
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    // Verify the SSE body contains a valid initialize result.
-    let body = resp.text().await.unwrap();
-    let results = parse_sse_results(&body);
-    assert!(
-        !results.is_empty(),
-        "initialize SSE body should contain at least one JSON-RPC message"
-    );
-
-    let result = &results[0];
-    assert_eq!(result["jsonrpc"], "2.0");
-    assert_eq!(result["id"], 1);
-    assert!(
-        result.get("result").is_some(),
-        "initialize response must have a 'result' field"
-    );
-
-    // Send the `initialized` notification to complete the handshake.
-    let initialized_notification = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized"
-    });
-    let notif_resp = mcp_post(base, &initialized_notification, Some(&session_id)).await;
-    assert!(
-        notif_resp.status().is_success(),
-        "initialized notification should succeed"
-    );
-
-    session_id
-}
-
-/// Send a JSON-RPC request within an established session and return
-/// the first result object from the SSE response.
-async fn session_request(
-    base: &str,
-    session_id: &str,
-    id: u64,
-    method: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-
-    let resp = mcp_post(base, &body, Some(session_id)).await;
-    assert_eq!(
-        resp.status(),
-        200,
-        "{method} should return 200, got {}",
-        resp.status()
-    );
-
-    let text = resp.text().await.unwrap();
-    let results = parse_sse_results(&text);
-    assert!(
-        !results.is_empty(),
-        "{method} SSE body should contain at least one JSON-RPC message"
-    );
-    results[0].clone()
-}
+use support::*;
 
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn initialize_handshake() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let init_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -242,7 +80,7 @@ async fn initialize_handshake() {
 
 #[tokio::test]
 async fn tools_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(&base, &session_id, 2, "tools/list", serde_json::json!({})).await;
@@ -277,7 +115,7 @@ async fn tools_list() {
 
 #[tokio::test]
 async fn tools_call_gql_query() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     // First, create a node so we have data to query.
@@ -341,7 +179,7 @@ async fn tools_call_gql_query() {
 
 #[tokio::test]
 async fn resources_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -382,7 +220,7 @@ async fn resources_list() {
 
 #[tokio::test]
 async fn resources_read_health() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -412,7 +250,7 @@ async fn resources_read_health() {
 
 #[tokio::test]
 async fn prompts_list() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result =
@@ -447,7 +285,7 @@ async fn prompts_list() {
 
 #[tokio::test]
 async fn logging_set_level() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let session_id = initialize(&base).await;
 
     let result = session_request(
@@ -476,7 +314,7 @@ async fn logging_set_level() {
 
 #[tokio::test]
 async fn missing_accept_header_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -506,7 +344,7 @@ async fn missing_accept_header_rejected() {
 
 #[tokio::test]
 async fn wrong_content_type_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     let resp = client()
         .post(format!("{base}/mcp"))
@@ -526,7 +364,7 @@ async fn wrong_content_type_rejected() {
 
 #[tokio::test]
 async fn request_without_session_requires_initialize() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     // Send a non-initialize request without a session ID.
     let body = serde_json::json!({
@@ -546,7 +384,7 @@ async fn request_without_session_requires_initialize() {
 
 #[tokio::test]
 async fn invalid_session_id_rejected() {
-    let base = start_server().await;
+    let (base, _server) = start_server().await;
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -560,5 +398,1438 @@ async fn invalid_session_id_rejected() {
         resp.status(),
         404,
         "request with invalid session ID should be 404 Not Found"
+    );
+
+    // Verify enriched JSON body with recovery instructions.
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("application/json"),
+        "expired session response should be JSON, got: {content_type}"
+    );
+
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        retry_after, "0",
+        "Retry-After header should be 0 for immediate retry"
+    );
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "session_expired");
+    assert!(json["message"].as_str().unwrap().contains("expired"));
+    assert_eq!(
+        json["ttl_seconds"], 3600,
+        "ttl_seconds should match the default MCP session timeout"
+    );
+    assert!(json["recovery"].as_str().unwrap().contains("initialize"));
+}
+
+// ── Trace system tests ────────────────────────────────────────────
+
+/// Helper: call an MCP tool and return the text content from the result.
+async fn call_tool_text(
+    base: &str,
+    sid: &str,
+    id: u64,
+    name: &str,
+    args: serde_json::Value,
+) -> String {
+    tool_text(&call_tool(base, sid, id, name, args).await)
+}
+
+#[tokio::test]
+async fn trace_log_with_thinking_and_user_query() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Log a trace with the new fields.
+    let text = call_tool_text(
+        &base,
+        &sid,
+        2,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "test-session-1",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{\"zone\": \"Zone 301\"}",
+            "tool_result_summary": "comfort_score: 0.85",
+            "agent_response": "Zone 301 is comfortable.",
+            "thinking": "I should check the comfort score for Zone 301.",
+            "user_query": "How comfortable is Zone 301?"
+        }),
+    )
+    .await;
+    assert!(text.contains("traceId"), "should return traceId: {text}");
+
+    // Export and verify the new fields appear.
+    let exported = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "export_traces",
+        serde_json::json!({
+            "session_id": "test-session-1",
+            "format": "jsonl"
+        }),
+    )
+    .await;
+    assert!(
+        exported.contains("thinking"),
+        "exported trace should contain thinking field: {exported}"
+    );
+    assert!(
+        exported.contains("How comfortable is Zone 301?"),
+        "exported trace should contain user_query: {exported}"
+    );
+}
+
+#[tokio::test]
+async fn trace_about_edges() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Create an entity node and get its ID.
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "gql_query",
+        serde_json::json!({
+            "query": "INSERT (:Zone {name: 'Zone 301'})"
+        }),
+    )
+    .await;
+
+    // Query back the zone ID.
+    let query_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (z:Zone {name: 'Zone 301'}) RETURN id(z) AS zid"
+        }),
+    )
+    .await;
+
+    // Extract the zone ID from the result text (id() returns Int).
+    let zid: i64 = {
+        let json_start = query_text.find('[').unwrap_or(0);
+        let json_end = query_text.rfind(']').map_or(query_text.len(), |i| i + 1);
+        let json_str = &query_text[json_start..json_end];
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
+        rows[0]["zid"].as_i64().expect("zone ID must be a number")
+    };
+
+    // Log a trace with about_node_ids pointing to the zone.
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "test-about",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{}",
+            "tool_result_summary": "ok",
+            "about_node_ids": [zid]
+        }),
+    )
+    .await;
+
+    // Verify the :about edge exists.
+    let edge_text = call_tool_text(
+        &base,
+        &sid,
+        5,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH ()-[e:about]->() RETURN count(e) AS cnt"
+        }),
+    )
+    .await;
+    // Should find exactly 1 :about edge.
+    assert!(
+        edge_text.contains("\"cnt\":1"),
+        "should find 1 about edge: {edge_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_sequential_edges() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Log 3 sequential turns.
+    for turn in 0..3 {
+        call_tool_text(
+            &base,
+            &sid,
+            turn + 2,
+            "log_trace",
+            serde_json::json!({
+                "session_id": "test-seq",
+                "turn": turn,
+                "tool_name": format!("tool_{turn}"),
+                "tool_params": "{}",
+                "tool_result_summary": "ok"
+            }),
+        )
+        .await;
+    }
+
+    // Verify :next_turn edges exist.
+    let edge_text = call_tool_text(
+        &base,
+        &sid,
+        5,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (a)-[e:next_turn]->(b) RETURN a.turn AS from_turn, b.turn AS to_turn ORDER BY a.turn"
+        }),
+    )
+    .await;
+
+    // Should have edges: 0->1 and 1->2.
+    assert!(
+        edge_text.contains("2 rows"),
+        "should have 2 next_turn edges: {edge_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_session() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    let text = call_tool_text(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-session-meta",
+            "system_prompt": "You are Athena, a building intelligence agent.",
+            "building": "Maple Street Tower",
+            "operator_role": "facilities_manager",
+            "weather": "45°F, cloudy",
+            "active_tier": "peak"
+        }),
+    )
+    .await;
+    assert!(
+        text.contains("sessionId"),
+        "should return sessionId: {text}"
+    );
+
+    // Verify node exists.
+    let query_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (s:__TraceSession {session_id: 'test-session-meta'}) \
+                      RETURN s.building AS building, s.system_prompt AS sp"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("Maple Street Tower"),
+        "should find building: {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_session_idempotent() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Call log_session twice with different data.
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-idempotent",
+            "building": "Building A"
+        }),
+    )
+    .await;
+
+    call_tool_text(
+        &base,
+        &sid,
+        3,
+        "log_session",
+        serde_json::json!({
+            "session_id": "test-idempotent",
+            "building": "Building B"
+        }),
+    )
+    .await;
+
+    // Should have exactly one node (MERGE), with updated building.
+    let query_text = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (s:__TraceSession {session_id: 'test-idempotent'}) RETURN s.building AS building"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("Building B"),
+        "should have updated building: {query_text}"
+    );
+    assert!(
+        query_text.contains("1 rows"),
+        "should have exactly 1 node (MERGE): {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_log_outcome() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    let text = call_tool_text(
+        &base,
+        &sid,
+        2,
+        "log_outcome",
+        serde_json::json!({
+            "session_id": "test-outcome",
+            "success": true,
+            "outcome_summary": "Zone reached target temperature within 20 minutes.",
+            "quality_score": 9
+        }),
+    )
+    .await;
+    assert!(
+        text.contains("outcomeId"),
+        "should return outcomeId: {text}"
+    );
+
+    // Verify node exists.
+    let query_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (o:__TraceOutcome {session_id: 'test-outcome'}) \
+                      RETURN o.success AS success, o.quality_score AS score"
+        }),
+    )
+    .await;
+    assert!(
+        query_text.contains("1 rows"),
+        "should have 1 outcome node: {query_text}"
+    );
+}
+
+#[tokio::test]
+async fn trace_export_huggingface() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Set up session metadata.
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "log_session",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "system_prompt": "You are a building agent.",
+            "building": "Test Tower"
+        }),
+    )
+    .await;
+
+    // Log 2 traces.
+    call_tool_text(
+        &base,
+        &sid,
+        3,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "turn": 0,
+            "tool_name": "get_zone_comfort",
+            "tool_params": "{\"zone\": \"Zone 1\"}",
+            "tool_result_summary": "comfort: 0.9",
+            "agent_response": "Zone 1 is comfortable.",
+            "thinking": "Check Zone 1 first.",
+            "user_query": "How is Zone 1?"
+        }),
+    )
+    .await;
+
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "log_trace",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "turn": 1,
+            "tool_name": "adjust_setpoint",
+            "tool_params": "{\"zone\": \"Zone 2\", \"temp\": 72}",
+            "tool_result_summary": "setpoint updated",
+            "agent_response": "Adjusted Zone 2 to 72°F.",
+            "user_query": "Warm up Zone 2."
+        }),
+    )
+    .await;
+
+    // Log outcome.
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "log_outcome",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "success": true,
+            "outcome_summary": "All zones comfortable.",
+            "quality_score": 8
+        }),
+    )
+    .await;
+
+    // Export in HuggingFace format.
+    let exported = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "export_traces",
+        serde_json::json!({
+            "session_id": "hf-test",
+            "format": "huggingface"
+        }),
+    )
+    .await;
+
+    // Verify the structure.
+    assert!(
+        exported.contains("HuggingFace chat"),
+        "header should mention HuggingFace: {exported}"
+    );
+
+    // Parse the JSONL line (skip the header line).
+    let lines: Vec<&str> = exported.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "should have header + at least 1 JSONL line: {exported}"
+    );
+    let example: serde_json::Value =
+        serde_json::from_str(lines[1]).expect("JSONL line should be valid JSON");
+
+    // Check messages array exists and has expected roles.
+    let messages = example["messages"]
+        .as_array()
+        .expect("should have messages array");
+    assert!(
+        messages.len() >= 5,
+        "should have at least 5 messages (system + 2 turns): got {}",
+        messages.len()
+    );
+
+    // First message should be the system prompt.
+    assert_eq!(messages[0]["role"], "system");
+    assert!(
+        messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("building agent")
+    );
+
+    // Should have tools array.
+    let tools = example["tools"]
+        .as_array()
+        .expect("should have tools array");
+    assert_eq!(tools.len(), 2, "should list 2 unique tools");
+
+    // Should have metadata with success and quality_score.
+    assert_eq!(example["metadata"]["success"], true);
+    assert_eq!(example["metadata"]["quality_score"], 8);
+}
+
+// ── Bridge / coordination tool tests ────────────────────────────────
+
+/// Extract a numeric ID from a tool response containing JSON like `[{"id":5}]`.
+fn extract_id_from_response(text: &str) -> u64 {
+    let start = text.find('[').unwrap_or(0);
+    let end = text.rfind(']').map_or(text.len(), |i| i + 1);
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&text[start..end]).expect("response should contain JSON array");
+    rows[0]["id"]
+        .as_u64()
+        .expect("first row should have numeric id")
+}
+
+#[tokio::test]
+async fn bridge_register_agent_and_list() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    let text = call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-reg-list", "project": "test-project-reg", "supported_tools": ["code_review", "testing"], "domain_expertise": ["rust", "security"], "model_family": "claude-opus-4"})).await;
+    assert!(
+        text.contains("Agent registered"),
+        "should confirm registration: {text}"
+    );
+    let list_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "list_agents",
+        serde_json::json!({"project": "test-project-reg"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("test-reg-list"),
+        "agent missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("code_review"),
+        "supported_tools missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("rust"),
+        "domain_expertise missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("claude-opus-4"),
+        "model_family missing: {list_text}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-reg-list"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_heartbeat_working_locally() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-hb-local", "project": "test-project-hb"}),
+    )
+    .await;
+    let text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "heartbeat",
+        serde_json::json!({"agent_id": "test-hb-local", "status": "working_locally"}),
+    )
+    .await;
+    assert!(
+        text.contains("Heartbeat OK"),
+        "heartbeat should succeed: {text}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-hb-local"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_deregister_releases_tasks() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-dereg-tasks", "project": "test-project-dereg"}),
+    )
+    .await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-dereg-tasks", "project": "test-project-dereg", "title": "Deregister test task", "description": "Task for deregister test", "assignee_agent": "test-dereg-tasks"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-dereg-tasks", "task_id": task_id}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-dereg-tasks"}),
+    )
+    .await;
+    let list_text = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-dereg"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("proposed"),
+        "task should revert to proposed: {list_text}"
+    );
+}
+
+#[tokio::test]
+async fn bridge_share_and_get_context() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-ctx-agent", "project": "test-project-ctx"}),
+    )
+    .await;
+    let share_text = call_tool_text(&base, &sid, 3, "share_context", serde_json::json!({"author": "test-ctx-agent", "context_type": "discovery", "scope": "test-project-ctx", "content": "Found a critical performance bottleneck in query planner"})).await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm sharing: {share_text}"
+    );
+    let get_text = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "get_shared_context",
+        serde_json::json!({"scope": "test-project-ctx"}),
+    )
+    .await;
+    assert!(
+        get_text.contains("critical performance bottleneck"),
+        "should retrieve shared content: {get_text}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-ctx-agent"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_claim_and_release_intent() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-intent-a", "project": "test-project-intent"}),
+    )
+    .await;
+    let claim_text = call_tool_text(&base, &sid, 3, "claim_intent", serde_json::json!({"agent_id": "test-intent-a", "action": "refactoring optimizer", "targets": ["crates/selene-gql/src/optimizer"], "level": "exclusive"})).await;
+    assert!(
+        claim_text.contains("Intent claimed"),
+        "should confirm claim: {claim_text}"
+    );
+    let conflicts_text = call_tool_text(&base, &sid, 4, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer/rules.rs"]})).await;
+    assert!(
+        conflicts_text.contains("conflict"),
+        "should detect overlap: {conflicts_text}"
+    );
+    let release_text = call_tool_text(
+        &base,
+        &sid,
+        5,
+        "release_intent",
+        serde_json::json!({"agent_id": "test-intent-a"}),
+    )
+    .await;
+    assert!(
+        release_text.contains("released"),
+        "should confirm release: {release_text}"
+    );
+    let no_conflicts = call_tool_text(&base, &sid, 6, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer"]})).await;
+    assert!(
+        no_conflicts.contains("No conflicts"),
+        "no conflicts after release: {no_conflicts}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-intent-a"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_find_capable_agent_scoring() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-cap-tester", "project": "test-project-cap", "supported_tools": ["testing", "benchmarking"], "domain_expertise": ["performance"]})).await;
+    call_tool_text(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-cap-security", "project": "test-project-cap", "supported_tools": ["code_review", "security_audit"], "domain_expertise": ["security", "cryptography"]})).await;
+    let find_text = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "find_capable_agent",
+        serde_json::json!({"required_tools": ["testing"], "project": "test-project-cap"}),
+    )
+    .await;
+    assert!(
+        find_text.contains("test-cap-tester"),
+        "tester should appear: {find_text}"
+    );
+    let json_start = find_text.find('[').unwrap_or(0);
+    let json_end = find_text.rfind(']').map_or(find_text.len(), |i| i + 1);
+    let agents: Vec<serde_json::Value> =
+        serde_json::from_str(&find_text[json_start..json_end]).unwrap_or_default();
+    assert!(
+        !agents.is_empty(),
+        "should find at least one agent: {find_text}"
+    );
+    assert_eq!(
+        agents[0]["agent_id"], "test-cap-tester",
+        "tester should rank first"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-cap-tester"}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-cap-security"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_agent_stats_lifecycle() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-stats-agent", "project": "test-project-stats"}),
+    )
+    .await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-stats-agent", "project": "test-project-stats", "title": "Stats test task", "description": "A task for stats testing", "assignee_agent": "test-stats-agent"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    call_tool_text(
+        &base,
+        &sid,
+        4,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id}),
+    )
+    .await;
+    let complete_text = call_tool_text(&base, &sid, 5, "complete_task", serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id, "success": true, "output_data": "{\"result\": \"all tests passed\"}"})).await;
+    assert!(
+        complete_text.contains("completed"),
+        "should confirm completion: {complete_text}"
+    );
+    let list_text = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-stats"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("completed"),
+        "task should show completed: {list_text}"
+    );
+    let stats_text = call_tool_text(
+        &base,
+        &sid,
+        7,
+        "agent_stats",
+        serde_json::json!({"agent_id": "test-stats-agent"}),
+    )
+    .await;
+    let stats: serde_json::Value =
+        serde_json::from_str(&stats_text).expect("stats should be valid JSON");
+    assert_eq!(
+        stats["agent_id"], "test-stats-agent",
+        "should report correct agent: {stats_text}"
+    );
+    assert!(
+        stats.get("tasks_completed").is_some(),
+        "should have tasks_completed field: {stats_text}"
+    );
+    assert!(
+        stats.get("tasks_failed").is_some(),
+        "should have tasks_failed field: {stats_text}"
+    );
+    assert!(
+        stats.get("success_rate").is_some(),
+        "should have success_rate field: {stats_text}"
+    );
+    assert!(
+        stats.get("recent_tasks").is_some(),
+        "should have recent_tasks field: {stats_text}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        8,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-stats-agent"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_task_lifecycle_happy_path() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-lifecycle-agent", "project": "test-project-lifecycle"})).await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-lifecycle-agent", "project": "test-project-lifecycle", "title": "Lifecycle happy path", "description": "Full lifecycle test"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    let list1 = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list1.contains("proposed"),
+        "task should be proposed: {list1}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id}),
+    )
+    .await;
+    let list2 = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list2.contains("accepted"),
+        "task should be accepted: {list2}"
+    );
+    let complete_text = call_tool_text(&base, &sid, 7, "complete_task", serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id, "success": true, "output_data": "{\"files_changed\": 3}"})).await;
+    assert!(
+        complete_text.contains("completed"),
+        "should confirm completion: {complete_text}"
+    );
+    let list3 = call_tool_text(
+        &base,
+        &sid,
+        8,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list3.contains("completed"),
+        "task should be completed: {list3}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        9,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-lifecycle-agent"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_task_reject_flow() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-reject-agent", "project": "test-project-reject"}),
+    )
+    .await;
+    let propose_text = call_tool_text(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-reject-agent", "project": "test-project-reject", "title": "Reject test task", "description": "This task will be rejected"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    let reject_text = call_tool_text(&base, &sid, 4, "reject_task", serde_json::json!({"agent_id": "test-reject-agent", "task_id": task_id, "reason": "Out of scope for current sprint"})).await;
+    assert!(
+        reject_text.contains("rejected"),
+        "should confirm rejection: {reject_text}"
+    );
+    let list_text = call_tool_text(
+        &base,
+        &sid,
+        5,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-reject"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("rejected"),
+        "task should be rejected: {list_text}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-reject-agent"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_task_accept_prevents_stealing() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-steal-a", "project": "test-project-steal"}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        3,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-steal-b", "project": "test-project-steal"}),
+    )
+    .await;
+    let propose_text = call_tool_text(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-steal-a", "project": "test-project-steal", "title": "Targeted task", "description": "Only agent A should accept", "assignee_agent": "test-steal-a"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    let result = session_request(&base, &sid, 5, "tools/call", serde_json::json!({"name": "accept_task", "arguments": {"agent_id": "test-steal-b", "task_id": task_id}})).await;
+    assert!(
+        result.get("error").is_some(),
+        "agent B should not accept task targeted at A: {result}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-steal-a"}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-steal-b"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_task_complete_requires_assignee() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-complete-a", "project": "test-project-complete"}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        3,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-complete-b", "project": "test-project-complete"}),
+    )
+    .await;
+    let propose_text = call_tool_text(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-complete-a", "project": "test-project-complete", "title": "Assignee-only completion", "description": "Only agent A should complete", "assignee_agent": "test-complete-a"})).await;
+    let task_id = extract_id_from_response(&propose_text);
+    call_tool_text(
+        &base,
+        &sid,
+        5,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-complete-a", "task_id": task_id}),
+    )
+    .await;
+    let result = session_request(&base, &sid, 6, "tools/call", serde_json::json!({"name": "complete_task", "arguments": {"agent_id": "test-complete-b", "task_id": task_id, "success": true}})).await;
+    assert!(
+        result.get("error").is_some(),
+        "agent B should not complete task assigned to A: {result}"
+    );
+    call_tool_text(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-complete-a"}),
+    )
+    .await;
+    call_tool_text(
+        &base,
+        &sid,
+        8,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-complete-b"}),
+    )
+    .await;
+}
+
+// ── Investigation Session Lifecycle ────────────────────────────────
+
+#[tokio::test]
+async fn investigation_lifecycle() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Register an agent first.
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-inv-agent", "project": "test-inv"}),
+    )
+    .await;
+
+    // Start an investigation.
+    let start_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "start_investigation",
+        serde_json::json!({
+            "author": "test-inv-agent",
+            "scope": "test-inv",
+            "subject": "Memory leak in connection pool",
+            "initial_findings": "Heap grows 2MB/hour under steady load"
+        }),
+    )
+    .await;
+    assert!(
+        start_text.contains("investigation_id"),
+        "should return investigation_id: {start_text}"
+    );
+
+    // Extract the investigation_id by parsing the embedded JSON.
+    let json_start = start_text.find('{').expect("response should contain JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&start_text[json_start..])
+        .unwrap_or_else(|e| panic!("should parse investigation JSON: {e}; body: {start_text}"));
+    let inv_id = parsed["investigation_id"]
+        .as_str()
+        .expect("should have investigation_id string field");
+
+    // Share context linked to the investigation.
+    let share_text = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "share_context",
+        serde_json::json!({
+            "author": "test-inv-agent",
+            "scope": "test-inv",
+            "context_type": "discovery",
+            "content": "Connection objects not returned to pool on timeout",
+            "investigation_id": inv_id
+        }),
+    )
+    .await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm context shared: {share_text}"
+    );
+    assert!(
+        !share_text.contains("WARNING"),
+        "should not warn about investigation link: {share_text}"
+    );
+
+    // List investigations — should find the open one.
+    let list_text = call_tool_text(
+        &base,
+        &sid,
+        5,
+        "list_investigations",
+        serde_json::json!({"scope": "test-inv", "status": "open"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("Memory leak in connection pool"),
+        "should list the open investigation: {list_text}"
+    );
+
+    // Close the investigation.
+    let close_text = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "close_investigation",
+        serde_json::json!({
+            "investigation_id": inv_id,
+            "conclusion": "Fixed: timeout handler now calls pool.release()",
+            "outcome": "resolved"
+        }),
+    )
+    .await;
+    assert!(
+        close_text.contains("Investigation closed"),
+        "should confirm closure: {close_text}"
+    );
+
+    // Verify it's now listed as closed.
+    let list_closed = call_tool_text(
+        &base,
+        &sid,
+        7,
+        "list_investigations",
+        serde_json::json!({"scope": "test-inv", "status": "closed"}),
+    )
+    .await;
+    assert!(
+        list_closed.contains("Memory leak"),
+        "should list closed investigation: {list_closed}"
+    );
+
+    // Closing again should fail with "already closed".
+    let result = session_request(
+        &base,
+        &sid,
+        8,
+        "tools/call",
+        serde_json::json!({
+            "name": "close_investigation",
+            "arguments": {
+                "investigation_id": inv_id,
+                "conclusion": "duplicate close"
+            }
+        }),
+    )
+    .await;
+    let error_msg = result
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        error_msg.contains("already closed"),
+        "re-closing should say already closed: {result}"
+    );
+
+    // Get context filtered by investigation_id.
+    let ctx_text = call_tool_text(
+        &base,
+        &sid,
+        9,
+        "get_shared_context",
+        serde_json::json!({"investigation_id": inv_id}),
+    )
+    .await;
+    assert!(
+        ctx_text.contains("not returned to pool"),
+        "should find linked context: {ctx_text}"
+    );
+
+    call_tool_text(
+        &base,
+        &sid,
+        10,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-inv-agent"}),
+    )
+    .await;
+}
+
+// ── Confidence and Response Tracking ───────────────────────────────
+
+#[tokio::test]
+async fn context_confidence_and_response_tracking() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    call_tool_text(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-conf-agent", "project": "test-conf"}),
+    )
+    .await;
+
+    // Share context with confidence and response tracking.
+    let share_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "share_context",
+        serde_json::json!({
+            "author": "test-conf-agent",
+            "scope": "test-conf",
+            "context_type": "warning",
+            "content": "Possible heat exchanger fouling detected",
+            "confidence": 0.72,
+            "response_requested": true,
+            "response_deadline_ms": 600_000
+        }),
+    )
+    .await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm sharing: {share_text}"
+    );
+
+    // Retrieve and verify confidence + response tracking fields via JSON parsing.
+    let get_text = call_tool_text(
+        &base,
+        &sid,
+        4,
+        "get_shared_context",
+        serde_json::json!({"scope": "test-conf"}),
+    )
+    .await;
+    assert!(
+        get_text.contains("heat exchanger fouling"),
+        "should find content: {get_text}"
+    );
+
+    // Parse the JSON array from the response to assert typed fields.
+    let json_start = get_text
+        .find('[')
+        .unwrap_or_else(|| panic!("should contain JSON array: {get_text}"));
+    let json_end = get_text.rfind(']').map_or_else(
+        || panic!("should contain JSON array: {get_text}"),
+        |i| i + 1,
+    );
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&get_text[json_start..json_end])
+        .unwrap_or_else(|e| panic!("should parse context JSON: {e}; body: {get_text}"));
+    let entry = entries
+        .first()
+        .and_then(|e| e.as_object())
+        .unwrap_or_else(|| panic!("should have at least one entry: {get_text}"));
+    let confidence = entry
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| panic!("should have numeric confidence: {get_text}"));
+    assert!(
+        (confidence - 0.72).abs() < 0.001,
+        "confidence should be ~0.72, got {confidence}"
+    );
+    let response_requested = entry
+        .get("response_requested")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| panic!("should have boolean response_requested: {get_text}"));
+    assert!(response_requested, "response_requested should be true");
+
+    // Test validation: negative deadline should be rejected.
+    let bad_result = session_request(
+        &base,
+        &sid,
+        5,
+        "tools/call",
+        serde_json::json!({
+            "name": "share_context",
+            "arguments": {
+                "author": "test-conf-agent",
+                "scope": "test-conf",
+                "content": "bad deadline",
+                "response_deadline_ms": -1000
+            }
+        }),
+    )
+    .await;
+    assert!(
+        bad_result.get("error").is_some(),
+        "negative deadline should be rejected: {bad_result}"
+    );
+
+    // Auto-infer response_requested from deadline.
+    let auto_text = call_tool_text(
+        &base,
+        &sid,
+        6,
+        "share_context",
+        serde_json::json!({
+            "author": "test-conf-agent",
+            "scope": "test-conf",
+            "content": "auto-inferred response request",
+            "response_deadline_ms": 300_000
+        }),
+    )
+    .await;
+    assert!(
+        auto_text.contains("Context shared"),
+        "deadline-only should auto-infer response_requested: {auto_text}"
+    );
+
+    call_tool_text(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-conf-agent"}),
+    )
+    .await;
+}
+
+// ── TTL Tiers in Memory ────────────────────────────────────────────
+
+#[tokio::test]
+async fn memory_ttl_tier_config_and_validation() {
+    let (base, _server) = start_server().await;
+    let sid = initialize(&base).await;
+
+    // Configure memory namespace with TTL tiers.
+    let config_text = call_tool_text(
+        &base,
+        &sid,
+        2,
+        "configure_memory",
+        serde_json::json!({
+            "namespace": "tier_test",
+            "max_memories": 100,
+            "ttl_tiers": "{\"ephemeral\":3600000,\"session\":86400000,\"persistent\":0}"
+        }),
+    )
+    .await;
+    assert!(
+        config_text.contains("tier_test"),
+        "should confirm config: {config_text}"
+    );
+
+    // Verify tiers stored via GQL.
+    let verify_text = call_tool_text(
+        &base,
+        &sid,
+        3,
+        "gql_query",
+        serde_json::json!({
+            "query": "MATCH (c:__MemoryConfig) FILTER c.namespace = 'tier_test' RETURN c.ttl_tiers AS tiers"
+        }),
+    )
+    .await;
+    assert!(
+        verify_text.contains("ephemeral")
+            && verify_text.contains("session")
+            && verify_text.contains("persistent"),
+        "tiers should be stored in config: {verify_text}"
+    );
+
+    // Invalid tiers JSON should be rejected.
+    let bad_json = session_request(
+        &base,
+        &sid,
+        4,
+        "tools/call",
+        serde_json::json!({
+            "name": "configure_memory",
+            "arguments": {
+                "namespace": "tier_test",
+                "ttl_tiers": "not valid json"
+            }
+        }),
+    )
+    .await;
+    assert!(
+        bad_json.get("error").is_some(),
+        "invalid tiers JSON should be rejected: {bad_json}"
+    );
+
+    // Unknown tier should fail in remember.
+    let bad_tier = session_request(
+        &base,
+        &sid,
+        5,
+        "tools/call",
+        serde_json::json!({
+            "name": "remember",
+            "arguments": {
+                "namespace": "tier_test",
+                "content": "bad tier",
+                "tier": "nonexistent"
+            }
+        }),
+    )
+    .await;
+    let error_msg = bad_tier
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        error_msg.contains("unknown tier 'nonexistent'"),
+        "should report unknown tier: {bad_tier}"
+    );
+
+    // Tier + valid_until should fail (mutually exclusive).
+    let conflict = session_request(
+        &base,
+        &sid,
+        6,
+        "tools/call",
+        serde_json::json!({
+            "name": "remember",
+            "arguments": {
+                "namespace": "tier_test",
+                "content": "conflict test",
+                "tier": "ephemeral",
+                "valid_until": 9_999_999_999_999_i64
+            }
+        }),
+    )
+    .await;
+    let conflict_msg = conflict
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        conflict_msg.contains("mutually exclusive"),
+        "tier + valid_until should be rejected: {conflict}"
     );
 }

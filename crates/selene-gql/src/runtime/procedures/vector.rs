@@ -934,6 +934,103 @@ impl Procedure for RebuildVectorIndex {
     }
 }
 
+// ── vector.quantizationStats ───────────────────────────────────────
+
+/// `CALL vector.quantizationStats() YIELD method, bits, vector_count, ...`
+///
+/// Returns quantization statistics for all HNSW indexes that have quantized
+/// storage enabled. One row per HNSW namespace. Returns an empty result set
+/// when no indexes use quantization.
+pub struct QuantizationStats;
+
+impl Procedure for QuantizationStats {
+    fn name(&self) -> &'static str {
+        "vector.quantizationStats"
+    }
+
+    fn signature(&self) -> ProcedureSignature {
+        ProcedureSignature {
+            params: vec![],
+            yields: vec![
+                YieldColumn {
+                    name: "namespace",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "method",
+                    typ: GqlType::String,
+                },
+                YieldColumn {
+                    name: "bits",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "vector_count",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "quantized_bytes",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "f32_bytes",
+                    typ: GqlType::Int,
+                },
+                YieldColumn {
+                    name: "compression_ratio",
+                    typ: GqlType::Float,
+                },
+                YieldColumn {
+                    name: "rescore",
+                    typ: GqlType::Bool,
+                },
+            ],
+        }
+    }
+
+    fn execute(
+        &self,
+        _args: &[GqlValue],
+        graph: &SeleneGraph,
+        _hot_tier: Option<&HotTier>,
+        _scope: Option<&roaring::RoaringBitmap>,
+    ) -> Result<Vec<ProcedureRow>, GqlError> {
+        let mut rows = Vec::new();
+        for (ns, index) in graph.hnsw_indexes() {
+            if let Some(stats) = index.quantization_stats() {
+                let ns_display = if ns.is_empty() {
+                    "default"
+                } else {
+                    ns.as_str()
+                };
+                rows.push(smallvec![
+                    (IStr::new("namespace"), GqlValue::String(ns_display.into())),
+                    (IStr::new("method"), GqlValue::String(stats.method.into())),
+                    (IStr::new("bits"), GqlValue::Int(i64::from(stats.bits))),
+                    (
+                        IStr::new("vector_count"),
+                        GqlValue::Int(stats.vector_count as i64)
+                    ),
+                    (
+                        IStr::new("quantized_bytes"),
+                        GqlValue::Int(stats.quantized_bytes as i64)
+                    ),
+                    (
+                        IStr::new("f32_bytes"),
+                        GqlValue::Int(stats.f32_bytes as i64)
+                    ),
+                    (
+                        IStr::new("compression_ratio"),
+                        GqlValue::Float(f64::from(stats.compression_ratio))
+                    ),
+                    (IStr::new("rescore"), GqlValue::Bool(stats.rescore)),
+                ]);
+            }
+        }
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1156,5 +1253,85 @@ mod tests {
         let result = cosine_similarity(&a, &b);
         // Known value: 32 / (sqrt(14) * sqrt(77)) ≈ 0.9746
         assert!((result - 0.9746).abs() < 0.001);
+    }
+
+    #[test]
+    fn quantization_stats_empty_when_no_quantization() {
+        let g = SeleneGraph::new();
+        let rows = QuantizationStats.execute(&[], &g, None, None).unwrap();
+        assert!(rows.is_empty(), "expected no rows when no HNSW indexes");
+    }
+
+    #[test]
+    fn quantization_stats_returns_stats_for_quantized_index() {
+        use selene_graph::hnsw::{HnswIndex, HnswParams, QuantBits, QuantizationConfig};
+
+        let mut g = SeleneGraph::new();
+        let prop = IStr::new("embedding");
+        let dims = 64;
+
+        // Create nodes with vectors.
+        for i in 0..10u64 {
+            let labels = LabelSet::from_strs(&["item"]);
+            let mut v = vec![0.0f32; dims];
+            v[i as usize % dims] = 1.0;
+            let mag = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= mag;
+            }
+            let mut props = PropertyMap::new();
+            props.insert(prop, Value::Vector(Arc::from(v)));
+            let mut m = g.mutate();
+            m.create_node(labels, props).unwrap();
+            m.commit(0).unwrap();
+        }
+
+        // Build a quantized HNSW index.
+        let params = HnswParams::default().with_quantization(QuantizationConfig {
+            bits: QuantBits::Four,
+            seed: 42,
+            rescore: false,
+        });
+        let index = HnswIndex::new(params, dims as u16);
+        let vectors: Vec<_> = g
+            .all_node_ids()
+            .filter_map(|nid| {
+                let n = g.get_node(nid)?;
+                let v = n.properties.get(prop)?;
+                if let Value::Vector(vec) = v {
+                    Some((nid, Arc::clone(vec)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        index.rebuild(vectors);
+        index.snapshot();
+
+        g.set_hnsw_index(Arc::new(index));
+
+        // Execute the procedure.
+        let rows = QuantizationStats.execute(&[], &g, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // Verify key fields.
+        let row = &rows[0];
+        // namespace = "default"
+        assert_eq!(row[0].1, GqlValue::String("default".into()));
+        // method = "PolarQuant"
+        assert_eq!(row[1].1, GqlValue::String("PolarQuant".into()));
+        // bits = 4
+        assert_eq!(row[2].1, GqlValue::Int(4));
+        // vector_count = 10
+        assert_eq!(row[3].1, GqlValue::Int(10));
+        // compression_ratio > 1.0
+        if let GqlValue::Float(ratio) = &row[6].1 {
+            assert!(
+                *ratio > 1.0,
+                "compression ratio should be > 1.0, got {ratio}"
+            );
+        } else {
+            panic!("expected Float for compression_ratio");
+        }
     }
 }

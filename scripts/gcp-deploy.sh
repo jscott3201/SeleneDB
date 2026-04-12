@@ -21,11 +21,12 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────
 PROJECT="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
-REGION="${GCP_REGION:-us-central1}"
-ZONE="${GCP_ZONE:-us-central1-a}"
+REGION="${GCP_REGION:-us-east1}"
+ZONE="${GCP_ZONE:-us-east1-c}"
 VM_NAME="${VM_NAME:-selene-gpu}"
-MACHINE_TYPE="${MACHINE_TYPE:-n1-highmem-4}"
-GPU_TYPE="nvidia-tesla-t4"
+MACHINE_TYPE="${MACHINE_TYPE:-g2-standard-4}"
+PROVISIONING="${PROVISIONING:-STANDARD}"  # STANDARD or SPOT
+GPU_TYPE="${GPU_TYPE:-nvidia-l4}"
 GPU_COUNT=1
 DISK_SIZE="50GB"
 DISK_NAME="${VM_NAME}-data"
@@ -94,7 +95,7 @@ create_vm() {
         return
     fi
 
-    log "Creating Spot VM: ${VM_NAME} (${MACHINE_TYPE} + ${GPU_TYPE})"
+    log "Creating ${PROVISIONING} VM: ${VM_NAME} (${MACHINE_TYPE} + ${GPU_TYPE})"
 
     # Startup script: auto-install GPU drivers and mount data disk on boot
     local startup_script
@@ -122,13 +123,27 @@ fi
 STARTUP
     )
 
+    # Build provisioning flags based on model
+    local -a provisioning_flags
+    if [[ "${PROVISIONING}" == "SPOT" ]]; then
+        provisioning_flags=(
+            --provisioning-model=SPOT
+            --instance-termination-action=STOP
+            --maintenance-policy=TERMINATE
+        )
+    else
+        provisioning_flags=(
+            --provisioning-model=STANDARD
+            --maintenance-policy=TERMINATE
+            --restart-on-failure
+        )
+    fi
+
     gcloud compute instances create "${VM_NAME}" \
         --zone="${ZONE}" \
         --machine-type="${MACHINE_TYPE}" \
         --accelerator="type=${GPU_TYPE},count=${GPU_COUNT}" \
-        --maintenance-policy=TERMINATE \
-        --provisioning-model=SPOT \
-        --instance-termination-action=STOP \
+        "${provisioning_flags[@]}" \
         --boot-disk-size="${BOOT_DISK_SIZE}" \
         --boot-disk-type=pd-balanced \
         --image-family=cos-113-lts \

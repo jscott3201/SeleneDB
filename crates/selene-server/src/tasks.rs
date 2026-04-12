@@ -13,6 +13,7 @@ use selene_persist::snapshot::{
 use selene_ts::flush::FlushTask;
 use selene_ts::retention;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::bootstrap::ServerState;
 
@@ -57,9 +58,12 @@ pub fn spawn_background_tasks(
     if !state.replica.is_replica {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            snapshot_loop(s, snapshot_interval, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                snapshot_loop(s, snapshot_interval, token).await;
+            }
+            .instrument(tracing::info_span!("snapshot_loop")),
+        ));
     }
 
     // TS flush task
@@ -67,17 +71,23 @@ pub fn spawn_background_tasks(
         Duration::from_secs(u64::from(state.config.ts.flush_interval_minutes.max(1)) * 60);
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        ts_flush_loop(s, flush_interval, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            ts_flush_loop(s, flush_interval, token).await;
+        }
+        .instrument(tracing::info_span!("ts_flush_loop")),
+    ));
 
     // TS retention task (runs once per hour)
     let retention_days = state.config.ts.medium_retention_days;
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        ts_retention_loop(s, retention_days, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            ts_retention_loop(s, retention_days, token).await;
+        }
+        .instrument(tracing::info_span!("ts_retention_loop")),
+    ));
 
     // TS compaction task (runs once per compact_after_hours)
     if state.config.ts.compact_after_hours > 0 {
@@ -85,17 +95,23 @@ pub fn spawn_background_tasks(
             Duration::from_secs(u64::from(state.config.ts.compact_after_hours) * 3600);
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            ts_compact_loop(s, compact_interval, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                ts_compact_loop(s, compact_interval, token).await;
+            }
+            .instrument(tracing::info_span!("ts_compact_loop")),
+        ));
     }
 
     // Metrics update task (every 10 seconds)
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        metrics_update_loop(s, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            metrics_update_loop(s, token).await;
+        }
+        .instrument(tracing::info_span!("metrics_update_loop")),
+    ));
 
     // Auto-embed task (vector service with configured rules)
     // Built-in rule: __Memory nodes always get auto-embedding on the content property.
@@ -116,9 +132,12 @@ pub fn spawn_background_tasks(
         let s = Arc::clone(&state);
         let token = cancel.clone();
         let rules = auto_embed_rules;
-        handles.push(tokio::spawn(async move {
-            auto_embed_loop(s, rules, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                auto_embed_loop(s, rules, token).await;
+            }
+            .instrument(tracing::info_span!("auto_embed_loop")),
+        ));
     }
 
     // Search index updater
@@ -129,9 +148,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            search_index_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                search_index_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("search_index_loop")),
+        ));
     }
 
     // Stats collector changelog subscriber (always-on)
@@ -142,9 +164,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            stats_collector_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                stats_collector_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("stats_collector_loop")),
+        ));
     }
 
     // Materialized view changelog subscriber
@@ -155,9 +180,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            view_state_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                view_state_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("view_state_loop")),
+        ));
     }
 
     // Vector store changelog subscriber
@@ -168,9 +196,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            vector_store_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                vector_store_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("vector_store_loop")),
+        ));
     }
 
     // Version store pruning (temporal service)
@@ -182,27 +213,48 @@ pub fn spawn_background_tasks(
         let s = Arc::clone(&state);
         let token = cancel.clone();
         let prune_hours = state.config.temporal.prune_interval_hours;
-        handles.push(tokio::spawn(async move {
-            version_prune_loop(s, prune_hours, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                version_prune_loop(s, prune_hours, token).await;
+            }
+            .instrument(tracing::info_span!("version_prune_loop")),
+        ));
     }
 
     // Bidirectional sync task (edge-to-hub push + hub-to-edge pull)
     if state.config.sync.is_enabled() {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            crate::sync_task::run_sync_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                crate::sync_task::run_sync_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("sync_loop")),
+        ));
     }
 
     // HNSW index rebuild task
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            hnsw_rebuild_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                hnsw_rebuild_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("hnsw_rebuild_loop")),
+        ));
+    }
+
+    // Agent session reaper — marks stale sessions, releases orphaned intents
+    if !state.replica.is_replica {
+        let s = Arc::clone(&state);
+        let token = cancel.clone();
+        handles.push(tokio::spawn(
+            async move {
+                agent_session_reaper(s, token).await;
+            }
+            .instrument(tracing::info_span!("agent_session_reaper")),
+        ));
     }
 
     tracing::info!(
@@ -291,6 +343,7 @@ async fn snapshot_loop(state: Arc<ServerState>, interval: Duration, cancel: Canc
 }
 
 /// Snapshot the current graph state and truncate the WAL.
+#[tracing::instrument(skip_all)]
 pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
     // Hold WAL lock across graph read + truncate to prevent data loss race.
     // Mutations queue in the WAL coalescer channel until the lock is released.
@@ -1426,6 +1479,233 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
                         hnsw.snapshot();
                     }
                 }
+            }
+        }
+    }
+}
+
+// ── Agent session reaper ────────────────────────────────────────
+
+/// Stale threshold: active sessions without heartbeat for 10 minutes are marked stale.
+const AGENT_STALE_THRESHOLD_MS: i64 = 10 * 60 * 1000;
+/// Safety threshold: `working_locally` sessions without heartbeat for 30 minutes
+/// are marked stale (catches crashed agents that declared local work).
+const AGENT_WORKING_LOCALLY_THRESHOLD_MS: i64 = 30 * 60 * 1000;
+/// Reaper sweep interval: 2 minutes.
+const AGENT_REAPER_INTERVAL_SECS: u64 = 120;
+
+/// Background task that marks stale agent sessions and releases their intents.
+///
+/// Runs every 2 minutes. Two sweeps per tick:
+/// 1. Active sessions without heartbeat for 10+ min → stale
+/// 2. `working_locally` sessions without heartbeat for 30+ min → stale (safety net)
+async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken) {
+    let mut tick = tokio::time::interval(Duration::from_secs(AGENT_REAPER_INTERVAL_SECS));
+    tick.tick().await; // skip immediate first tick
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = cancel.cancelled() => {
+                tracing::debug!("agent session reaper shutting down");
+                return;
+            }
+        }
+
+        let now_ms = selene_core::now_nanos() / 1_000_000;
+        let auth = crate::auth::handshake::AuthContext::dev_admin();
+
+        // Sweep 1: active sessions past the 10-minute threshold
+        let active_threshold = now_ms - AGENT_STALE_THRESHOLD_MS;
+        reap_stale_agents(&state, &auth, "active", active_threshold).await;
+
+        // Sweep 2: working_locally sessions past the 30-minute safety threshold
+        let local_threshold = now_ms - AGENT_WORKING_LOCALLY_THRESHOLD_MS;
+        reap_stale_agents(&state, &auth, "working_locally", local_threshold).await;
+
+        // Sweep 3: mark overdue response-requested context
+        mark_overdue_responses(&state, &auth, now_ms).await;
+    }
+}
+
+/// Mark `__SharedContext` nodes as overdue when their response deadline has passed.
+async fn mark_overdue_responses(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::handshake::AuthContext,
+    now_ms: i64,
+) {
+    use std::collections::HashMap;
+
+    let mut params = HashMap::new();
+    params.insert("now".into(), selene_core::Value::Int(now_ms));
+
+    // Single mutation: find all overdue contexts and mark them in one pass.
+    let query = "MATCH (c:__SharedContext) \
+                 FILTER c.response_requested = true \
+                 AND c.response_deadline_at > 0 \
+                 AND c.response_deadline_at < $now \
+                 AND c.response_overdue IS NULL \
+                 SET c.response_overdue = true \
+                 RETURN count(c) AS marked";
+
+    let st = Arc::clone(state);
+    let auth2 = auth.clone();
+    let mark_result = state
+        .mutation_batcher
+        .submit(move || {
+            crate::ops::gql::execute_gql(
+                &st,
+                &auth2,
+                query,
+                Some(&params),
+                false,
+                false,
+                crate::ops::gql::ResultFormat::Json,
+            )
+        })
+        .await;
+
+    match mark_result {
+        Ok(Ok(r)) => {
+            let count: i64 = r
+                .data_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
+                .and_then(|rows| rows.first().cloned())
+                .and_then(|row| row.get("marked").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            if count > 0 {
+                tracing::debug!("marked {count} context(s) as response overdue");
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("response deadline sweep mutation failed: {e}");
+        }
+        Err(e) => {
+            tracing::warn!("response deadline sweep submit failed: {e}");
+        }
+    }
+}
+
+/// Find agents with the given `status` whose heartbeat is older than
+/// `threshold_ms`, mark them stale, and release their exclusive/locked intents.
+async fn reap_stale_agents(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::handshake::AuthContext,
+    status: &str,
+    threshold_ms: i64,
+) {
+    use std::collections::HashMap;
+
+    let mut params = HashMap::new();
+    params.insert("threshold".into(), selene_core::Value::Int(threshold_ms));
+    params.insert("status".into(), selene_core::Value::from(status));
+
+    let stale_query = "MATCH (a:__AgentSession) \
+                        FILTER a.status = $status AND a.heartbeat_at < $threshold \
+                        RETURN id(a) AS id, a.agent_id AS agent_id";
+
+    let stale_result = crate::ops::gql::execute_gql(
+        state,
+        auth,
+        stale_query,
+        Some(&params),
+        false,
+        false,
+        crate::ops::gql::ResultFormat::Json,
+    );
+
+    let stale_agents: Vec<serde_json::Value> = match stale_result {
+        Ok(r) => {
+            serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default()
+        }
+        Err(e) => {
+            tracing::warn!(status, "agent reaper: failed to query stale sessions: {e}");
+            return;
+        }
+    };
+
+    for agent in &stale_agents {
+        let agent_id = agent
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        tracing::info!(agent_id, status, "marking agent session stale");
+
+        // Mark session as stale
+        let mut mark_params = HashMap::new();
+        mark_params.insert("aid".into(), selene_core::Value::from(agent_id));
+
+        let mark_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
+                           SET a.status = 'stale'";
+
+        let st = Arc::clone(state);
+        let auth2 = auth.clone();
+        let mark_result = state
+            .mutation_batcher
+            .submit(move || {
+                crate::ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    mark_query,
+                    Some(&mark_params),
+                    false,
+                    false,
+                    crate::ops::gql::ResultFormat::Json,
+                )
+            })
+            .await;
+
+        match mark_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(agent_id, "failed to mark session stale: {e}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(agent_id, "batcher error marking session stale: {e}");
+                continue;
+            }
+        }
+
+        // Release exclusive/locked intents for this agent
+        let mut release_params = HashMap::new();
+        release_params.insert("aid".into(), selene_core::Value::from(agent_id));
+
+        let release_query = "MATCH (i:__Intent {agent_id: $aid}) \
+                              FILTER i.status = 'claimed' \
+                              AND (i.level = 'exclusive' OR i.level = 'locked') \
+                              SET i.status = 'released' \
+                              RETURN count(i) AS released";
+
+        let st = Arc::clone(state);
+        let auth2 = auth.clone();
+        let release_result = state
+            .mutation_batcher
+            .submit(move || {
+                crate::ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    release_query,
+                    Some(&release_params),
+                    false,
+                    false,
+                    crate::ops::gql::ResultFormat::Json,
+                )
+            })
+            .await;
+
+        match release_result {
+            Ok(Ok(r)) => {
+                let data = r.data_json.unwrap_or_default();
+                tracing::info!(agent_id, released = %data, "released stale agent intents");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(agent_id, "failed to release intents: {e}");
+            }
+            Err(e) => {
+                tracing::warn!(agent_id, "batcher error releasing intents: {e}");
             }
         }
     }

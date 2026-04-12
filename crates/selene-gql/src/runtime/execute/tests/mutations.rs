@@ -477,6 +477,68 @@ fn mutation_without_parameters_still_works() {
     assert_eq!(result.mutations.nodes_created, 1);
 }
 
+// ── MERGE + QueryBuilder parameter matching (regression test) ──
+
+/// Reproduces a bug where MERGE creates a node with parameters, but
+/// a subsequent QueryBuilder MATCH with the same parameters in a property
+/// pattern `{key: $param}` fails to find the node. FILTER works correctly.
+#[test]
+fn merge_then_query_with_property_pattern_parameters() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    let mut params = ParameterMap::new();
+    params.insert(IStr::new("ns"), GqlValue::String(SmolStr::new("test_ns")));
+
+    // Step 1: MERGE creates the node.
+    let r = MutationBuilder::new("MERGE (c:Config {namespace: $ns}) SET c.value = 'hello'")
+        .with_parameters(&params)
+        .execute(&shared)
+        .unwrap();
+    assert_eq!(r.mutations.nodes_created, 1, "MERGE should create a node");
+
+    let graph = shared.load_snapshot();
+
+    // Step 2a: MATCH with property pattern + parameter — the suspected broken path.
+    let r_pattern = QueryBuilder::new(
+        "MATCH (c:Config {namespace: $ns}) RETURN c.value AS val",
+        &graph,
+    )
+    .with_parameters(&params)
+    .execute()
+    .unwrap();
+    assert_eq!(
+        r_pattern.row_count(),
+        1,
+        "MATCH with property pattern {{namespace: $ns}} should find the MERGE-created node"
+    );
+
+    // Step 2b: MATCH with FILTER + parameter — the known working path.
+    let r_filter = QueryBuilder::new(
+        "MATCH (c:Config) FILTER c.namespace = $ns RETURN c.value AS val",
+        &graph,
+    )
+    .with_parameters(&params)
+    .execute()
+    .unwrap();
+    assert_eq!(
+        r_filter.row_count(),
+        1,
+        "MATCH with FILTER c.namespace = $ns should find the node"
+    );
+
+    // Step 2c: MATCH with literal — control.
+    let r_literal = QueryBuilder::new(
+        "MATCH (c:Config {namespace: 'test_ns'}) RETURN c.value AS val",
+        &graph,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(
+        r_literal.row_count(),
+        1,
+        "MATCH with literal should find the node"
+    );
+}
+
 // ── WHERE clause in mutations (regression tests) ──
 
 #[test]

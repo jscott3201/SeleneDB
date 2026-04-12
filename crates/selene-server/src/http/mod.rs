@@ -132,6 +132,60 @@ fn validate_mcp_bearer(
     Err(AuthFailure::Invalid("invalid token".into()))
 }
 
+/// Middleware that enriches rmcp's bare "Session not found" 404 responses
+/// with an actionable JSON body, `Retry-After` header, and logging.
+///
+/// The MCP spec requires 404 for expired/unknown sessions, so we keep the
+/// status code but replace the opaque text body with structured JSON that
+/// tells clients *why* the request failed and *how* to recover.
+async fn enrich_session_expiry(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    timeout_secs: u64,
+) -> axum::response::Response {
+    let has_session_header = req.headers().contains_key("mcp-session-id");
+    let resp = next.run(req).await;
+
+    // Only rewrite 404s that carried an Mcp-Session-Id (i.e. expired sessions,
+    // not brand-new requests that never had a session).
+    if resp.status() != axum::http::StatusCode::NOT_FOUND || !has_session_header {
+        return resp;
+    }
+
+    // Only rewrite plain-text 404s from rmcp (not our own JSON error responses).
+    let is_json = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if is_json {
+        return resp;
+    }
+
+    tracing::info!(
+        "MCP session expired or not found — returning enriched 404 with recovery instructions"
+    );
+
+    let json_body = serde_json::json!({
+        "error": "session_expired",
+        "message": format!(
+            "Your MCP session has expired or was not found. \
+             Sessions expire after {timeout_secs} seconds of inactivity. \
+             To recover, send a new `initialize` request without \
+             the Mcp-Session-Id header to create a fresh session."
+        ),
+        "ttl_seconds": timeout_secs,
+        "recovery": "Send a new initialize request without Mcp-Session-Id to create a fresh session."
+    });
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::NOT_FOUND)
+        .header("content-type", "application/json")
+        .header("retry-after", "0")
+        .body(axum::body::Body::from(json_body.to_string()))
+        .expect("valid response")
+}
+
 /// Build the axum router with all routes.
 pub fn router(state: Arc<ServerState>) -> Router {
     let app = Router::new()
@@ -242,6 +296,8 @@ pub fn router(state: Arc<ServerState>) -> Router {
         let mut sse_config = rmcp::transport::StreamableHttpServerConfig::default();
         sse_config.sse_keep_alive = Some(std::time::Duration::from_secs(30));
 
+        let timeout_secs = state.config.mcp.session_timeout_secs;
+
         if state.config.dev_mode {
             // Dev mode: no auth middleware, static dev_admin context.
             let mcp_state = state.clone();
@@ -255,7 +311,14 @@ pub fn router(state: Arc<ServerState>) -> Router {
                 session_manager,
                 sse_config,
             );
-            app.route("/mcp", axum::routing::any_service(mcp_service))
+            app.route(
+                "/mcp",
+                axum::routing::any_service(mcp_service).layer(axum::middleware::from_fn(
+                    move |req, next: axum::middleware::Next| {
+                        enrich_session_expiry(req, next, timeout_secs)
+                    },
+                )),
+            )
         } else {
             // Production: require Bearer JWT or static API key.
             //
@@ -286,18 +349,24 @@ pub fn router(state: Arc<ServerState>) -> Router {
             let middleware_state = state.clone();
             app.route(
                 "/mcp",
-                axum::routing::any_service(mcp_service).layer(axum::middleware::from_fn(
-                    move |req, next: axum::middleware::Next| {
-                        let st = middleware_state.clone();
-                        let key = api_key.clone();
-                        async move {
-                            match validate_mcp_bearer(&st, &key, &req) {
-                                Ok(auth) => MCP_AUTH_CTX.scope(auth, next.run(req)).await,
-                                Err(failure) => unauthorized_response(failure),
+                axum::routing::any_service(mcp_service)
+                    .layer(axum::middleware::from_fn(
+                        move |req, next: axum::middleware::Next| {
+                            enrich_session_expiry(req, next, timeout_secs)
+                        },
+                    ))
+                    .layer(axum::middleware::from_fn(
+                        move |req, next: axum::middleware::Next| {
+                            let st = middleware_state.clone();
+                            let key = api_key.clone();
+                            async move {
+                                match validate_mcp_bearer(&st, &key, &req) {
+                                    Ok(auth) => MCP_AUTH_CTX.scope(auth, next.run(req)).await,
+                                    Err(failure) => unauthorized_response(failure),
+                                }
                             }
-                        }
-                    },
-                )),
+                        },
+                    )),
             )
         }
     } else {

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g. v0.1.0)"
+        description: "Version tag (e.g. v1.0.0)"
         required: true
         type: string
 
@@ -22,12 +22,18 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/selenedb
 
 jobs:
+  # ── Preflight ──────────────────────────────────────────────────────
   preflight:
     name: Verify tag is on main
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
+          # For dispatch, checkout the specified tag/ref so merge-base check
+          # validates the actual release commit, not the default branch HEAD.
+          ref: ${{ inputs.version || github.ref }}
           fetch-depth: 0
       - name: Check tag is reachable from main
         run: |
@@ -36,8 +42,19 @@ jobs:
             echo "::error::Tag is not on main branch. Release aborted."
             exit 1
           fi
+      - name: Extract version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "version=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
-  # Gate: CI must pass before building images.
+  # Gate: CI must pass before building anything.
   ci:
     name: CI Gate
     needs: preflight
@@ -45,11 +62,10 @@ jobs:
     permissions:
       contents: read
 
-  # Each platform builds natively (no QEMU), then a merge job creates
-  # the multi-arch manifest with release tags.
-  build:
-    name: Build (${{ matrix.arch }})
-    needs: ci
+  # ── CPU Docker Images (multi-arch: amd64 + arm64) ─────────────────
+  build-cpu:
+    name: Docker CPU (${{ matrix.arch }})
+    needs: [ci, preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +79,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -80,7 +98,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: |
-            org.opencontainers.image.description=Lightweight in-memory property graph runtime for IoT and smart buildings
+            org.opencontainers.image.description=Lightweight in-memory property graph runtime
             org.opencontainers.image.licenses=MIT OR Apache-2.0
 
       - name: Build and push by digest
@@ -90,8 +108,8 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          cache-from: type=gha,scope=cpu-${{ matrix.arch }}
+          cache-to: type=gha,scope=cpu-${{ matrix.arch }},mode=max
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -103,13 +121,13 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.arch }}
+          name: cpu-digest-${{ matrix.arch }}
           path: /tmp/digests/*
           retention-days: 1
 
-  create-manifest:
-    name: Create manifest
-    needs: build
+  create-cpu-manifest:
+    name: CPU manifest
+    needs: [build-cpu, preflight]
     runs-on: ubuntu-latest
     steps:
       - name: Set up Docker Buildx
@@ -128,9 +146,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=semver,pattern=v{{version}},value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{version}}-cpu,value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}}-cpu,value=${{ needs.preflight.outputs.version }}
           flavor: |
             latest=true
 
@@ -138,7 +157,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digest-*
+          pattern: cpu-digest-*
           merge-multiple: true
 
       - name: Create manifest list
@@ -151,17 +170,165 @@ jobs:
       - name: Inspect manifest
         run: docker buildx imagetools inspect $(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
 
+  # ── CUDA Docker Image (amd64 only) ────────────────────────────────
+  # Requires HF_TOKEN secret for EmbeddingGemma model download.
+  build-cuda:
+    name: Docker CUDA
+    needs: [ci, preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern=v{{version}}-cuda,value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}}-cuda,value=${{ needs.preflight.outputs.version }}
+            type=raw,value=cuda-latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.gpu
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=cuda
+          cache-to: type=gha,scope=cuda,mode=max
+          secrets: |
+            hf_token=${{ secrets.HF_TOKEN }}
+
+  # ── Native Binaries ───────────────────────────────────────────────
+  # Builds selene-server and selene CLI for four targets.
+  # macOS arm64 includes Metal GPU acceleration.
+  # RUSTFLAGS overrides .cargo/config.toml target-cpu=native for portable binaries.
+  build-binaries:
+    name: Binary (${{ matrix.target }})
+    needs: [ci, preflight]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            os: linux
+            features: dev-tls
+            rustflags: "-Ctarget-cpu=x86-64"
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            os: linux
+            features: dev-tls
+            rustflags: "-Ctarget-cpu=generic"
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            os: macos
+            features: dev-tls,metal
+            rustflags: "-Ctarget-cpu=apple-m1"
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            os: macos
+            features: dev-tls
+            rustflags: "-Ctarget-cpu=x86-64"
+    runs-on: ${{ matrix.runner }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build selene-server
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p selene-server --features ${{ matrix.features }}
+
+      - name: Build selene CLI
+        run: cargo build --release --target ${{ matrix.target }} -p selene-cli
+
+      - name: Package tarball
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          ARCHIVE="selene-${RELEASE_VERSION}-${{ matrix.target }}"
+          mkdir -p "${ARCHIVE}"
+          cp "target/${{ matrix.target }}/release/selene-server" "${ARCHIVE}/"
+          cp "target/${{ matrix.target }}/release/selene" "${ARCHIVE}/"
+          cp LICENSE-MIT LICENSE-APACHE "${ARCHIVE}/"
+          tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
+          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            selene-*.tar.gz
+            selene-*.tar.gz.sha256
+          retention-days: 1
+
+  # ── GitHub Release ─────────────────────────────────────────────────
+  # Waits for all build tracks, then creates a release with binaries.
   release:
     name: Create GitHub Release
-    needs: [create-manifest]
+    needs: [create-cpu-manifest, build-cuda, build-binaries, preflight]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.version }}
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/artifacts
+          pattern: binary-*
+          merge-multiple: true
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.preflight.outputs.version }}
           generate_release_notes: true
+          files: |
+            /tmp/artifacts/*.tar.gz
+            /tmp/artifacts/*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

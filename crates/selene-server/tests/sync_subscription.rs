@@ -15,14 +15,13 @@ use selene_wire::dto::sync::{
     SubscriptionConfig, SubscriptionRuleConfig, SyncDirectionConfig, SyncSubscribeRequest,
 };
 
+mod support;
+
 use selene_server::auth::handshake::AuthContext;
 use selene_server::bootstrap::ServerState;
 use selene_server::config::SyncConfig;
 use selene_server::handle_sync_subscribe;
-
-fn admin() -> AuthContext {
-    AuthContext::dev_admin()
-}
+use support::admin;
 
 /// Build a simple sensor subscription that matches nodes labelled "Sensor"
 /// with building = "HQ".

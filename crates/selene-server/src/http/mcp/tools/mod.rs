@@ -1,6 +1,7 @@
 //! MCP tool implementations for graph, time-series, schema, and data operations.
 
 mod ai;
+mod bridge;
 mod memory;
 mod principals;
 mod proposals;
@@ -20,7 +21,7 @@ use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
 use crate::ops::json_to_value;
-use selene_core::Value;
+use selene_core::{IStr, NodeId, Value};
 
 #[tool_router]
 impl SeleneTools {
@@ -1270,7 +1271,7 @@ impl SeleneTools {
 
     #[tool(
         name = "semantic_search",
-        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Requires the embedding model to be loaded.",
+        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Use summary_mode=true for compact results (name/labels/score only). Use max_property_length to truncate long property values when include_properties=true. Supports pagination via offset (k is page size). Requires the embedding model to be loaded.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1293,9 +1294,14 @@ impl SeleneTools {
             });
         }
 
+        // Request k + offset from the engine so pagination can reach beyond
+        // the first k results.
+        let offset = p.offset.unwrap_or(0).max(0) as usize;
+        let effective_k = p.k + offset as i64;
+
         let mut gql_params = HashMap::new();
         gql_params.insert("queryText".into(), Value::from(p.query_text.as_str()));
-        gql_params.insert("k".into(), Value::Int(p.k));
+        gql_params.insert("k".into(), Value::Int(effective_k));
 
         let query = if let Some(ref label) = p.label {
             gql_params.insert("label".into(), Value::from(label.as_str()));
@@ -1317,19 +1323,40 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let all_rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        let total = all_rows.len();
+
+        // Apply offset — we requested k+offset from the engine, now slice.
+        let rows: Vec<serde_json::Value> = all_rows
+            .into_iter()
+            .skip(offset)
+            .take(p.k as usize)
+            .collect();
+
+        let summary = p.summary_mode.unwrap_or(false);
         let include_props = p.include_properties.unwrap_or(false);
-        if !include_props {
-            let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+
+        if !include_props && !summary {
             let text = format!(
-                "Semantic search for '{}': {} results\n{data}",
-                p.query_text, result.row_count
+                "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
+                p.query_text,
+                total,
+                rows.len(),
+                offset,
+                format_json(&rows)
             );
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        // Enrich results with full node properties
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        // Enrich results — summary_mode returns lightweight data,
+        // full mode returns complete node properties.
+        let max_prop_len = p.max_property_length.unwrap_or(0);
+
+        // Load graph snapshot once to avoid per-node ArcSwap::load.
+        // Refresh auth scope first so in_scope() checks are current.
+        let auth = ops::refresh_scope_if_stale(&self.state, &auth);
+        let snapshot = self.state.graph.load_snapshot();
 
         let enriched: Vec<serde_json::Value> = rows
             .into_iter()
@@ -1339,19 +1366,53 @@ impl SeleneTools {
                     .and_then(|v| v.as_i64())
                     .map_or(0, |v| v as u64);
                 let mut enriched = row;
-                if let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id) {
-                    enriched["node"] = serde_json::to_value(&node).unwrap_or_default();
+                let nid = NodeId(node_id);
+                if auth.in_scope(nid)
+                    && let Some(node) = snapshot.get_node(nid)
+                {
+                    if summary {
+                        // Lightweight: read name + labels directly from NodeRef,
+                        // avoiding full node_to_dto clone.
+                        if let Some(name_val) = node.properties.get(IStr::new("name")) {
+                            enriched["name"] = serde_json::to_value(name_val).unwrap_or_default();
+                        }
+                        let labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+                        enriched["labels"] = serde_json::to_value(&labels).unwrap_or_default();
+                    } else {
+                        let dto = ops::node_to_dto(node);
+                        let mut node_json = serde_json::to_value(&dto).unwrap_or_default();
+                        if max_prop_len > 0 {
+                            truncate_property_values(&mut node_json, max_prop_len);
+                        }
+                        enriched["node"] = node_json;
+                    }
                 }
                 enriched
             })
             .collect();
 
-        let text = format!(
-            "Semantic search for '{}': {} results\n{}",
+        let mut text = format!(
+            "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
             p.query_text,
+            total,
             enriched.len(),
+            offset,
             format_json(&enriched)
         );
+
+        // Response size guard (char-boundary safe)
+        const MAX_RESPONSE_BYTES: usize = 50_000;
+        if text.len() > MAX_RESPONSE_BYTES {
+            let truncate_at = text
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .take_while(|&idx| idx <= MAX_RESPONSE_BYTES)
+                .last()
+                .unwrap_or(0);
+            text.truncate(truncate_at);
+            text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
+        }
+
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -1405,6 +1466,53 @@ impl SeleneTools {
             p.node_id, result.row_count
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    // ── Vector Quantization Stats ────────────────────────────────────
+
+    #[tool(
+        name = "quantization_stats",
+        description = "Get vector quantization statistics for all HNSW indexes. \
+        Returns compression method, bit width, vector count, memory saved, and \
+        compression ratio. Empty result when quantization is not enabled.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn quantization_stats(&self) -> Result<CallToolResult, McpError> {
+        let auth = mcp_auth(self)?;
+        let query = "CALL vector.quantizationStats() YIELD namespace, method, bits, vector_count, \
+             quantized_bytes, f32_bytes, compression_ratio, rescore \
+             RETURN namespace, method, bits, vector_count, quantized_bytes, \
+             f32_bytes, compression_ratio, rescore";
+
+        let result = ops::gql::execute_gql(
+            &self.state,
+            &auth,
+            query,
+            None,
+            false,
+            false,
+            ops::gql::ResultFormat::Json,
+        )
+        .map_err(op_err)?;
+
+        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        if result.row_count == 0 {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No quantized HNSW indexes found. Enable quantization in config \
+                 with hnsw_quantize = true under [vector].",
+            )]))
+        } else {
+            let text = format!(
+                "Quantization stats ({} index(es)):\n{data}",
+                result.row_count
+            );
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }
     }
 
     // ── Entity Resolution + Neighborhood ─────────────────────────────
@@ -1821,7 +1929,7 @@ impl SeleneTools {
 
     #[tool(
         name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity (configurable via configure_memory).",
+        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Use tier (e.g., 'ephemeral', 'session', 'persistent') for named TTL tiers configured via configure_memory, or valid_until for explicit expiry (mutually exclusive). Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1866,7 +1974,7 @@ impl SeleneTools {
 
     #[tool(
         name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), and eviction policy ('clock' default, 'oldest', or 'lowest_confidence'). Settings persist in a __MemoryConfig node.",
+        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), eviction policy ('clock' default, 'oldest', or 'lowest_confidence'), and named TTL tiers (ttl_tiers JSON object mapping tier names to ms, e.g., {\"ephemeral\": 3600000, \"session\": 86400000, \"persistent\": 0}). Settings persist in a __MemoryConfig node.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1887,7 +1995,9 @@ impl SeleneTools {
         name = "log_trace",
         description = "Log a tool interaction trace for training data collection. \
         Called by the agent orchestrator after each tool call, not by the agent itself. \
-        Stores as a __Trace node for later export via export_traces.",
+        Stores as a __Trace node for later export via export_traces. \
+        Optional fields: thinking (reasoning chain), user_query (prompt that triggered \
+        the call), about_node_ids (entity node IDs to link via :about edges).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1919,6 +2029,46 @@ impl SeleneTools {
         params: Parameters<ExportTracesParams>,
     ) -> Result<CallToolResult, McpError> {
         traces::export_traces_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "log_session",
+        description = "Log session-level metadata for training data context. \
+        Called once per session before log_trace calls. Creates or updates a \
+        __TraceSession node with building, operator, weather, and system prompt \
+        context. Idempotent: calling again for the same session_id updates the metadata.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn log_session(
+        &self,
+        params: Parameters<LogSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::log_session_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "log_outcome",
+        description = "Record whether a trace session achieved its desired outcome. \
+        Called after the session completes. Creates or updates a __TraceOutcome node. \
+        Enables quality scoring: traces from successful sessions are high-confidence \
+        training examples. Idempotent per session_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn log_outcome(
+        &self,
+        params: Parameters<LogOutcomeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        traces::log_outcome_impl(self, params.0).await
     }
 
     // ── Action Proposals ────────────────────────────────────────────
@@ -2125,6 +2275,386 @@ impl SeleneTools {
         params: Parameters<RotateCredentialParams>,
     ) -> Result<CallToolResult, McpError> {
         principals::rotate_credential_impl(self, params.0).await
+    }
+
+    // ── Context Bridge: multi-agent coordination ────────────────────
+
+    #[tool(
+        name = "register_agent",
+        description = "Register or update an agent session for multi-agent coordination. Creates an __AgentSession node with presence info. Optionally provide structured capabilities: supported_tools, domain_expertise, model_family, context_window. Returns active Convention nodes for the project. Discover peers via list_agents or find_capable_agent.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn register_agent(
+        &self,
+        params: Parameters<RegisterAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::register_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "heartbeat",
+        description = "Update agent session liveness. Must be called periodically (recommended: every 60s) to prevent the session from being marked stale (10 min threshold). Set status to 'working_locally' during extended local work to pause stale detection (safety-reaped after 30 min). Optionally update working_on and files_touched.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn heartbeat(
+        &self,
+        params: Parameters<HeartbeatParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::heartbeat_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "deregister_agent",
+        description = "Deregister an agent session and release all its claimed intents. Call on clean shutdown. Sessions not deregistered are reaped after heartbeat timeout.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn deregister_agent(
+        &self,
+        params: Parameters<DeregisterAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::deregister_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_agents",
+        description = "List active agent sessions. Filter by project or status. Use to discover peers before starting work and to check who is working on what.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_agents(
+        &self,
+        params: Parameters<ListAgentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_agents_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "share_context",
+        description = "Publish shared context for other agents. Types: discovery (learned something), decision (made a choice), warning (potential issue), request (need help), blocker (blocked on something). Scoped to a project with optional fine-grained targets. Optionally link to graph entities via about_node_ids. Supports confidence (0.0–1.0) for epistemic annotation, response_requested + response_deadline_ms for escalation tracking, and investigation_id to thread context into an investigation session.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn share_context(
+        &self,
+        params: Parameters<ShareContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::share_context_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "get_shared_context",
+        description = "Query shared context from other agents. Filter by scope (project), context_type, recency (since_ms), target_prefix, investigation_id, or author. Returns confidence, response tracking status, and investigation links when present. By default excludes expired context; set include_expired=true to see all.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_shared_context(
+        &self,
+        params: Parameters<GetSharedContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::get_shared_context_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "claim_intent",
+        description = "Declare intent to modify targets (file paths, crate names, or node:<id> for graph nodes). Three levels: advisory (informational), exclusive (warns others away), locked (blocks others). Checks for conflicts before claiming. Set cascade=true with node:<id> targets to auto-claim descendant nodes via :contains edges. Linked to agent session via claims edge.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn claim_intent(
+        &self,
+        params: Parameters<ClaimIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::claim_intent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "release_intent",
+        description = "Release a claimed intent. Provide intent_id to release a specific intent, or omit to release all intents for the agent. Automatically called by deregister_agent.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn release_intent(
+        &self,
+        params: Parameters<ReleaseIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::release_intent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "check_conflicts",
+        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets (including cascaded expanded_targets). Does not expand the caller's targets — use the same targets you would pass to claim_intent. Does not create any state — read-only check.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn check_conflicts(
+        &self,
+        params: Parameters<CheckConflictsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::check_conflicts_impl(self, params.0).await
+    }
+
+    // ── Investigation Sessions ──────────────────────────────────────
+
+    #[tool(
+        name = "start_investigation",
+        description = "Start a new investigation thread. Creates an __Investigation node that groups \
+        related shared context entries into a traceable chain. Use investigation_id in subsequent \
+        share_context calls to link findings. Returns the generated investigation_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn start_investigation(
+        &self,
+        params: Parameters<StartInvestigationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::start_investigation_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "close_investigation",
+        description = "Close an open investigation with a conclusion. Sets status to 'closed' and records \
+        the conclusion and optional outcome classification (e.g., 'resolved', 'escalated', 'inconclusive'). \
+        Idempotent per investigation_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn close_investigation(
+        &self,
+        params: Parameters<CloseInvestigationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::close_investigation_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_investigations",
+        description = "List investigation threads. Filter by scope (project), status (open/closed), or \
+        author. Returns investigation metadata including subject, status, and conclusion.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_investigations(
+        &self,
+        params: Parameters<ListInvestigationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_investigations_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "find_capable_agent",
+        description = "Find agents matching required capabilities. Searches structured fields (supported_tools, domain_expertise) and free-text capabilities. Returns agents ranked by match score. At least one of required_tools, required_expertise, or query must be provided.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_capable_agent(
+        &self,
+        params: Parameters<FindCapableAgentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::find_capable_agent_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "agent_stats",
+        description = "Get performance metrics for an agent based on task history. Returns tasks_completed, tasks_failed, success_rate (percentage), avg_duration_ms, and recent_tasks (last 5). Computed from __Task nodes. Use for evaluating agent reliability before delegation.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn agent_stats(
+        &self,
+        params: Parameters<AgentStatsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::agent_stats_impl(self, params.0).await
+    }
+
+    // ── Task Delegation ───────────────────────────────────────────────
+
+    #[tool(
+        name = "propose_task",
+        description = "Propose a task for another agent to execute. Creates a __Task node in 'proposed' status with a :proposed edge from the proposer's session. Optionally target a specific agent via assignee_agent. Include required_tools for capability-based matching.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn propose_task(
+        &self,
+        params: Parameters<ProposeTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::propose_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "accept_task",
+        description = "Accept a proposed task. Sets status to 'accepted' and creates an :assigned edge. Only tasks in 'proposed' status can be accepted.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn accept_task(
+        &self,
+        params: Parameters<AcceptTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::accept_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "reject_task",
+        description = "Reject a proposed task with an optional reason. Only tasks in 'proposed' status can be rejected.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn reject_task(
+        &self,
+        params: Parameters<RejectTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::reject_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "complete_task",
+        description = "Mark a task as completed or failed. Only the assigned agent can complete a task. Provide output_data for results or failure_reason when success is false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn complete_task(
+        &self,
+        params: Parameters<CompleteTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::complete_task_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_tasks",
+        description = "List tasks with optional filters by project, status, proposer, or assignee. Returns tasks ordered by most recently updated. Default limit: 50.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_tasks(
+        &self,
+        params: Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        bridge::list_tasks_impl(self, params.0).await
+    }
+}
+
+// ── Standalone helpers ─────────────────────────────────────────────
+
+/// Truncate string property values that exceed `max_len` characters.
+/// Handles both serde-tagged enum format (`{"String": "..."}`) and plain
+/// JSON strings.
+fn truncate_property_values(node_json: &mut serde_json::Value, max_len: usize) {
+    let Some(props) = node_json
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    else {
+        return;
+    };
+    for v in props.values_mut() {
+        truncate_string_value(v, max_len);
+    }
+}
+
+/// Truncate a single JSON value in-place if it contains a string exceeding
+/// `max_len` characters. Handles `{"String": "..."}` (serde-tagged
+/// `Value` enum) and plain `"..."` JSON strings.
+fn truncate_string_value(v: &mut serde_json::Value, max_len: usize) {
+    // Check serde-tagged format: {"String": "..."}
+    let needs_tagged_truncation = v
+        .get("String")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| s.chars().count() > max_len);
+
+    if needs_tagged_truncation {
+        let inner = v["String"].as_str().unwrap();
+        let total = inner.chars().count();
+        let truncated: String = inner.chars().take(max_len).collect();
+        v["String"] =
+            serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
+        return;
+    }
+
+    // Plain JSON string
+    let needs_plain_truncation = v.as_str().is_some_and(|s| s.chars().count() > max_len);
+    if needs_plain_truncation {
+        let s = v.as_str().unwrap();
+        let total = s.chars().count();
+        let truncated: String = s.chars().take(max_len).collect();
+        *v = serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
     }
 }
 

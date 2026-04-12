@@ -319,3 +319,99 @@ The MCP layer exposes GraphRAG through dedicated tools:
 - **`enrich_communities`** — Add embeddings to community summaries
 
 These tools handle embedding, search, traversal, and result formatting in a single call — agents never need to construct multi-step retrieval pipelines manually.
+
+## Vector Quantization (PolarQuant)
+
+SeleneDB includes built-in vector quantization based on the **PolarQuant** algorithm (TurboQuant Stage 1). This compresses HNSW vector storage by 4–10× while maintaining >99% recall, making it practical to run large vector indexes on edge devices and memory-constrained environments.
+
+### How It Works
+
+PolarQuant is a data-oblivious scalar quantization scheme — no training data or codebook computation required:
+
+1. **Haar-random rotation** — Each vector is multiplied by a deterministic orthogonal matrix (seeded), spreading information across all coordinates and making per-coordinate quantization more uniform.
+2. **Lloyd-Max quantization** — Each rotated coordinate is quantized using optimal boundaries for Gaussian N(0, 1/√d) distributions. Supports 3, 4, or 8 bits per coordinate.
+3. **Bit-packing** — Quantized codes are packed into bytes for compact storage.
+
+The quantizer is fully deterministic from (seed, dimension, bits) — the same configuration always produces the same encoding. No calibration dataset needed.
+
+### Compression Ratios
+
+For 768-dimensional embeddings (EmbeddingGemma default):
+
+| Bit Width | Bytes/Vector | vs f32 (3,072 B) | 100K Vectors | 1M Vectors |
+|-----------|-------------|-------------------|--------------|------------|
+| f32 (default) | 3,072 | 1× | 293 MB | 2.9 GB |
+| **8-bit** | 768 | **4×** | 73 MB | 732 MB |
+| **4-bit** (default) | 384 | **8×** | 37 MB | 366 MB |
+| **3-bit** | 288 | **10.7×** | 27 MB | 275 MB |
+
+Combined with Matryoshka (MRL) dimensionality reduction, compression stacks:
+
+| Configuration | Bytes/Vector | Compression | 100K Vectors |
+|--------------|-------------|-------------|--------------|
+| MRL 256-dim + 4-bit | 128 | **24×** | 12 MB |
+| MRL 384-dim + 4-bit | 192 | **16×** | 18 MB |
+| MRL 256-dim + 8-bit | 256 | **12×** | 24 MB |
+
+### Configuration
+
+Enable quantization in `selene.toml`:
+
+```toml
+[vector]
+hnsw_quantize = true           # Enable PolarQuant (default: false)
+hnsw_quantize_bits = 4         # Bit width: 3, 4, or 8 (default: 4)
+hnsw_quantize_rescore = false  # Re-rank top-k with f32 vectors (default: false)
+```
+
+**Recommended settings:**
+- **General use:** `bits = 4` — best balance of compression (8×) and recall (>99%)
+- **Maximum recall:** `bits = 8, rescore = true` — near-lossless with 4× compression
+- **Maximum compression:** `bits = 3` — 10.7× compression, ~95-98% recall
+- **Edge/IoT:** `bits = 4` + MRL 256-dim — 24× compression fits large indexes in <50 MB
+
+### Search Architecture
+
+Quantized search uses an **asymmetric distance** strategy that preserves accuracy:
+
+- **Upper HNSW layers** (greedy navigation): Full f32 cosine similarity. These layers are sparse — few comparisons, accuracy is critical for graph navigation.
+- **Layer 0** (beam search): Asymmetric dot product between the f32 query (rotated once) and quantized codes. This is where 95%+ of distance computations happen, so quantization gives the biggest speedup here.
+- **Optional rescore**: When `rescore = true`, the top-ef candidates from quantized search are re-ranked using full f32 cosine similarity before returning the final top-k.
+
+This means the query is never quantized — only the stored vectors are compressed. The rotated query is computed once per search (O(d²)), then each candidate comparison is O(d) with the packed codes.
+
+### Monitoring
+
+Check quantization status and memory savings:
+
+```sql
+CALL vector.quantizationStats()
+YIELD namespace, method, bits, vector_count, quantized_bytes, f32_bytes, compression_ratio, rescore
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| namespace | STRING | Index namespace |
+| method | STRING | Quantization method (e.g., "PolarQuant") |
+| bits | INT | Bit width (3, 4, or 8) |
+| vector_count | INT | Number of quantized vectors |
+| quantized_bytes | INT | Actual quantized storage size |
+| f32_bytes | INT | Equivalent f32 storage size |
+| compression_ratio | FLOAT | f32_bytes / quantized_bytes |
+| rescore | BOOL | Whether rescore is enabled |
+
+The `quantization_stats` MCP tool exposes the same information to AI agents.
+
+### Persistence
+
+Quantized vectors are automatically included in binary snapshots. The `QuantizedStorage` (rotation matrix, quantizer parameters, and packed codes) serializes alongside the HNSW graph — no special migration or configuration needed. Restoring from a snapshot that includes quantized data preserves the full quantized index.
+
+### When to Use Quantization
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Edge/IoT with limited RAM | ✅ `bits=4` + MRL — 24× compression |
+| Cloud with 100K+ embeddings | ✅ `bits=4` — halves memory, negligible recall loss |
+| Small index (<1K vectors) | ❌ Overhead not worth it; f32 is fine |
+| Maximum retrieval precision required | ⚠️ `bits=8, rescore=true` — near-lossless |
+| Rapid prototyping | ❌ Skip quantization; optimize later |

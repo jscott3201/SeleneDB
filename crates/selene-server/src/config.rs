@@ -344,6 +344,18 @@ pub struct VectorConfig {
     /// Default HNSW query search width (default: 50).
     #[serde(default)]
     pub hnsw_ef_search: Option<usize>,
+    /// Enable vector quantization (default: false).
+    /// When true, HNSW indices use PolarQuant for compressed storage.
+    #[serde(default)]
+    pub hnsw_quantize: Option<bool>,
+    /// Quantization bit width: 3, 4, or 8 (default: 4).
+    /// Lower bits = more compression but reduced recall.
+    #[serde(default)]
+    pub hnsw_quantize_bits: Option<u8>,
+    /// Re-rank top candidates with exact f32 cosine after quantized search
+    /// (default: false). Improves recall at minor latency cost.
+    #[serde(default)]
+    pub hnsw_quantize_rescore: Option<bool>,
     /// Defer model loading until first embed() call (default: false).
     /// When false, the model is loaded eagerly at server startup.
     #[serde(default)]
@@ -362,6 +374,9 @@ impl Default for VectorConfig {
             hnsw_m0: None,
             hnsw_ef_construction: None,
             hnsw_ef_search: None,
+            hnsw_quantize: None,
+            hnsw_quantize_bits: None,
+            hnsw_quantize_rescore: None,
             lazy_load: false,
         }
     }
@@ -379,6 +394,18 @@ impl VectorConfig {
         }
         if let Some(ef) = self.hnsw_ef_search {
             params.ef_search = ef;
+        }
+        if self.hnsw_quantize.unwrap_or(false) {
+            let bits = match self.hnsw_quantize_bits.unwrap_or(4) {
+                3 => selene_graph::hnsw::QuantBits::Three,
+                8 => selene_graph::hnsw::QuantBits::Eight,
+                _ => selene_graph::hnsw::QuantBits::Four,
+            };
+            params = params.with_quantization(selene_graph::hnsw::QuantizationConfig {
+                bits,
+                seed: 42,
+                rescore: self.hnsw_quantize_rescore.unwrap_or(false),
+            });
         }
         params
     }
