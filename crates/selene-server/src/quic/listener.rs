@@ -13,12 +13,14 @@ use selene_wire::frame::Frame;
 use selene_wire::io::{read_frame, write_frame};
 use selene_wire::msg_type::MsgType;
 use selene_wire::serialize::{deserialize_payload, serialize_payload};
+use tracing::Instrument;
 
 use super::handler;
 use crate::auth::handshake::{self, AuthContext};
 use crate::bootstrap::ServerState;
 
 /// Start the QUIC listener and serve requests.
+#[tracing::instrument(skip_all, fields(addr = %state.config.listen_addr, max_connections = state.config.quic_max_connections))]
 pub async fn serve(state: Arc<ServerState>, server_config: ServerConfig) -> anyhow::Result<()> {
     let endpoint = Endpoint::server(server_config, state.config.listen_addr)?;
     let max_connections = state.config.quic_max_connections;
@@ -43,23 +45,29 @@ pub async fn serve(state: Arc<ServerState>, server_config: ServerConfig) -> anyh
         let counter = Arc::clone(&active_connections);
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    tracing::debug!(remote = %conn.remote_address(), "connection accepted");
-                    handle_connection(state, conn).await;
+        let remote = incoming.remote_address();
+        let conn_span = tracing::info_span!("quic_conn", %remote);
+        tokio::spawn(
+            async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        tracing::debug!("connection accepted");
+                        handle_connection(state, conn).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("connection failed: {e}");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("connection failed: {e}");
-                }
+                counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
-            counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        });
+            .instrument(conn_span),
+        );
     }
 
     Ok(())
 }
 
+#[tracing::instrument(skip_all, fields(remote = %conn.remote_address()))]
 async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) {
     // In dev mode, skip handshake and use admin context
     let auth = if state.config.dev_mode {
@@ -84,11 +92,12 @@ async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) {
                     Ok((send, recv)) => {
                         let state = Arc::clone(&state);
                         let auth = Arc::clone(&auth);
+                        let stream_span = tracing::info_span!("quic_stream", principal = auth.principal_node_id.0);
                         tokio::spawn(async move {
                             if let Err(e) = handle_stream(state, auth, send, recv).await {
                                 tracing::debug!("stream error: {e}");
                             }
-                        });
+                        }.instrument(stream_span));
                     }
                     Err(quinn::ConnectionError::ApplicationClosed(_)) => {
                         tracing::debug!("connection closed by peer");
@@ -201,6 +210,7 @@ async fn perform_handshake(
     Ok(auth_ctx)
 }
 
+#[tracing::instrument(skip_all, fields(principal = auth.principal_node_id.0, role = %auth.role))]
 async fn handle_stream(
     state: Arc<ServerState>,
     auth: Arc<AuthContext>,

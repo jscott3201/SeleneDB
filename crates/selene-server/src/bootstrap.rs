@@ -7,6 +7,7 @@ use selene_graph::{ChangelogBuffer, CsrAdjacency, SchemaValidator, SeleneGraph, 
 use selene_persist::recovery;
 use selene_persist::{SyncPolicy, Wal};
 use selene_ts::HotTier;
+use tracing::Instrument;
 
 use crate::auth::AuthEngine;
 use crate::config::SeleneConfig;
@@ -491,6 +492,7 @@ fn init_vault(
 ///
 /// `vault_passphrase` is the pre-read `SELENE_VAULT_PASSPHRASE` env var value,
 /// cleared from the process environment in `main()` before tokio starts.
+#[tracing::instrument(skip_all, fields(profile = ?config.profile, data_dir = %config.data_dir.display()))]
 pub async fn bootstrap(
     config: SeleneConfig,
     vault_passphrase: Option<String>,
@@ -585,7 +587,11 @@ pub async fn bootstrap(
             config.performance.wal_commit_delay_ms,
             Some(Arc::clone(&hlc)),
         );
-        tokio::spawn(handle.run());
+        tokio::spawn(
+            handle
+                .run()
+                .instrument(tracing::info_span!("wal_group_commit")),
+        );
         tracing::info!(
             delay_ms = config.performance.wal_commit_delay_ms,
             "WAL group commit enabled"

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use selene_graph::SharedGraph;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 /// Type-erased task: captures everything it needs, no arguments.
 type TaskFn = Box<dyn FnOnce() + Send>;
@@ -66,7 +67,10 @@ impl MutationBatcher {
     pub fn spawn_with_budget(graph: SharedGraph, budget: MemoryBudget) -> Self {
         let (tx, rx) = mpsc::channel::<TaskFn>(1024);
         let memory_budget = Arc::new(budget);
-        tokio::spawn(batch_executor(graph, rx, Arc::clone(&memory_budget)));
+        tokio::spawn(
+            batch_executor(graph, rx, Arc::clone(&memory_budget))
+                .instrument(tracing::info_span!("mutation_batcher")),
+        );
         Self { tx, memory_budget }
     }
 

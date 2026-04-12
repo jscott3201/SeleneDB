@@ -27,6 +27,7 @@ use rmcp::model::{
 };
 use rmcp::service::{NotificationContext, Peer, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, prompt_handler};
+use tracing::Instrument;
 
 use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
@@ -465,39 +466,42 @@ impl rmcp::ServerHandler for SeleneTools {
             let subscribed = Arc::clone(&self.subscribed_uris);
             let mut rx = self.state.persistence.changelog_notify.subscribe();
 
-            tokio::spawn(async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(_seq) => {
-                            let uris: Vec<String> =
-                                { subscribed.lock().await.iter().cloned().collect() };
-                            for uri in uris {
-                                let param = ResourceUpdatedNotificationParam::new(uri);
-                                if peer.notify_resource_updated(param).await.is_err() {
-                                    // Peer disconnected; stop the task.
-                                    tracing::debug!(
-                                        "MCP peer disconnected, stopping subscription notifier"
-                                    );
-                                    return;
+            tokio::spawn(
+                async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(_seq) => {
+                                let uris: Vec<String> =
+                                    { subscribed.lock().await.iter().cloned().collect() };
+                                for uri in uris {
+                                    let param = ResourceUpdatedNotificationParam::new(uri);
+                                    if peer.notify_resource_updated(param).await.is_err() {
+                                        // Peer disconnected; stop the task.
+                                        tracing::debug!(
+                                            "MCP peer disconnected, stopping subscription notifier"
+                                        );
+                                        return;
+                                    }
                                 }
                             }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            tracing::debug!(
-                                "Changelog broadcast closed, stopping subscription notifier"
-                            );
-                            return;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                skipped = n,
-                                "MCP subscription notifier lagged, some updates may be missed"
-                            );
-                            // Continue processing; the next recv will catch up.
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                tracing::debug!(
+                                    "Changelog broadcast closed, stopping subscription notifier"
+                                );
+                                return;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(
+                                    skipped = n,
+                                    "MCP subscription notifier lagged, some updates may be missed"
+                                );
+                                // Continue processing; the next recv will catch up.
+                            }
                         }
                     }
                 }
-            });
+                .instrument(tracing::info_span!("mcp_subscription_notifier")),
+            );
         }
     }
 
@@ -537,33 +541,37 @@ impl rmcp::ServerHandler for SeleneTools {
             let tools = self.clone();
             let tid = task_id.clone();
             let ct = cancel.clone();
-            tokio::spawn(async move {
-                let outcome = tokio::select! {
-                    r = tools.call_tool(request, context) => r,
-                    _ = ct.cancelled() => Err(McpError::new(
-                        ErrorCode::INTERNAL_ERROR,
-                        "task cancelled",
-                        None,
-                    )),
-                };
+            let task_span = tracing::info_span!("mcp_task", task_id = %tid);
+            tokio::spawn(
+                async move {
+                    let outcome = tokio::select! {
+                        r = tools.call_tool(request, context) => r,
+                        _ = ct.cancelled() => Err(McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            "task cancelled",
+                            None,
+                        )),
+                    };
 
-                let mut store = tools.task_store.0.lock().await;
-                if let Some(entry) = store.get_mut(&tid) {
-                    let now = TaskStore::now_iso();
-                    if let Ok(result) = outcome {
-                        entry.task.status = TaskStatus::Completed;
-                        entry.task.last_updated_at = now;
-                        entry.result = Some(result);
-                    } else {
-                        entry.task.status = if ct.is_cancelled() {
-                            TaskStatus::Cancelled
+                    let mut store = tools.task_store.0.lock().await;
+                    if let Some(entry) = store.get_mut(&tid) {
+                        let now = TaskStore::now_iso();
+                        if let Ok(result) = outcome {
+                            entry.task.status = TaskStatus::Completed;
+                            entry.task.last_updated_at = now;
+                            entry.result = Some(result);
                         } else {
-                            TaskStatus::Failed
-                        };
-                        entry.task.last_updated_at = now;
+                            entry.task.status = if ct.is_cancelled() {
+                                TaskStatus::Cancelled
+                            } else {
+                                TaskStatus::Failed
+                            };
+                            entry.task.last_updated_at = now;
+                        }
                     }
                 }
-            });
+                .instrument(task_span),
+            );
 
             Ok(CreateTaskResult::new(task))
         }

@@ -8,6 +8,8 @@ use axum::response::{IntoResponse, Json};
 use selene_wire::dto::ts::TsSampleDto;
 use serde::Deserialize;
 
+use tracing::Instrument;
+
 use super::reject_if_replica;
 use crate::bootstrap::ServerState;
 use crate::http::auth::HttpAuth;
@@ -630,11 +632,14 @@ pub(in crate::http) async fn snapshot_export(
 
     // Schedule cleanup of the temp file after response is sent.
     let cleanup = file_path.clone();
-    tokio::spawn(async move {
-        // Wait a bit to ensure the stream has been consumed.
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        let _ = tokio::fs::remove_file(&cleanup).await;
-    });
+    tokio::spawn(
+        async move {
+            // Wait a bit to ensure the stream has been consumed.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let _ = tokio::fs::remove_file(&cleanup).await;
+        }
+        .instrument(tracing::debug_span!("snapshot_cleanup")),
+    );
 
     let filename = format!("selene-snapshot-{}.snap", chrono_filename());
     Ok((

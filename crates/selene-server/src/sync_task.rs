@@ -28,6 +28,7 @@ use crate::sync_push::push_buffered_changes;
 ///
 /// Returns only on cancellation. If sync is not enabled in the
 /// configuration, returns immediately.
+#[tracing::instrument(skip_all, fields(upstream = %state.config.sync.upstream, peer = %state.config.sync.peer_name))]
 pub async fn run_sync_loop(state: Arc<ServerState>, cancel: CancellationToken) {
     if !state.config.sync.is_enabled() {
         return;
@@ -69,6 +70,7 @@ pub async fn run_sync_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 
 /// Run a single sync session: connect, push buffered changes, then
 /// enter the live bidirectional loop.
+#[tracing::instrument(skip_all)]
 async fn connect_and_sync(
     state: &Arc<ServerState>,
     cancel: &CancellationToken,

@@ -13,6 +13,7 @@ use selene_persist::snapshot::{
 use selene_ts::flush::FlushTask;
 use selene_ts::retention;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::bootstrap::ServerState;
 
@@ -57,9 +58,12 @@ pub fn spawn_background_tasks(
     if !state.replica.is_replica {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            snapshot_loop(s, snapshot_interval, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                snapshot_loop(s, snapshot_interval, token).await;
+            }
+            .instrument(tracing::info_span!("snapshot_loop")),
+        ));
     }
 
     // TS flush task
@@ -67,17 +71,23 @@ pub fn spawn_background_tasks(
         Duration::from_secs(u64::from(state.config.ts.flush_interval_minutes.max(1)) * 60);
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        ts_flush_loop(s, flush_interval, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            ts_flush_loop(s, flush_interval, token).await;
+        }
+        .instrument(tracing::info_span!("ts_flush_loop")),
+    ));
 
     // TS retention task (runs once per hour)
     let retention_days = state.config.ts.medium_retention_days;
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        ts_retention_loop(s, retention_days, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            ts_retention_loop(s, retention_days, token).await;
+        }
+        .instrument(tracing::info_span!("ts_retention_loop")),
+    ));
 
     // TS compaction task (runs once per compact_after_hours)
     if state.config.ts.compact_after_hours > 0 {
@@ -85,17 +95,23 @@ pub fn spawn_background_tasks(
             Duration::from_secs(u64::from(state.config.ts.compact_after_hours) * 3600);
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            ts_compact_loop(s, compact_interval, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                ts_compact_loop(s, compact_interval, token).await;
+            }
+            .instrument(tracing::info_span!("ts_compact_loop")),
+        ));
     }
 
     // Metrics update task (every 10 seconds)
     let s = Arc::clone(&state);
     let token = cancel.clone();
-    handles.push(tokio::spawn(async move {
-        metrics_update_loop(s, token).await;
-    }));
+    handles.push(tokio::spawn(
+        async move {
+            metrics_update_loop(s, token).await;
+        }
+        .instrument(tracing::info_span!("metrics_update_loop")),
+    ));
 
     // Auto-embed task (vector service with configured rules)
     // Built-in rule: __Memory nodes always get auto-embedding on the content property.
@@ -116,9 +132,12 @@ pub fn spawn_background_tasks(
         let s = Arc::clone(&state);
         let token = cancel.clone();
         let rules = auto_embed_rules;
-        handles.push(tokio::spawn(async move {
-            auto_embed_loop(s, rules, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                auto_embed_loop(s, rules, token).await;
+            }
+            .instrument(tracing::info_span!("auto_embed_loop")),
+        ));
     }
 
     // Search index updater
@@ -129,9 +148,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            search_index_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                search_index_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("search_index_loop")),
+        ));
     }
 
     // Stats collector changelog subscriber (always-on)
@@ -142,9 +164,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            stats_collector_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                stats_collector_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("stats_collector_loop")),
+        ));
     }
 
     // Materialized view changelog subscriber
@@ -155,9 +180,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            view_state_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                view_state_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("view_state_loop")),
+        ));
     }
 
     // Vector store changelog subscriber
@@ -168,9 +196,12 @@ pub fn spawn_background_tasks(
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            vector_store_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                vector_store_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("vector_store_loop")),
+        ));
     }
 
     // Version store pruning (temporal service)
@@ -182,36 +213,48 @@ pub fn spawn_background_tasks(
         let s = Arc::clone(&state);
         let token = cancel.clone();
         let prune_hours = state.config.temporal.prune_interval_hours;
-        handles.push(tokio::spawn(async move {
-            version_prune_loop(s, prune_hours, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                version_prune_loop(s, prune_hours, token).await;
+            }
+            .instrument(tracing::info_span!("version_prune_loop")),
+        ));
     }
 
     // Bidirectional sync task (edge-to-hub push + hub-to-edge pull)
     if state.config.sync.is_enabled() {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            crate::sync_task::run_sync_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                crate::sync_task::run_sync_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("sync_loop")),
+        ));
     }
 
     // HNSW index rebuild task
     {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            hnsw_rebuild_loop(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                hnsw_rebuild_loop(s, token).await;
+            }
+            .instrument(tracing::info_span!("hnsw_rebuild_loop")),
+        ));
     }
 
     // Agent session reaper — marks stale sessions, releases orphaned intents
     if !state.replica.is_replica {
         let s = Arc::clone(&state);
         let token = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            agent_session_reaper(s, token).await;
-        }));
+        handles.push(tokio::spawn(
+            async move {
+                agent_session_reaper(s, token).await;
+            }
+            .instrument(tracing::info_span!("agent_session_reaper")),
+        ));
     }
 
     tracing::info!(
@@ -300,6 +343,7 @@ async fn snapshot_loop(state: Arc<ServerState>, interval: Duration, cancel: Canc
 }
 
 /// Snapshot the current graph state and truncate the WAL.
+#[tracing::instrument(skip_all)]
 pub fn take_snapshot(state: &ServerState) -> anyhow::Result<()> {
     // Hold WAL lock across graph read + truncate to prevent data loss race.
     // Mutations queue in the WAL coalescer channel until the lock is released.
