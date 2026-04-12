@@ -1442,18 +1442,20 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
 
 // ── Agent session reaper ────────────────────────────────────────
 
-/// Stale threshold: sessions without heartbeat for 3 minutes are marked stale.
-const AGENT_STALE_THRESHOLD_MS: i64 = 3 * 60 * 1000;
+/// Stale threshold: active sessions without heartbeat for 10 minutes are marked stale.
+const AGENT_STALE_THRESHOLD_MS: i64 = 10 * 60 * 1000;
+/// Safety threshold: `working_locally` sessions without heartbeat for 30 minutes
+/// are marked stale (catches crashed agents that declared local work).
+const AGENT_WORKING_LOCALLY_THRESHOLD_MS: i64 = 30 * 60 * 1000;
 /// Reaper sweep interval: 2 minutes.
 const AGENT_REAPER_INTERVAL_SECS: u64 = 120;
 
 /// Background task that marks stale agent sessions and releases their intents.
 ///
-/// Runs every 2 minutes. Sessions without a heartbeat for 3+ minutes are
-/// marked `stale` and their exclusive/locked intents are released.
+/// Runs every 2 minutes. Two sweeps per tick:
+/// 1. Active sessions without heartbeat for 10+ min → stale
+/// 2. `working_locally` sessions without heartbeat for 30+ min → stale (safety net)
 async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken) {
-    use std::collections::HashMap;
-
     let mut tick = tokio::time::interval(Duration::from_secs(AGENT_REAPER_INTERVAL_SECS));
     tick.tick().await; // skip immediate first tick
 
@@ -1467,122 +1469,137 @@ async fn agent_session_reaper(state: Arc<ServerState>, cancel: CancellationToken
         }
 
         let now_ms = selene_core::now_nanos() / 1_000_000;
-        let threshold = now_ms - AGENT_STALE_THRESHOLD_MS;
         let auth = crate::auth::handshake::AuthContext::dev_admin();
 
-        // 1. Find active sessions with stale heartbeats
-        let mut params = HashMap::new();
-        params.insert("threshold".into(), selene_core::Value::Int(threshold));
+        // Sweep 1: active sessions past the 10-minute threshold
+        let active_threshold = now_ms - AGENT_STALE_THRESHOLD_MS;
+        reap_stale_agents(&state, &auth, "active", active_threshold).await;
 
-        let stale_query = "MATCH (a:__AgentSession) \
-                            FILTER a.status = 'active' AND a.heartbeat_at < $threshold \
-                            RETURN id(a) AS id, a.agent_id AS agent_id";
+        // Sweep 2: working_locally sessions past the 30-minute safety threshold
+        let local_threshold = now_ms - AGENT_WORKING_LOCALLY_THRESHOLD_MS;
+        reap_stale_agents(&state, &auth, "working_locally", local_threshold).await;
+    }
+}
 
-        let stale_result = crate::ops::gql::execute_gql(
-            &state,
-            &auth,
-            stale_query,
-            Some(&params),
-            false,
-            false,
-            crate::ops::gql::ResultFormat::Json,
-        );
+/// Find agents with the given `status` whose heartbeat is older than
+/// `threshold_ms`, mark them stale, and release their exclusive/locked intents.
+async fn reap_stale_agents(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::handshake::AuthContext,
+    status: &str,
+    threshold_ms: i64,
+) {
+    use std::collections::HashMap;
 
-        let stale_agents: Vec<serde_json::Value> = match stale_result {
-            Ok(r) => serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into()))
-                .unwrap_or_default(),
-            Err(e) => {
-                tracing::warn!("agent reaper: failed to query stale sessions: {e}");
+    let mut params = HashMap::new();
+    params.insert("threshold".into(), selene_core::Value::Int(threshold_ms));
+    params.insert("status".into(), selene_core::Value::from(status));
+
+    let stale_query = "MATCH (a:__AgentSession) \
+                        FILTER a.status = $status AND a.heartbeat_at < $threshold \
+                        RETURN id(a) AS id, a.agent_id AS agent_id";
+
+    let stale_result = crate::ops::gql::execute_gql(
+        state,
+        auth,
+        stale_query,
+        Some(&params),
+        false,
+        false,
+        crate::ops::gql::ResultFormat::Json,
+    );
+
+    let stale_agents: Vec<serde_json::Value> = match stale_result {
+        Ok(r) => {
+            serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default()
+        }
+        Err(e) => {
+            tracing::warn!(status, "agent reaper: failed to query stale sessions: {e}");
+            return;
+        }
+    };
+
+    for agent in &stale_agents {
+        let agent_id = agent
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        tracing::info!(agent_id, status, "marking agent session stale");
+
+        // Mark session as stale
+        let mut mark_params = HashMap::new();
+        mark_params.insert("aid".into(), selene_core::Value::from(agent_id));
+
+        let mark_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
+                           SET a.status = 'stale'";
+
+        let st = Arc::clone(state);
+        let auth2 = auth.clone();
+        let mark_result = state
+            .mutation_batcher
+            .submit(move || {
+                crate::ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    mark_query,
+                    Some(&mark_params),
+                    false,
+                    false,
+                    crate::ops::gql::ResultFormat::Json,
+                )
+            })
+            .await;
+
+        match mark_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(agent_id, "failed to mark session stale: {e}");
                 continue;
             }
-        };
-
-        if stale_agents.is_empty() {
-            continue;
+            Err(e) => {
+                tracing::warn!(agent_id, "batcher error marking session stale: {e}");
+                continue;
+            }
         }
 
-        for agent in &stale_agents {
-            let agent_id = agent
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+        // Release exclusive/locked intents for this agent
+        let mut release_params = HashMap::new();
+        release_params.insert("aid".into(), selene_core::Value::from(agent_id));
 
-            tracing::info!(agent_id, "marking agent session stale");
+        let release_query = "MATCH (i:__Intent {agent_id: $aid}) \
+                              FILTER i.status = 'claimed' \
+                              AND (i.level = 'exclusive' OR i.level = 'locked') \
+                              SET i.status = 'released' \
+                              RETURN count(i) AS released";
 
-            // 2. Mark session as stale
-            let mut mark_params = HashMap::new();
-            mark_params.insert("aid".into(), selene_core::Value::from(agent_id));
+        let st = Arc::clone(state);
+        let auth2 = auth.clone();
+        let release_result = state
+            .mutation_batcher
+            .submit(move || {
+                crate::ops::gql::execute_gql(
+                    &st,
+                    &auth2,
+                    release_query,
+                    Some(&release_params),
+                    false,
+                    false,
+                    crate::ops::gql::ResultFormat::Json,
+                )
+            })
+            .await;
 
-            let mark_query = "MATCH (a:__AgentSession {agent_id: $aid}) \
-                               SET a.status = 'stale'";
-
-            let st = Arc::clone(&state);
-            let auth2 = auth.clone();
-            let mark_result = state
-                .mutation_batcher
-                .submit(move || {
-                    crate::ops::gql::execute_gql(
-                        &st,
-                        &auth2,
-                        mark_query,
-                        Some(&mark_params),
-                        false,
-                        false,
-                        crate::ops::gql::ResultFormat::Json,
-                    )
-                })
-                .await;
-
-            match mark_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(agent_id, "failed to mark session stale: {e}");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(agent_id, "batcher error marking session stale: {e}");
-                    continue;
-                }
+        match release_result {
+            Ok(Ok(r)) => {
+                let data = r.data_json.unwrap_or_default();
+                tracing::info!(agent_id, released = %data, "released stale agent intents");
             }
-
-            // 3. Release exclusive/locked intents for this agent
-            let mut release_params = HashMap::new();
-            release_params.insert("aid".into(), selene_core::Value::from(agent_id));
-
-            let release_query = "MATCH (i:__Intent {agent_id: $aid}) \
-                                  FILTER i.status = 'claimed' \
-                                  AND (i.level = 'exclusive' OR i.level = 'locked') \
-                                  SET i.status = 'released' \
-                                  RETURN count(i) AS released";
-
-            let st = Arc::clone(&state);
-            let auth2 = auth.clone();
-            let release_result = state
-                .mutation_batcher
-                .submit(move || {
-                    crate::ops::gql::execute_gql(
-                        &st,
-                        &auth2,
-                        release_query,
-                        Some(&release_params),
-                        false,
-                        false,
-                        crate::ops::gql::ResultFormat::Json,
-                    )
-                })
-                .await;
-
-            match release_result {
-                Ok(Ok(r)) => {
-                    let data = r.data_json.unwrap_or_default();
-                    tracing::info!(agent_id, released = %data, "released stale agent intents");
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(agent_id, "failed to release intents: {e}");
-                }
-                Err(e) => {
-                    tracing::warn!(agent_id, "batcher error releasing intents: {e}");
-                }
+            Ok(Err(e)) => {
+                tracing::warn!(agent_id, "failed to release intents: {e}");
+            }
+            Err(e) => {
+                tracing::warn!(agent_id, "batcher error releasing intents: {e}");
             }
         }
     }

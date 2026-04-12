@@ -163,7 +163,7 @@ impl SeleneTools {
             "selene://gql-examples" => (GQL_EXAMPLES.to_string(), "text/plain"),
             "selene://agents" => {
                 let query = "MATCH (a:__AgentSession) \
-                             FILTER a.status = 'active' OR a.status = 'stale' \
+                             FILTER a.status = 'active' OR a.status = 'stale' OR a.status = 'working_locally' \
                              RETURN a.agent_id AS agent_id, a.project AS project, \
                              a.status AS status, a.working_on AS working_on, \
                              a.heartbeat_at AS heartbeat_at \
@@ -188,7 +188,7 @@ impl SeleneTools {
                 let mut params = std::collections::HashMap::new();
                 params.insert("project".into(), selene_core::Value::from(project));
                 let query = "MATCH (a:__AgentSession {project: $project}) \
-                             FILTER a.status = 'active' OR a.status = 'stale' \
+                             FILTER a.status = 'active' OR a.status = 'stale' OR a.status = 'working_locally' \
                              RETURN a.agent_id AS agent_id, a.project AS project, \
                              a.status AS status, a.working_on AS working_on, \
                              a.heartbeat_at AS heartbeat_at \

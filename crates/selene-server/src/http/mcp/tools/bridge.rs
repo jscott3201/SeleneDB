@@ -171,12 +171,29 @@ pub(super) async fn heartbeat_impl(
 
     let now_ms = selene_core::now_nanos() / 1_000_000;
 
+    // Validate status if provided
+    const VALID_HEARTBEAT_STATUSES: &[&str] = &["active", "working_locally"];
+    let status = p.status.as_deref().unwrap_or("active");
+    if !VALID_HEARTBEAT_STATUSES.contains(&status) {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "Invalid status '{}'. Must be one of: {}",
+                status,
+                VALID_HEARTBEAT_STATUSES.join(", ")
+            )
+            .into(),
+            data: None,
+        });
+    }
+
     let mut params = HashMap::new();
     params.insert("aid".into(), Value::from(p.agent_id.as_str()));
     params.insert("now".into(), Value::Int(now_ms));
+    params.insert("status".into(), Value::from(status));
 
     // Build dynamic SET clause based on provided fields
-    let mut set_parts = vec!["a.heartbeat_at = $now", "a.status = 'active'"];
+    let mut set_parts = vec!["a.heartbeat_at = $now", "a.status = $status"];
     if let Some(ref working_on) = p.working_on {
         params.insert("working_on".into(), Value::from(working_on.as_str()));
         set_parts.push("a.working_on = $working_on");
@@ -971,7 +988,47 @@ pub(super) async fn find_capable_agent_impl(
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
 
-    // Score each agent by capability match.
+    // Batch-fetch task completion stats for trust scoring.
+    let trust_data: HashMap<String, (u64, u64)> = {
+        let trust_query = "MATCH (t:__Task) \
+                            FILTER t.status = 'completed' OR t.status = 'failed' \
+                            RETURN t.assignee_agent AS agent_id, t.status AS status";
+
+        ops::gql::execute_gql(
+            &tools.state,
+            &auth,
+            trust_query,
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .ok()
+        .map(|r| {
+            let trust_rows: Vec<serde_json::Value> =
+                serde_json::from_str(&r.data_json.unwrap_or_else(|| "[]".into()))
+                    .unwrap_or_default();
+            let mut map: HashMap<String, (u64, u64)> = HashMap::new();
+            for row in trust_rows {
+                let aid = row
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let entry = map.entry(aid).or_insert((0, 0));
+                match status {
+                    "completed" => entry.0 += 1,
+                    "failed" => entry.1 += 1,
+                    _ => {}
+                }
+            }
+            map
+        })
+        .unwrap_or_default()
+    };
+
+    // Score each agent by capability match + trust.
     let mut scored: Vec<(f64, serde_json::Value)> = rows
         .into_iter()
         .map(|row| {
@@ -1026,6 +1083,20 @@ pub(super) async fn find_capable_agent_impl(
                 }
             }
 
+            // Trust bonus based on task completion history (up to 10 points).
+            // Requires >= 3 completed tasks. 80% success → 0, 100% → 10.
+            if let Some(aid) = row.get("agent_id").and_then(|v| v.as_str())
+                && let Some(&(comp, fail)) = trust_data.get(aid)
+            {
+                let total = comp + fail;
+                if total >= 3 && comp > 0 {
+                    let rate = comp as f64 / total as f64;
+                    if rate > 0.8 {
+                        score += ((rate - 0.8) / 0.2) * 10.0;
+                    }
+                }
+            }
+
             (score, row)
         })
         .collect();
@@ -1054,6 +1125,123 @@ pub(super) async fn find_capable_agent_impl(
         serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
     );
     Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+// ── Agent Performance Tracking ────────────────────────────────────
+
+pub(super) async fn agent_stats_impl(
+    tools: &SeleneTools,
+    p: AgentStatsParams,
+) -> Result<CallToolResult, McpError> {
+    let auth = mcp_auth(tools)?;
+
+    let mut params = HashMap::new();
+    params.insert("aid".into(), Value::from(p.agent_id.as_str()));
+
+    let project_filter = if let Some(ref project) = p.project {
+        params.insert("project".into(), Value::from(project.as_str()));
+        " AND t.project = $project"
+    } else {
+        ""
+    };
+
+    // Query 1: completed/failed tasks for aggregate stats
+    let stats_query = format!(
+        "MATCH (t:__Task {{assignee_agent: $aid}}) \
+         FILTER (t.status = 'completed' OR t.status = 'failed'){project_filter} \
+         RETURN t.status AS status, t.created_at AS created_at, \
+                t.completed_at AS completed_at"
+    );
+
+    let result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        &stats_query,
+        Some(&params),
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&result.data_json.unwrap_or_else(|| "[]".into())).unwrap_or_default();
+
+    let mut completed = 0u64;
+    let mut failed = 0u64;
+    let mut durations = Vec::new();
+
+    for row in &rows {
+        match row.get("status").and_then(|v| v.as_str()) {
+            Some("completed") => {
+                completed += 1;
+                if let (Some(end), Some(start)) = (
+                    row.get("completed_at").and_then(|v| v.as_i64()),
+                    row.get("created_at").and_then(|v| v.as_i64()),
+                ) && end > start
+                {
+                    durations.push(end - start);
+                }
+            }
+            Some("failed") => failed += 1,
+            _ => {}
+        }
+    }
+
+    let total = completed + failed;
+    let success_rate = if total > 0 {
+        (completed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let avg_duration_ms = if durations.is_empty() {
+        0
+    } else {
+        durations.iter().sum::<i64>() / durations.len() as i64
+    };
+
+    // Query 2: recent tasks (all statuses, for context)
+    let recent_query = format!(
+        "MATCH (t:__Task {{assignee_agent: $aid}}) \
+         {project_filter_clause} \
+         RETURN id(t) AS id, t.title AS title, t.status AS status, \
+                t.created_at AS created_at, t.completed_at AS completed_at \
+         ORDER BY t.updated_at DESC \
+         LIMIT 5",
+        project_filter_clause = if p.project.is_some() {
+            "FILTER t.project = $project"
+        } else {
+            ""
+        }
+    );
+
+    let recent_result = ops::gql::execute_gql(
+        &tools.state,
+        &auth,
+        &recent_query,
+        Some(&params),
+        false,
+        false,
+        ResultFormat::Json,
+    )
+    .map_err(op_err)?;
+
+    let recent_tasks: Vec<serde_json::Value> =
+        serde_json::from_str(&recent_result.data_json.unwrap_or_else(|| "[]".into()))
+            .unwrap_or_default();
+
+    let response = serde_json::json!({
+        "agent_id": p.agent_id,
+        "tasks_completed": completed,
+        "tasks_failed": failed,
+        "success_rate": (success_rate * 100.0).round() / 100.0,
+        "avg_duration_ms": avg_duration_ms,
+        "recent_tasks": recent_tasks,
+    });
+
+    Ok(CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&response).unwrap_or_default(),
+    )]))
 }
 
 // ── Task Delegation ───────────────────────────────────────────────
