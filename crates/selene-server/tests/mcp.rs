@@ -1040,15 +1040,17 @@ async fn trace_export_huggingface() {
     assert_eq!(example["metadata"]["quality_score"], 8);
 }
 
-
 // ── Bridge / coordination tool tests ────────────────────────────────
 
 /// Extract a numeric ID from a tool response containing JSON like `[{"id":5}]`.
 fn extract_id_from_response(text: &str) -> u64 {
     let start = text.find('[').unwrap_or(0);
     let end = text.rfind(']').map_or(text.len(), |i| i + 1);
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&text[start..end]).expect("response should contain JSON array");
-    rows[0]["id"].as_u64().expect("first row should have numeric id")
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&text[start..end]).expect("response should contain JSON array");
+    rows[0]["id"]
+        .as_u64()
+        .expect("first row should have numeric id")
 }
 
 #[tokio::test]
@@ -1056,64 +1058,208 @@ async fn bridge_register_agent_and_list() {
     let base = start_server().await;
     let sid = initialize(&base).await;
     let text = call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-reg-list", "project": "test-project-reg", "supported_tools": ["code_review", "testing"], "domain_expertise": ["rust", "security"], "model_family": "claude-opus-4"})).await;
-    assert!(text.contains("Agent registered"), "should confirm registration: {text}");
-    let list_text = call_tool(&base, &sid, 3, "list_agents", serde_json::json!({"project": "test-project-reg"})).await;
-    assert!(list_text.contains("test-reg-list"), "agent missing: {list_text}");
-    assert!(list_text.contains("code_review"), "supported_tools missing: {list_text}");
-    assert!(list_text.contains("rust"), "domain_expertise missing: {list_text}");
-    assert!(list_text.contains("claude-opus-4"), "model_family missing: {list_text}");
-    call_tool(&base, &sid, 4, "deregister_agent", serde_json::json!({"agent_id": "test-reg-list"})).await;
+    assert!(
+        text.contains("Agent registered"),
+        "should confirm registration: {text}"
+    );
+    let list_text = call_tool(
+        &base,
+        &sid,
+        3,
+        "list_agents",
+        serde_json::json!({"project": "test-project-reg"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("test-reg-list"),
+        "agent missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("code_review"),
+        "supported_tools missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("rust"),
+        "domain_expertise missing: {list_text}"
+    );
+    assert!(
+        list_text.contains("claude-opus-4"),
+        "model_family missing: {list_text}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-reg-list"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_heartbeat_working_locally() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-hb-local", "project": "test-project-hb"})).await;
-    let text = call_tool(&base, &sid, 3, "heartbeat", serde_json::json!({"agent_id": "test-hb-local", "status": "working_locally"})).await;
-    assert!(text.contains("Heartbeat OK"), "heartbeat should succeed: {text}");
-    call_tool(&base, &sid, 4, "deregister_agent", serde_json::json!({"agent_id": "test-hb-local"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-hb-local", "project": "test-project-hb"}),
+    )
+    .await;
+    let text = call_tool(
+        &base,
+        &sid,
+        3,
+        "heartbeat",
+        serde_json::json!({"agent_id": "test-hb-local", "status": "working_locally"}),
+    )
+    .await;
+    assert!(
+        text.contains("Heartbeat OK"),
+        "heartbeat should succeed: {text}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-hb-local"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_deregister_releases_tasks() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-dereg-tasks", "project": "test-project-dereg"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-dereg-tasks", "project": "test-project-dereg"}),
+    )
+    .await;
     let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-dereg-tasks", "project": "test-project-dereg", "title": "Deregister test task", "description": "Task for deregister test", "assignee_agent": "test-dereg-tasks"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(&base, &sid, 4, "accept_task", serde_json::json!({"agent_id": "test-dereg-tasks", "task_id": task_id})).await;
-    call_tool(&base, &sid, 5, "deregister_agent", serde_json::json!({"agent_id": "test-dereg-tasks"})).await;
-    let list_text = call_tool(&base, &sid, 6, "list_tasks", serde_json::json!({"project": "test-project-dereg"})).await;
-    assert!(list_text.contains("proposed"), "task should revert to proposed: {list_text}");
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-dereg-tasks", "task_id": task_id}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-dereg-tasks"}),
+    )
+    .await;
+    let list_text = call_tool(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-dereg"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("proposed"),
+        "task should revert to proposed: {list_text}"
+    );
 }
 
 #[tokio::test]
 async fn bridge_share_and_get_context() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-ctx-agent", "project": "test-project-ctx"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-ctx-agent", "project": "test-project-ctx"}),
+    )
+    .await;
     let share_text = call_tool(&base, &sid, 3, "share_context", serde_json::json!({"author": "test-ctx-agent", "context_type": "discovery", "scope": "test-project-ctx", "content": "Found a critical performance bottleneck in query planner"})).await;
-    assert!(share_text.contains("Context shared"), "should confirm sharing: {share_text}");
-    let get_text = call_tool(&base, &sid, 4, "get_shared_context", serde_json::json!({"scope": "test-project-ctx"})).await;
-    assert!(get_text.contains("critical performance bottleneck"), "should retrieve shared content: {get_text}");
-    call_tool(&base, &sid, 5, "deregister_agent", serde_json::json!({"agent_id": "test-ctx-agent"})).await;
+    assert!(
+        share_text.contains("Context shared"),
+        "should confirm sharing: {share_text}"
+    );
+    let get_text = call_tool(
+        &base,
+        &sid,
+        4,
+        "get_shared_context",
+        serde_json::json!({"scope": "test-project-ctx"}),
+    )
+    .await;
+    assert!(
+        get_text.contains("critical performance bottleneck"),
+        "should retrieve shared content: {get_text}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-ctx-agent"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_claim_and_release_intent() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-intent-a", "project": "test-project-intent"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-intent-a", "project": "test-project-intent"}),
+    )
+    .await;
     let claim_text = call_tool(&base, &sid, 3, "claim_intent", serde_json::json!({"agent_id": "test-intent-a", "action": "refactoring optimizer", "targets": ["crates/selene-gql/src/optimizer"], "level": "exclusive"})).await;
-    assert!(claim_text.contains("Intent claimed"), "should confirm claim: {claim_text}");
+    assert!(
+        claim_text.contains("Intent claimed"),
+        "should confirm claim: {claim_text}"
+    );
     let conflicts_text = call_tool(&base, &sid, 4, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer/rules.rs"]})).await;
-    assert!(conflicts_text.contains("conflict"), "should detect overlap: {conflicts_text}");
-    let release_text = call_tool(&base, &sid, 5, "release_intent", serde_json::json!({"agent_id": "test-intent-a"})).await;
-    assert!(release_text.contains("released"), "should confirm release: {release_text}");
+    assert!(
+        conflicts_text.contains("conflict"),
+        "should detect overlap: {conflicts_text}"
+    );
+    let release_text = call_tool(
+        &base,
+        &sid,
+        5,
+        "release_intent",
+        serde_json::json!({"agent_id": "test-intent-a"}),
+    )
+    .await;
+    assert!(
+        release_text.contains("released"),
+        "should confirm release: {release_text}"
+    );
     let no_conflicts = call_tool(&base, &sid, 6, "check_conflicts", serde_json::json!({"agent_id": "test-intent-b", "targets": ["crates/selene-gql/src/optimizer"]})).await;
-    assert!(no_conflicts.contains("No conflicts"), "no conflicts after release: {no_conflicts}");
-    call_tool(&base, &sid, 7, "deregister_agent", serde_json::json!({"agent_id": "test-intent-a"})).await;
+    assert!(
+        no_conflicts.contains("No conflicts"),
+        "no conflicts after release: {no_conflicts}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-intent-a"}),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1122,37 +1268,125 @@ async fn bridge_find_capable_agent_scoring() {
     let sid = initialize(&base).await;
     call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-cap-tester", "project": "test-project-cap", "supported_tools": ["testing", "benchmarking"], "domain_expertise": ["performance"]})).await;
     call_tool(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-cap-security", "project": "test-project-cap", "supported_tools": ["code_review", "security_audit"], "domain_expertise": ["security", "cryptography"]})).await;
-    let find_text = call_tool(&base, &sid, 4, "find_capable_agent", serde_json::json!({"required_tools": ["testing"], "project": "test-project-cap"})).await;
-    assert!(find_text.contains("test-cap-tester"), "tester should appear: {find_text}");
+    let find_text = call_tool(
+        &base,
+        &sid,
+        4,
+        "find_capable_agent",
+        serde_json::json!({"required_tools": ["testing"], "project": "test-project-cap"}),
+    )
+    .await;
+    assert!(
+        find_text.contains("test-cap-tester"),
+        "tester should appear: {find_text}"
+    );
     let json_start = find_text.find('[').unwrap_or(0);
     let json_end = find_text.rfind(']').map_or(find_text.len(), |i| i + 1);
-    let agents: Vec<serde_json::Value> = serde_json::from_str(&find_text[json_start..json_end]).unwrap_or_default();
-    assert!(!agents.is_empty(), "should find at least one agent: {find_text}");
-    assert_eq!(agents[0]["agent_id"], "test-cap-tester", "tester should rank first");
-    call_tool(&base, &sid, 5, "deregister_agent", serde_json::json!({"agent_id": "test-cap-tester"})).await;
-    call_tool(&base, &sid, 6, "deregister_agent", serde_json::json!({"agent_id": "test-cap-security"})).await;
+    let agents: Vec<serde_json::Value> =
+        serde_json::from_str(&find_text[json_start..json_end]).unwrap_or_default();
+    assert!(
+        !agents.is_empty(),
+        "should find at least one agent: {find_text}"
+    );
+    assert_eq!(
+        agents[0]["agent_id"], "test-cap-tester",
+        "tester should rank first"
+    );
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-cap-tester"}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-cap-security"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_agent_stats_lifecycle() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-stats-agent", "project": "test-project-stats"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-stats-agent", "project": "test-project-stats"}),
+    )
+    .await;
     let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-stats-agent", "project": "test-project-stats", "title": "Stats test task", "description": "A task for stats testing", "assignee_agent": "test-stats-agent"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(&base, &sid, 4, "accept_task", serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id})).await;
+    call_tool(
+        &base,
+        &sid,
+        4,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id}),
+    )
+    .await;
     let complete_text = call_tool(&base, &sid, 5, "complete_task", serde_json::json!({"agent_id": "test-stats-agent", "task_id": task_id, "success": true, "output_data": "{\"result\": \"all tests passed\"}"})).await;
-    assert!(complete_text.contains("completed"), "should confirm completion: {complete_text}");
-    let list_text = call_tool(&base, &sid, 6, "list_tasks", serde_json::json!({"project": "test-project-stats"})).await;
-    assert!(list_text.contains("completed"), "task should show completed: {list_text}");
-    let stats_text = call_tool(&base, &sid, 7, "agent_stats", serde_json::json!({"agent_id": "test-stats-agent"})).await;
-    let stats: serde_json::Value = serde_json::from_str(&stats_text).expect("stats should be valid JSON");
-    assert_eq!(stats["agent_id"], "test-stats-agent", "should report correct agent: {stats_text}");
-    assert!(stats.get("tasks_completed").is_some(), "should have tasks_completed field: {stats_text}");
-    assert!(stats.get("tasks_failed").is_some(), "should have tasks_failed field: {stats_text}");
-    assert!(stats.get("success_rate").is_some(), "should have success_rate field: {stats_text}");
-    assert!(stats.get("recent_tasks").is_some(), "should have recent_tasks field: {stats_text}");
-    call_tool(&base, &sid, 8, "deregister_agent", serde_json::json!({"agent_id": "test-stats-agent"})).await;
+    assert!(
+        complete_text.contains("completed"),
+        "should confirm completion: {complete_text}"
+    );
+    let list_text = call_tool(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-stats"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("completed"),
+        "task should show completed: {list_text}"
+    );
+    let stats_text = call_tool(
+        &base,
+        &sid,
+        7,
+        "agent_stats",
+        serde_json::json!({"agent_id": "test-stats-agent"}),
+    )
+    .await;
+    let stats: serde_json::Value =
+        serde_json::from_str(&stats_text).expect("stats should be valid JSON");
+    assert_eq!(
+        stats["agent_id"], "test-stats-agent",
+        "should report correct agent: {stats_text}"
+    );
+    assert!(
+        stats.get("tasks_completed").is_some(),
+        "should have tasks_completed field: {stats_text}"
+    );
+    assert!(
+        stats.get("tasks_failed").is_some(),
+        "should have tasks_failed field: {stats_text}"
+    );
+    assert!(
+        stats.get("success_rate").is_some(),
+        "should have success_rate field: {stats_text}"
+    );
+    assert!(
+        stats.get("recent_tasks").is_some(),
+        "should have recent_tasks field: {stats_text}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        8,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-stats-agent"}),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1162,57 +1396,200 @@ async fn bridge_task_lifecycle_happy_path() {
     call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-lifecycle-agent", "project": "test-project-lifecycle"})).await;
     let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-lifecycle-agent", "project": "test-project-lifecycle", "title": "Lifecycle happy path", "description": "Full lifecycle test"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    let list1 = call_tool(&base, &sid, 4, "list_tasks", serde_json::json!({"project": "test-project-lifecycle"})).await;
-    assert!(list1.contains("proposed"), "task should be proposed: {list1}");
-    call_tool(&base, &sid, 5, "accept_task", serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id})).await;
-    let list2 = call_tool(&base, &sid, 6, "list_tasks", serde_json::json!({"project": "test-project-lifecycle"})).await;
-    assert!(list2.contains("accepted"), "task should be accepted: {list2}");
+    let list1 = call_tool(
+        &base,
+        &sid,
+        4,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list1.contains("proposed"),
+        "task should be proposed: {list1}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id}),
+    )
+    .await;
+    let list2 = call_tool(
+        &base,
+        &sid,
+        6,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list2.contains("accepted"),
+        "task should be accepted: {list2}"
+    );
     let complete_text = call_tool(&base, &sid, 7, "complete_task", serde_json::json!({"agent_id": "test-lifecycle-agent", "task_id": task_id, "success": true, "output_data": "{\"files_changed\": 3}"})).await;
-    assert!(complete_text.contains("completed"), "should confirm completion: {complete_text}");
-    let list3 = call_tool(&base, &sid, 8, "list_tasks", serde_json::json!({"project": "test-project-lifecycle"})).await;
-    assert!(list3.contains("completed"), "task should be completed: {list3}");
-    call_tool(&base, &sid, 9, "deregister_agent", serde_json::json!({"agent_id": "test-lifecycle-agent"})).await;
+    assert!(
+        complete_text.contains("completed"),
+        "should confirm completion: {complete_text}"
+    );
+    let list3 = call_tool(
+        &base,
+        &sid,
+        8,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-lifecycle"}),
+    )
+    .await;
+    assert!(
+        list3.contains("completed"),
+        "task should be completed: {list3}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        9,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-lifecycle-agent"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_task_reject_flow() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-reject-agent", "project": "test-project-reject"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-reject-agent", "project": "test-project-reject"}),
+    )
+    .await;
     let propose_text = call_tool(&base, &sid, 3, "propose_task", serde_json::json!({"proposer_agent": "test-reject-agent", "project": "test-project-reject", "title": "Reject test task", "description": "This task will be rejected"})).await;
     let task_id = extract_id_from_response(&propose_text);
     let reject_text = call_tool(&base, &sid, 4, "reject_task", serde_json::json!({"agent_id": "test-reject-agent", "task_id": task_id, "reason": "Out of scope for current sprint"})).await;
-    assert!(reject_text.contains("rejected"), "should confirm rejection: {reject_text}");
-    let list_text = call_tool(&base, &sid, 5, "list_tasks", serde_json::json!({"project": "test-project-reject"})).await;
-    assert!(list_text.contains("rejected"), "task should be rejected: {list_text}");
-    call_tool(&base, &sid, 6, "deregister_agent", serde_json::json!({"agent_id": "test-reject-agent"})).await;
+    assert!(
+        reject_text.contains("rejected"),
+        "should confirm rejection: {reject_text}"
+    );
+    let list_text = call_tool(
+        &base,
+        &sid,
+        5,
+        "list_tasks",
+        serde_json::json!({"project": "test-project-reject"}),
+    )
+    .await;
+    assert!(
+        list_text.contains("rejected"),
+        "task should be rejected: {list_text}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-reject-agent"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_task_accept_prevents_stealing() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-steal-a", "project": "test-project-steal"})).await;
-    call_tool(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-steal-b", "project": "test-project-steal"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-steal-a", "project": "test-project-steal"}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        3,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-steal-b", "project": "test-project-steal"}),
+    )
+    .await;
     let propose_text = call_tool(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-steal-a", "project": "test-project-steal", "title": "Targeted task", "description": "Only agent A should accept", "assignee_agent": "test-steal-a"})).await;
     let task_id = extract_id_from_response(&propose_text);
     let result = session_request(&base, &sid, 5, "tools/call", serde_json::json!({"name": "accept_task", "arguments": {"agent_id": "test-steal-b", "task_id": task_id}})).await;
-    assert!(result.get("error").is_some(), "agent B should not accept task targeted at A: {result}");
-    call_tool(&base, &sid, 6, "deregister_agent", serde_json::json!({"agent_id": "test-steal-a"})).await;
-    call_tool(&base, &sid, 7, "deregister_agent", serde_json::json!({"agent_id": "test-steal-b"})).await;
+    assert!(
+        result.get("error").is_some(),
+        "agent B should not accept task targeted at A: {result}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        6,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-steal-a"}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-steal-b"}),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn bridge_task_complete_requires_assignee() {
     let base = start_server().await;
     let sid = initialize(&base).await;
-    call_tool(&base, &sid, 2, "register_agent", serde_json::json!({"agent_id": "test-complete-a", "project": "test-project-complete"})).await;
-    call_tool(&base, &sid, 3, "register_agent", serde_json::json!({"agent_id": "test-complete-b", "project": "test-project-complete"})).await;
+    call_tool(
+        &base,
+        &sid,
+        2,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-complete-a", "project": "test-project-complete"}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        3,
+        "register_agent",
+        serde_json::json!({"agent_id": "test-complete-b", "project": "test-project-complete"}),
+    )
+    .await;
     let propose_text = call_tool(&base, &sid, 4, "propose_task", serde_json::json!({"proposer_agent": "test-complete-a", "project": "test-project-complete", "title": "Assignee-only completion", "description": "Only agent A should complete", "assignee_agent": "test-complete-a"})).await;
     let task_id = extract_id_from_response(&propose_text);
-    call_tool(&base, &sid, 5, "accept_task", serde_json::json!({"agent_id": "test-complete-a", "task_id": task_id})).await;
+    call_tool(
+        &base,
+        &sid,
+        5,
+        "accept_task",
+        serde_json::json!({"agent_id": "test-complete-a", "task_id": task_id}),
+    )
+    .await;
     let result = session_request(&base, &sid, 6, "tools/call", serde_json::json!({"name": "complete_task", "arguments": {"agent_id": "test-complete-b", "task_id": task_id, "success": true}})).await;
-    assert!(result.get("error").is_some(), "agent B should not complete task assigned to A: {result}");
-    call_tool(&base, &sid, 7, "deregister_agent", serde_json::json!({"agent_id": "test-complete-a"})).await;
-    call_tool(&base, &sid, 8, "deregister_agent", serde_json::json!({"agent_id": "test-complete-b"})).await;
+    assert!(
+        result.get("error").is_some(),
+        "agent B should not complete task assigned to A: {result}"
+    );
+    call_tool(
+        &base,
+        &sid,
+        7,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-complete-a"}),
+    )
+    .await;
+    call_tool(
+        &base,
+        &sid,
+        8,
+        "deregister_agent",
+        serde_json::json!({"agent_id": "test-complete-b"}),
+    )
+    .await;
 }
