@@ -93,6 +93,9 @@ static ENDPOINT_URL: OnceLock<String> = OnceLock::new();
 /// Cached embedding provider, initialized on first `embed_text()` call.
 static PROVIDER: OnceLock<Result<Box<dyn EmbeddingProvider>, String>> = OnceLock::new();
 
+/// Provider source, recorded at initialization time.
+static PROVIDER_SOURCE: OnceLock<String> = OnceLock::new();
+
 /// Set the model directory path. Call once at server startup from config.
 ///
 /// Legacy API for backward compatibility. Prefer [`set_model_config`].
@@ -146,6 +149,7 @@ fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
     // Priority 1: Remote endpoint configured.
     if let Some(url) = ENDPOINT_URL.get() {
         tracing::info!(endpoint = %url, dims, "using HTTP embedding endpoint");
+        let _ = PROVIDER_SOURCE.set("http".into());
         return http_provider::HttpEmbeddingProvider::new(
             url.clone(),
             dims,
@@ -160,6 +164,7 @@ fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
     {
         let path = resolve_model_path();
         tracing::info!(path = %path.display(), dims, "loading EmbeddingGemma...");
+        let _ = PROVIDER_SOURCE.set("local".into());
         gemma::GemmaProvider::load(&path, dims)
             .map(|p| Box::new(p) as Box<dyn EmbeddingProvider>)
             .map_err(|e| e.to_string())
@@ -167,17 +172,23 @@ fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
 
     // Priority 3: Neither available.
     #[cfg(not(feature = "embed"))]
-    Err("No embedding provider available. \
-         Set [vector] endpoint in config to use a remote embedding service, \
-         or compile with --features embed for local model support."
-        .to_string())
+    {
+        let _ = PROVIDER_SOURCE.set("none".into());
+        Err("No embedding provider available. \
+             Set [vector] endpoint in config to use a remote embedding service, \
+             or compile with --features embed for local model support."
+            .to_string())
+    }
 }
 
 /// Eagerly initialize the embedding provider at startup.
 ///
-/// Triggers model loading (or endpoint validation) immediately rather
-/// than on first embed call. Returns the model ID on success.
-/// Safe to call multiple times — the `OnceLock` ensures single init.
+/// Triggers provider construction immediately rather than on first embed
+/// call. For local models, this loads model weights into memory. For
+/// remote HTTP endpoints, this validates the URL and builds the HTTP
+/// client but does not verify remote reachability. Returns the model ID
+/// on success. Safe to call multiple times — the `OnceLock` ensures
+/// single init.
 pub fn initialize() -> Result<String, String> {
     let result = PROVIDER.get_or_init(|| match build_provider() {
         Ok(provider) => Ok(provider),
@@ -239,8 +250,6 @@ pub struct EmbeddingStatus {
 
 /// Query the embedding provider status without triggering initialization.
 pub fn embedding_status() -> EmbeddingStatus {
-    let has_endpoint = ENDPOINT_URL.get().is_some();
-
     #[cfg(feature = "embed")]
     let model_path_str = resolve_model_path().display().to_string();
     #[cfg(not(feature = "embed"))]
@@ -249,11 +258,16 @@ pub fn embedding_status() -> EmbeddingStatus {
         .cloned()
         .unwrap_or_else(|| "(no local model — embed feature disabled)".into());
 
-    let display_path = if has_endpoint {
-        ENDPOINT_URL.get().cloned().unwrap_or_default()
+    let display_path = if let Some(url) = ENDPOINT_URL.get() {
+        url.clone()
     } else {
         model_path_str
     };
+
+    let source = PROVIDER_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "none".into());
 
     match PROVIDER.get() {
         Some(Ok(provider)) => EmbeddingStatus {
@@ -262,11 +276,7 @@ pub fn embedding_status() -> EmbeddingStatus {
             dimensions: Some(provider.dimensions(None)),
             model_path: display_path,
             error: None,
-            source: if has_endpoint {
-                "http".into()
-            } else {
-                "local".into()
-            },
+            source,
         },
         Some(Err(e)) => EmbeddingStatus {
             loaded: false,
@@ -274,7 +284,7 @@ pub fn embedding_status() -> EmbeddingStatus {
             dimensions: None,
             model_path: display_path,
             error: Some(e.clone()),
-            source: "none".into(),
+            source: source.clone(),
         },
         None => EmbeddingStatus {
             loaded: false,
@@ -282,7 +292,7 @@ pub fn embedding_status() -> EmbeddingStatus {
             dimensions: None,
             model_path: display_path,
             error: None,
-            source: "none".into(),
+            source,
         },
     }
 }

@@ -33,6 +33,9 @@ struct EmbedResponse {
     dimensions: usize,
 }
 
+/// Maximum input size for HTTP embedding requests (1 MB).
+const MAX_INPUT_BYTES: usize = 1_048_576;
+
 /// Embedding provider that delegates to a remote HTTP endpoint.
 pub struct HttpEmbeddingProvider {
     endpoint: String,
@@ -44,12 +47,19 @@ pub struct HttpEmbeddingProvider {
 impl HttpEmbeddingProvider {
     /// Create a new HTTP embedding provider.
     ///
-    /// Validates the endpoint URL and builds an HTTP agent with
-    /// sensible timeouts (connect: 5s, read: 30s).
+    /// Validates the endpoint URL (must be `http://` or `https://`)
+    /// and builds an HTTP agent with sensible timeouts (connect: 5s, read: 30s).
     pub fn new(endpoint: String, dimensions: usize, model_name: String) -> Result<Self, GqlError> {
         if endpoint.is_empty() {
             return Err(GqlError::InvalidArgument {
                 message: "embedding endpoint URL cannot be empty".into(),
+            });
+        }
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err(GqlError::InvalidArgument {
+                message: format!(
+                    "embedding endpoint must use http:// or https:// scheme, got '{endpoint}'"
+                ),
             });
         }
 
@@ -71,6 +81,15 @@ impl HttpEmbeddingProvider {
     }
 
     fn do_embed(&self, text: &str, task: EmbeddingTask) -> Result<Vec<f32>, GqlError> {
+        if text.len() > MAX_INPUT_BYTES {
+            return Err(GqlError::InvalidArgument {
+                message: format!(
+                    "input text too large: {} bytes exceeds limit of {MAX_INPUT_BYTES}",
+                    text.len()
+                ),
+            });
+        }
+
         let request = EmbedRequest {
             text,
             task: task.as_str(),
@@ -80,11 +99,7 @@ impl HttpEmbeddingProvider {
         let response: EmbedResponse = self
             .agent
             .post(&self.endpoint)
-            .send_json(serde_json::json!({
-                "text": request.text,
-                "task": request.task,
-                "dimensions": request.dimensions,
-            }))
+            .send_json(&request)
             .map_err(|e| GqlError::internal(format!("embedding endpoint error: {e}")))?
             .into_json()
             .map_err(|e| GqlError::internal(format!("embedding response parse error: {e}")))?;
@@ -131,8 +146,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     }
 
     fn max_input_bytes(&self) -> usize {
-        // The remote endpoint controls its own limits.
-        1_048_576 // 1 MB
+        MAX_INPUT_BYTES
     }
 }
 
@@ -165,6 +179,12 @@ mod tests {
     #[test]
     fn empty_endpoint_rejected() {
         let result = HttpEmbeddingProvider::new(String::new(), 768, "test".into());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_scheme_rejected() {
+        let result = HttpEmbeddingProvider::new("ftp://host/embed".into(), 768, "test".into());
         assert!(result.is_err());
     }
 
