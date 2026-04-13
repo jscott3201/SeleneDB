@@ -120,7 +120,8 @@ tantivy = "0.26"
 selene-rdf.workspace = true
 
 [features]
-default = []
+default = ["embed"]
+embed = ["selene-gql/embed"]
 dev-tls = ["dep:rcgen"]
 cuda = ["selene-gql/cuda"]
 metal = ["selene-gql/metal"]

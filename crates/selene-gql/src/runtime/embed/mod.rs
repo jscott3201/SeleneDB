@@ -1,7 +1,10 @@
 //! Embedding engine: pluggable provider architecture for vector embeddings.
 //!
-//! The embedding layer loads the EmbeddingGemma provider on first call and
-//! caches it for the server lifetime.
+//! The embedding layer supports two provider modes:
+//! - **Local model** (requires `embed` feature): loads EmbeddingGemma via Candle.
+//! - **HTTP endpoint**: delegates to a remote embedding service.
+//!
+//! Dispatch priority: endpoint configured → HTTP provider; local model → Candle.
 //!
 //! Public API:
 //! - [`embed_text`]: Embed text using the default task (backward compatible).
@@ -9,10 +12,15 @@
 //! - [`embedding_dimensions`]: Query the output vector dimensions.
 //! - [`set_model_path`]: Configure model directory (legacy, use [`set_model_config`]).
 //! - [`set_model_config`]: Configure model name, path, and dimensions.
+//! - [`set_endpoint`]: Configure a remote embedding endpoint.
 
+#[cfg(feature = "embed")]
 pub mod gemma;
+#[cfg(feature = "embed")]
 pub(crate) mod gemma_encoder;
+pub(crate) mod http_provider;
 pub mod provider;
+#[cfg(feature = "embed")]
 pub(crate) mod quantized_gemma_encoder;
 
 pub use provider::{EmbeddingProvider, EmbeddingTask};
@@ -20,6 +28,7 @@ pub use provider::{EmbeddingProvider, EmbeddingTask};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[cfg(feature = "embed")]
 use candle_core::Tensor;
 
 use crate::runtime::eval::EvalContext;
@@ -33,6 +42,7 @@ use crate::types::value::GqlValue;
 ///
 /// Averages all token embeddings into a single sentence embedding.
 /// Shape: `[1, seq_len, hidden_size]` -> `[hidden_size]`
+#[cfg(feature = "embed")]
 pub(crate) fn mean_pool(embeddings: &Tensor) -> Result<Tensor, GqlError> {
     let seq_len = embeddings
         .dim(1)
@@ -51,6 +61,7 @@ pub(crate) fn mean_pool(embeddings: &Tensor) -> Result<Tensor, GqlError> {
 /// L2 normalize a tensor to unit length.
 ///
 /// Produces a unit vector suitable for cosine similarity via dot product.
+#[cfg(feature = "embed")]
 pub(crate) fn l2_normalize(tensor: &Tensor) -> Result<Tensor, GqlError> {
     let norm = tensor
         .sqr()
@@ -65,6 +76,8 @@ pub(crate) fn l2_normalize(tensor: &Tensor) -> Result<Tensor, GqlError> {
         .map_err(|e| GqlError::internal(format!("normalize: {e}")))
 }
 
+// ── Configuration statics ───────────────────────────────────────────────
+
 /// Model name set at server startup. Defaults to "embeddinggemma".
 static MODEL_NAME: OnceLock<String> = OnceLock::new();
 
@@ -73,6 +86,9 @@ static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Target output dimensions for MRL-capable models. Defaults to native dimensions.
 static MODEL_DIMS: OnceLock<usize> = OnceLock::new();
+
+/// Remote embedding endpoint URL, set at server startup from config.
+static ENDPOINT_URL: OnceLock<String> = OnceLock::new();
 
 /// Cached embedding provider, initialized on first `embed_text()` call.
 static PROVIDER: OnceLock<Result<Box<dyn EmbeddingProvider>, String>> = OnceLock::new();
@@ -97,7 +113,16 @@ pub fn set_model_config(name: String, path: PathBuf, dimensions: Option<usize>) 
     }
 }
 
+/// Configure a remote embedding endpoint.
+///
+/// When set, the HTTP provider takes priority over the local model.
+/// Must be called before [`initialize`] or the first [`embed_text`] call.
+pub fn set_endpoint(url: String) {
+    let _ = ENDPOINT_URL.set(url);
+}
+
 /// Resolve the model path from static, env var, or default.
+#[cfg(feature = "embed")]
 fn resolve_model_path() -> PathBuf {
     if let Some(path) = MODEL_PATH.get() {
         return path.clone();
@@ -108,22 +133,50 @@ fn resolve_model_path() -> PathBuf {
     PathBuf::from("data/models/embeddinggemma-300m")
 }
 
-/// Build the embedding provider (EmbeddingGemma).
+/// Build the embedding provider based on configuration and available features.
+///
+/// Dispatch priority:
+/// 1. Remote endpoint configured → [`HttpEmbeddingProvider`]
+/// 2. `embed` feature compiled → [`GemmaProvider`] (local model)
+/// 3. Neither → error with actionable message
 fn build_provider() -> Result<Box<dyn EmbeddingProvider>, String> {
-    let path = resolve_model_path();
     let dims = MODEL_DIMS.get().copied().unwrap_or(768);
+    let model_name = MODEL_NAME.get().map_or("embeddinggemma", |s| s.as_str());
 
-    tracing::info!(path = %path.display(), dims, "loading EmbeddingGemma...");
-
-    gemma::GemmaProvider::load(&path, dims)
+    // Priority 1: Remote endpoint configured.
+    if let Some(url) = ENDPOINT_URL.get() {
+        tracing::info!(endpoint = %url, dims, "using HTTP embedding endpoint");
+        return http_provider::HttpEmbeddingProvider::new(
+            url.clone(),
+            dims,
+            model_name.to_string(),
+        )
         .map(|p| Box::new(p) as Box<dyn EmbeddingProvider>)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    }
+
+    // Priority 2: Local model (requires `embed` feature).
+    #[cfg(feature = "embed")]
+    {
+        let path = resolve_model_path();
+        tracing::info!(path = %path.display(), dims, "loading EmbeddingGemma...");
+        gemma::GemmaProvider::load(&path, dims)
+            .map(|p| Box::new(p) as Box<dyn EmbeddingProvider>)
+            .map_err(|e| e.to_string())
+    }
+
+    // Priority 3: Neither available.
+    #[cfg(not(feature = "embed"))]
+    Err("No embedding provider available. \
+         Set [vector] endpoint in config to use a remote embedding service, \
+         or compile with --features embed for local model support."
+        .to_string())
 }
 
 /// Eagerly initialize the embedding provider at startup.
 ///
-/// Triggers model loading immediately rather than on first embed call.
-/// Returns the model ID on success, or the error message on failure.
+/// Triggers model loading (or endpoint validation) immediately rather
+/// than on first embed call. Returns the model ID on success.
 /// Safe to call multiple times — the `OnceLock` ensures single init.
 pub fn initialize() -> Result<String, String> {
     let result = PROVIDER.get_or_init(|| match build_provider() {
@@ -153,17 +206,14 @@ fn get_provider() -> Result<&'static dyn EmbeddingProvider, GqlError> {
     });
     match result {
         Ok(provider) => Ok(provider.as_ref()),
-        Err(msg) => {
-            let model_path = resolve_model_path();
-            Err(GqlError::InvalidArgument {
-                message: format!(
-                    "Embedding model not loaded: {msg}. \
-                     Set SELENE_MODEL_PATH or place model files in '{}'. \
-                     Server restart required to retry.",
-                    model_path.display()
-                ),
-            })
-        }
+        Err(msg) => Err(GqlError::InvalidArgument {
+            message: format!(
+                "Embedding provider not loaded: {msg}. \
+                 Configure [vector] endpoint for remote embeddings or \
+                 compile with --features embed for local model support. \
+                 Server restart required to retry."
+            ),
+        }),
     }
 }
 
@@ -179,37 +229,60 @@ pub struct EmbeddingStatus {
     pub model_id: Option<String>,
     /// Output vector dimensions. Null if not loaded.
     pub dimensions: Option<usize>,
-    /// Configured model path.
+    /// Configured model path or endpoint URL.
     pub model_path: String,
     /// Error message if the provider failed to load.
     pub error: Option<String>,
+    /// Provider source: "local", "http", or "none".
+    pub source: String,
 }
 
 /// Query the embedding provider status without triggering initialization.
 pub fn embedding_status() -> EmbeddingStatus {
-    let model_path = resolve_model_path().display().to_string();
+    let has_endpoint = ENDPOINT_URL.get().is_some();
+
+    #[cfg(feature = "embed")]
+    let model_path_str = resolve_model_path().display().to_string();
+    #[cfg(not(feature = "embed"))]
+    let model_path_str = ENDPOINT_URL
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "(no local model — embed feature disabled)".into());
+
+    let display_path = if has_endpoint {
+        ENDPOINT_URL.get().cloned().unwrap_or_default()
+    } else {
+        model_path_str
+    };
 
     match PROVIDER.get() {
         Some(Ok(provider)) => EmbeddingStatus {
             loaded: true,
             model_id: Some(provider.model_id().to_string()),
             dimensions: Some(provider.dimensions(None)),
-            model_path,
+            model_path: display_path,
             error: None,
+            source: if has_endpoint {
+                "http".into()
+            } else {
+                "local".into()
+            },
         },
         Some(Err(e)) => EmbeddingStatus {
             loaded: false,
             model_id: None,
             dimensions: None,
-            model_path,
+            model_path: display_path,
             error: Some(e.clone()),
+            source: "none".into(),
         },
         None => EmbeddingStatus {
             loaded: false,
             model_id: None,
             dimensions: None,
-            model_path,
+            model_path: display_path,
             error: None,
+            source: "none".into(),
         },
     }
 }
@@ -264,7 +337,7 @@ impl ScalarFunction for EmbedFunction {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "embed"))]
 mod tests {
     use std::path::Path;
 
