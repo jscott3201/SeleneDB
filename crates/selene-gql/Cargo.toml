@@ -28,16 +28,20 @@ rayon = "1"
 unicode-normalization = "0.1"
 regex.workspace = true
 
-# Vector embedding (candle ML inference)
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
-tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+# Vector embedding (optional, gated by `embed` feature)
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"], optional = true }
+
+# HTTP embedding fallback (always compiled)
+ureq = { version = "2", features = ["json"] }
 
 [features]
-default = []
-metal = ["candle-core/metal", "candle-nn/metal"]
-cuda = ["candle-core/cuda", "candle-nn/cuda"]
+default = ["embed"]
+embed = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+metal = ["embed", "candle-core/metal", "candle-nn/metal"]
+cuda = ["embed", "candle-core/cuda", "candle-nn/cuda"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["bench"] }
