@@ -35,7 +35,7 @@ candle-transformers = { version = "0.10", optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"], optional = true }
 
 # HTTP embedding fallback (always compiled)
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 
 [features]
 default = ["embed"]
