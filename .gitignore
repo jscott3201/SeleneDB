@@ -48,6 +48,13 @@ data/
 .env.*
 .env.local
 
+# Local/cloud deployment (infrastructure-specific, not for public repo)
+selene.local.toml
+selene.cloud.toml
+scripts/local-deploy.sh
+scripts/gcp-deploy.sh
+docker-compose.gpu.yml
+
 # OS
 .DS_Store
 Thumbs.db
