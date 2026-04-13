@@ -10,20 +10,18 @@
 # Usage:
 #   selene-server --dev --config selene.local.toml --data-dir ~/.selene/data
 
-[server]
-profile = "standalone"   # All services enabled
+profile = "standalone"
+listen_addr = "127.0.0.1:7001"   # QUIC
 
 [http]
-bind = "127.0.0.1:7000"
-allow_plaintext = true   # Localhost only — no TLS needed
-cors_origins = []
-rate_limit_read = 500
-rate_limit_write = 200
-rate_limit_query = 100
-rate_limit_data = 50
+listen_addr = "127.0.0.1:7000"
+allow_plaintext = true
 
-[quic]
-bind = "127.0.0.1:7001"
+[http.rate_limit]
+read_per_sec = 500
+write_per_sec = 200
+query_per_sec = 100
+data_per_sec = 50
 
 [services]
 vector = { enabled = true }
@@ -35,14 +33,11 @@ mcp = { enabled = true }
 replicas = { enabled = false }
 
 [memory]
-budget_mb = 4096         # 4 GB — adjust based on your available RAM
+budget_mb = 4096                  # Adjust based on available RAM
 
-[embedding]
-enabled = true
-model_dir = "models/embeddinggemma-300m"   # Relative to data-dir
-target_dims = 768
+[vector]
+model_path = "models/embeddinggemma-300m"   # Relative to data-dir
+dimensions = 768
 
-[persistence]
-wal_dir = "wal"          # Relative to data-dir
-snapshot_dir = "snapshots"
+[persist]
 snapshot_interval_secs = 300
