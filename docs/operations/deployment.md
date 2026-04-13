@@ -90,6 +90,73 @@ docker compose -f docker-compose.dev.yml up -d
 
 The `--seed` flag populates an empty graph with a demo building hierarchy (site, building, floors, zones, equipment, sensors) and 180 time-series samples.
 
+## Local macOS (Metal GPU)
+
+For Apple Silicon Macs, run SeleneDB natively with Metal-accelerated embeddings. This avoids Docker entirely — Metal is a macOS-only API and cannot be accessed from within a Linux container.
+
+**First-time setup:**
+
+```bash
+# 1. Build with Metal acceleration
+cargo build --release -p selene-server --features metal,dev-tls
+cargo build --release -p selene-cli
+
+# 2. Copy and customize the config template
+cp selene.local.toml.example selene.local.toml
+
+# 3. Prepare data directory and download the embedding model
+mkdir -p ~/.selene/data/{wal,snapshots,models}
+./scripts/fetch-embeddinggemma.sh --dir ~/.selene/data/models/embeddinggemma-300m
+
+# 4. Start the server
+./target/release/selene-server --dev --config selene.local.toml --data-dir ~/.selene/data
+```
+
+For persistent operation, install as a macOS `LaunchAgent` that starts on login and restarts on crash. The example config binds to non-default ports to avoid collisions with development instances:
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| 7000 | TCP | HTTP + MCP |
+| 7001 | UDP | QUIC |
+
+**Useful commands:**
+
+```bash
+# Health check
+curl http://127.0.0.1:7000/health
+
+# Download a portable graph snapshot
+curl http://127.0.0.1:7000/snapshot -o backup.snap
+
+# Follow logs (if running via launchd)
+tail -f ~/.selene/logs/selene.log
+```
+
+**Recommended paths:**
+
+| Path | Contents |
+|------|----------|
+| `~/.selene/data/` | WAL, snapshots, models |
+| `~/.selene/logs/` | Server stdout/stderr logs (when using launchd) |
+| `selene.local.toml` | Server configuration (copied from `.example` template) |
+
+**Restoring a snapshot:**
+
+```bash
+# Copy snapshot to the data directory before starting
+cp backup.snap ~/.selene/data/snapshots/
+```
+
+**Resource sizing (Apple Silicon):**
+
+| Chip | RAM | Recommended budget |
+|------|-----|--------------------|
+| M1/M2 (8 GB) | 8 GB | 2048 MB |
+| M1/M2 Pro (16 GB) | 16 GB | 4096 MB |
+| M3/M4/M5 (16+ GB) | 16+ GB | 4096–8192 MB |
+
+The embedding model (EmbeddingGemma-300M) uses ~600 MB of unified memory via Metal. The memory budget controls graph + time-series allocation only.
+
 ## Building from source
 
 SeleneDB requires Rust 1.94+ and has zero C/C++ dependencies:
