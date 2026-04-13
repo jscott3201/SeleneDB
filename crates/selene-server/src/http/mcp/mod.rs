@@ -14,6 +14,7 @@ mod tools;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use rmcp::handler::server::prompt::PromptContext;
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::tool::{ToolCallContext, ToolRouter};
 use rmcp::model::{
@@ -26,7 +27,6 @@ use rmcp::model::{
     TaskStatus, UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, Peer, RequestContext};
-use rmcp::handler::server::prompt::PromptContext;
 use rmcp::{ErrorData as McpError, RoleServer};
 use tracing::Instrument;
 
