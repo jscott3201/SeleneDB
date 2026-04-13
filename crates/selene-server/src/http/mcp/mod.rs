@@ -26,7 +26,8 @@ use rmcp::model::{
     TaskStatus, UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, Peer, RequestContext};
-use rmcp::{ErrorData as McpError, RoleServer, prompt_handler};
+use rmcp::handler::server::prompt::PromptContext;
+use rmcp::{ErrorData as McpError, RoleServer};
 use tracing::Instrument;
 
 use crate::auth::handshake::AuthContext;
@@ -306,7 +307,6 @@ impl SeleneTools {
 // The `ServerHandler` trait defines methods returning `impl Future<...>` rather
 // than `async fn`, so we must match that signature (clippy::manual_async_fn).
 #[allow(clippy::manual_async_fn)]
-#[prompt_handler]
 impl rmcp::ServerHandler for SeleneTools {
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder()
@@ -396,6 +396,32 @@ impl rmcp::ServerHandler for SeleneTools {
             next_cursor: None,
             meta: None,
         }))
+    }
+
+    // ── Prompts ─────────────────────────────────────────────────────
+
+    fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListPromptsResult, McpError>> + Send + '_ {
+        let prompts = self.prompt_router.list_all();
+        std::future::ready(Ok(ListPromptsResult {
+            prompts,
+            next_cursor: None,
+            meta: None,
+        }))
+    }
+
+    fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetPromptResult, McpError>> + Send + '_ {
+        async move {
+            let ctx = PromptContext::new(self, request.name, request.arguments, context);
+            self.prompt_router.get_prompt(ctx).await
+        }
     }
 
     // ── Logging capability ──────────────────────────────────────────

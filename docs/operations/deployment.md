@@ -98,47 +98,53 @@ For Apple Silicon Macs, run SeleneDB natively with Metal-accelerated embeddings.
 
 ```bash
 # 1. Build with Metal acceleration
-./scripts/local-deploy.sh build
+cargo build --release -p selene-server --features metal,dev-tls
+cargo build --release -p selene-cli
 
-# 2. Download the embedding model
+# 2. Copy and customize the config template
+cp selene.local.toml.example selene.local.toml
+
+# 3. Prepare data directory and download the embedding model
+mkdir -p ~/.selene/data/{wal,snapshots,models}
 ./scripts/fetch-embeddinggemma.sh --dir ~/.selene/data/models/embeddinggemma-300m
 
-# 3. Install launchd service and start
-./scripts/local-deploy.sh install
+# 4. Start the server
+./target/release/selene-server --dev --config selene.local.toml --data-dir ~/.selene/data
 ```
 
-This installs a `LaunchAgent` that starts SeleneDB on login and restarts on crash. The server binds to non-default ports to avoid collisions with development instances:
+For persistent operation, install as a macOS `LaunchAgent` that starts on login and restarts on crash. The example config binds to non-default ports to avoid collisions with development instances:
 
 | Port | Protocol | Service |
 |------|----------|---------|
 | 7000 | TCP | HTTP + MCP |
 | 7001 | UDP | QUIC |
 
-**Management commands:**
+**Useful commands:**
 
 ```bash
-./scripts/local-deploy.sh status    # Service status + health check
-./scripts/local-deploy.sh logs -f   # Follow server logs
-./scripts/local-deploy.sh restart   # Restart after rebuilding
-./scripts/local-deploy.sh snapshot  # Download graph snapshot
-./scripts/local-deploy.sh uninstall # Remove service (preserves data)
+# Health check
+curl http://127.0.0.1:7000/health
+
+# Download a portable graph snapshot
+curl http://127.0.0.1:7000/snapshot -o backup.snap
+
+# Follow logs (if running via launchd)
+tail -f ~/.selene/logs/selene.log
 ```
 
-**Paths:**
+**Recommended paths:**
 
 | Path | Contents |
 |------|----------|
 | `~/.selene/data/` | WAL, snapshots, models |
-| `~/.selene/logs/` | Server stdout/stderr logs |
-| `~/.local/bin/` | `selene-server` and `selene` binaries |
-| `selene.local.toml` | Server configuration (in project root) |
+| `~/.selene/logs/` | Server stdout/stderr logs (when using launchd) |
+| `selene.local.toml` | Server configuration (copied from `.example` template) |
 
-**Restoring a cloud snapshot locally:**
+**Restoring a snapshot:**
 
 ```bash
 # Copy snapshot to the data directory before starting
-cp ~/Development/SeleneSnapshots/cloud-migration-*.snap ~/.selene/data/snapshots/
-./scripts/local-deploy.sh restart
+cp backup.snap ~/.selene/data/snapshots/
 ```
 
 **Resource sizing (Apple Silicon):**

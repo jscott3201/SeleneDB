@@ -210,13 +210,17 @@ docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510
 
 ### GPU-accelerated inference
 
-For on-device embedding with EmbeddingGemma (CUDA or Metal):
+For on-device embedding with EmbeddingGemma, build from source with GPU support:
 
 ```bash
-docker compose -f docker-compose.gpu.yml up -d
+# Apple Silicon (Metal)
+cargo build --release -p selene-server --features metal,dev-tls
+
+# NVIDIA CUDA
+cargo build --release -p selene-server --features cuda,dev-tls
 ```
 
-This enables native embedding inference at ~50ms/query on a Tesla T4, with no external API calls or network dependency.
+This enables native embedding inference with no external API calls or network dependency. See the [Deployment guide](operations/deployment.md) for full macOS Metal and CUDA setup instructions.
 
 ## Server Flags
 

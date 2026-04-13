@@ -54,6 +54,8 @@ selene.cloud.toml
 scripts/local-deploy.sh
 scripts/gcp-deploy.sh
 docker-compose.gpu.yml
+cloudbuild.yaml
+Dockerfile.gpu
 
 # OS
 .DS_Store

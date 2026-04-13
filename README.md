@@ -229,14 +229,14 @@ docker run ghcr.io/jscott3201/selenedb --profile cloud       # VMs, full service
 docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510  # read replica
 ```
 
-GPU-accelerated deployment for faster embedding inference:
+GPU-accelerated embedding inference (Apple Metal or NVIDIA CUDA):
 
 ```bash
-# Build with CUDA support via Cloud Build
-gcloud builds submit --config=cloudbuild.yaml --substitutions=_TAG=latest
+# Apple Silicon (Metal) — build from source
+cargo build --release -p selene-server --features metal,dev-tls
 
-# Run with NVIDIA GPU
-docker compose -f docker-compose.gpu.yml up -d
+# NVIDIA CUDA — build from source
+cargo build --release -p selene-server --features cuda,dev-tls
 ```
 
 Bidirectional sync for offline-first edge nodes:
@@ -248,7 +248,7 @@ upstream = "hub.example.com:4510"
 peer_name = "building-42"
 ```
 
-The CPU Docker image is distroless (`gcr.io/distroless/static:nonroot`) at ~14 MB compressed, with no shell, no package manager, and minimal attack surface. The GPU image uses NVIDIA's CUDA runtime base (~2.4 GB compressed) and bundles the EmbeddingGemma GGUF model (~330 MB) for a total of ~2.8 GB compressed. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
+The Docker image is distroless (`gcr.io/distroless/static:nonroot`) at ~14 MB compressed, with no shell, no package manager, and minimal attack surface. GPU acceleration (Metal or CUDA) requires building from source with the appropriate feature flag. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
 
 ## Documentation
 

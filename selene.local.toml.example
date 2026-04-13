@@ -1,0 +1,48 @@
+# SeleneDB Local Configuration — Apple Silicon (Metal)
+#
+# Native macOS deployment with Metal GPU-accelerated embeddings.
+# Non-default ports (7000/7001) to avoid collisions with dev instances
+# that use the standard 8080/4510.
+#
+# Copy this file and customize:
+#   cp selene.local.toml.example selene.local.toml
+#
+# Usage:
+#   selene-server --dev --config selene.local.toml --data-dir ~/.selene/data
+
+[server]
+profile = "standalone"   # All services enabled
+
+[http]
+bind = "127.0.0.1:7000"
+allow_plaintext = true   # Localhost only — no TLS needed
+cors_origins = []
+rate_limit_read = 500
+rate_limit_write = 200
+rate_limit_query = 100
+rate_limit_data = 50
+
+[quic]
+bind = "127.0.0.1:7001"
+
+[services]
+vector = { enabled = true }
+search = { enabled = true }
+temporal = { enabled = true }
+federation = { enabled = false }
+algorithms = { enabled = true }
+mcp = { enabled = true }
+replicas = { enabled = false }
+
+[memory]
+budget_mb = 4096         # 4 GB — adjust based on your available RAM
+
+[embedding]
+enabled = true
+model_dir = "models/embeddinggemma-300m"   # Relative to data-dir
+target_dims = 768
+
+[persistence]
+wal_dir = "wal"          # Relative to data-dir
+snapshot_dir = "snapshots"
+snapshot_interval_secs = 300
