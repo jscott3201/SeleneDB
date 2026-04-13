@@ -231,6 +231,32 @@ impl OAuthTokenService {
         })
     }
 
+    /// Validate a JWT without a graph lookup.
+    ///
+    /// Performs signature verification, expiry check, and deny-list lookup,
+    /// but does NOT verify the principal exists in the graph. Returns the
+    /// decoded claims. Use this when the graph is not accessible (e.g.,
+    /// Aether server validating tokens independently of SeleneDB).
+    pub fn validate_standalone(&self, token: &str) -> Result<McpTokenClaims, OAuthError> {
+        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &self.validation)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
+                _ => OAuthError::InvalidToken(e.to_string()),
+            })?;
+
+        let claims = token_data.claims;
+
+        // Deny-list check.
+        {
+            let deny = self.deny_list.read();
+            if deny.contains_key(&claims.jti) {
+                return Err(OAuthError::TokenRevoked);
+            }
+        }
+
+        Ok(claims)
+    }
+
     // -- Refresh -------------------------------------------------------------
 
     /// Exchange a refresh token for a new (access JWT, refresh token) pair.
@@ -270,6 +296,27 @@ impl OAuthTokenService {
 
         // 4. Issue new pair with current role.
         self.issue(&record.principal, &role_str)
+    }
+
+    /// Exchange a refresh token for a new pair without graph lookup.
+    ///
+    /// Like [`refresh`] but skips principal re-validation against the graph.
+    /// Use this when the graph is not accessible (e.g., Aether server
+    /// operating independently of SeleneDB's internal graph).
+    pub fn refresh_standalone(&self, refresh_token: &str) -> Result<(String, String), OAuthError> {
+        let record = {
+            let mut store = self.refresh_store.write();
+            store
+                .remove(refresh_token)
+                .ok_or(OAuthError::InvalidRefreshToken)?
+        };
+
+        if now_secs() >= record.expires_at {
+            return Err(OAuthError::InvalidRefreshToken);
+        }
+
+        // Re-issue with the original principal (no graph re-validation).
+        self.issue(&record.principal, "operator")
     }
 
     // -- Revoke / prune ------------------------------------------------------

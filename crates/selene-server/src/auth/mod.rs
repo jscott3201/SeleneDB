@@ -4,15 +4,17 @@
 //! containment scope. Cedar policies on disk define role→action mappings.
 //! Query-level enforcement is handled via scope bitmaps passed to GQL execution.
 
-pub(crate) mod credential;
+pub mod credential;
 pub(crate) mod engine;
 pub mod handshake;
-pub(crate) mod oauth;
+pub mod oauth;
 pub(crate) mod policies;
 pub(crate) mod projection;
 
+pub use credential::{CredentialError, hash_credential, verify_credential};
 pub use engine::AuthEngine;
 pub use handshake::AuthContext;
+pub use oauth::{OAuthError, OAuthTokenService};
 
 /// Roles recognized by the default Cedar policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
