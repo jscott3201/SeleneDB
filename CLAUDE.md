@@ -106,7 +106,7 @@ Optimizer rule tests: construct `ExecutionPlan` manually, call `rule.rewrite(pla
 
 ## Benchmarks
 
-7 crates, ~100 benchmarks. Run sequentially:
+8 crates, ~110 benchmarks. Run sequentially:
 
 ```bash
 cargo bench -p selene-gql
@@ -116,6 +116,7 @@ cargo bench -p selene-persist
 cargo bench -p selene-ts
 cargo bench -p selene-wire
 cargo bench -p selene-rdf --all-features
+cargo bench -p selene-server --features selene-server/dev-tls
 ```
 
 Stress profile: `SELENE_BENCH_PROFILE=stress SELENE_MAX_BINDINGS=500000 cargo bench -p selene-gql`

@@ -12,6 +12,8 @@
 //! → { "embedding": [0.1, ...], "model": "...", "dimensions": 768 }
 //! ```
 
+use std::io::Read;
+
 use crate::types::error::GqlError;
 
 use super::provider::{EmbeddingProvider, EmbeddingTask};
@@ -35,6 +37,14 @@ struct EmbedResponse {
 
 /// Maximum input size for HTTP embedding requests (1 MB).
 const MAX_INPUT_BYTES: usize = 1_048_576;
+
+/// Maximum response body size accepted from the embedding endpoint (16 MB).
+///
+/// Guards against a misconfigured, compromised, or proxy-redirected endpoint
+/// streaming unbounded bytes into `serde_json::from_reader` and OOMing the
+/// server before the dimension sanity checks can run. A 4096-dim f32 vector
+/// is only ~16 KB in JSON, so 16 MB is comfortably oversized.
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Embedding provider that delegates to a remote HTTP endpoint.
 pub struct HttpEmbeddingProvider {
@@ -96,13 +106,36 @@ impl HttpEmbeddingProvider {
             dimensions: self.dimensions,
         };
 
-        let response: EmbedResponse = self
-            .agent
-            .post(&self.endpoint)
-            .send_json(&request)
-            .map_err(|e| GqlError::internal(format!("embedding endpoint error: {e}")))?
-            .into_json()
-            .map_err(|e| GqlError::internal(format!("embedding response parse error: {e}")))?;
+        // Perform the blocking HTTP call. If we are running on a multi-thread
+        // tokio runtime worker, use `block_in_place` to signal the scheduler to
+        // move other tasks off this worker so they do not starve while `ureq`
+        // parks the thread. Outside a runtime (e.g. direct unit tests) or on
+        // current-thread runtimes, call directly.
+        let call = || -> Result<EmbedResponse, GqlError> {
+            let resp = self
+                .agent
+                .post(&self.endpoint)
+                .send_json(&request)
+                .map_err(|e| GqlError::internal(format!("embedding endpoint error: {e}")))?;
+            // Cap response body: `ureq::Response::into_json` uses `into_reader()`
+            // which has no default size limit, so a runaway endpoint could OOM
+            // the server before the dimension check runs.
+            let reader = resp.into_reader().take(MAX_RESPONSE_BYTES);
+            serde_json::from_reader(reader)
+                .map_err(|e| GqlError::internal(format!("embedding response parse error: {e}")))
+        };
+
+        let response: EmbedResponse = match tokio::runtime::Handle::try_current() {
+            Ok(h)
+                if matches!(
+                    h.runtime_flavor(),
+                    tokio::runtime::RuntimeFlavor::MultiThread
+                ) =>
+            {
+                tokio::task::block_in_place(call)?
+            }
+            _ => call()?,
+        };
 
         if response.dimensions != self.dimensions {
             return Err(GqlError::internal(format!(

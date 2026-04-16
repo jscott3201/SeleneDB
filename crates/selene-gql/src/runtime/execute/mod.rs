@@ -648,6 +648,128 @@ fn execute_plan_with_csr(
     )
 }
 
+/// Try the count-only short-circuit. Returns `Ok(Some(result))` when the plan
+/// is eligible (`plan.count_only`) and the count could be computed without
+/// materializing bindings; `Ok(None)` means fall through to normal execution.
+fn try_count_only_shortcut(
+    plan: &ExecutionPlan,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    ctx: &EvalContext<'_>,
+) -> Result<Option<GqlResult>, GqlError> {
+    if !plan.count_only {
+        return Ok(None);
+    }
+    let Some(count) = execute_count_only(plan, graph, scope, ctx)? else {
+        return Ok(None);
+    };
+    let count_alias = plan
+        .display_schema
+        .fields()
+        .first()
+        .map_or("count(*)", |f| f.name().as_str());
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new(count_alias, arrow::datatypes::DataType::Int64, false),
+    ]));
+    let array = arrow::array::Int64Array::from(vec![count as i64]);
+    let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
+        .map_err(|e| GqlError::internal(format!("Arrow batch: {e}")))?;
+    Ok(Some(GqlResult {
+        schema,
+        batches: vec![batch],
+        status: GqlStatus::success(1),
+        mutations: MutationStats::default(),
+        profile: None,
+        changes: vec![],
+    }))
+}
+
+/// Partition the pipeline around mutations: FILTER ops before RETURN apply
+/// before mutations execute (so mutations see the filtered row set); everything
+/// else applies after. When the plan has no mutations, all ops go post-mutation.
+fn partition_pipeline(plan: &ExecutionPlan) -> (Vec<&PipelineOp>, Vec<&PipelineOp>) {
+    let mut pre = Vec::new();
+    let mut post = Vec::new();
+    let mut seen_return = false;
+    for op in &plan.pipeline {
+        if matches!(op, PipelineOp::Return { .. }) {
+            seen_return = true;
+        }
+        if !plan.mutations.is_empty() && !seen_return {
+            match op {
+                PipelineOp::Filter { .. } => pre.push(op),
+                _ => post.push(op),
+            }
+        } else {
+            post.push(op);
+        }
+    }
+    (pre, post)
+}
+
+/// Apply a streaming pipeline op directly to the factorized chunk without
+/// flattening. Handles OFFSET, LIMIT, and simple FILTER (no subqueries).
+/// Returns `Ok(true)` if handled natively; `Ok(false)` if the caller must
+/// flatten and fall through to the flat-chunk path.
+fn apply_factorized_streaming_op(
+    fc: &mut crate::types::factor::FactorizedChunk,
+    op: &PipelineOp,
+    graph: &SeleneGraph,
+    ctx: &EvalContext<'_>,
+) -> Result<bool, GqlError> {
+    match op {
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
+            let deep = fc.deepest_mut();
+            let phys_len = deep.len;
+            deep.selection.skip(n, phys_len);
+            Ok(true)
+        }
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
+            let deep = fc.deepest_mut();
+            let phys_len = deep.len;
+            deep.selection.truncate(n, phys_len);
+            Ok(true)
+        }
+        PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
+            let flat = fc.flatten();
+            let gatherer = crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
+            let active_before: Vec<usize> = {
+                let deep = fc.deepest();
+                deep.selection.active_indices(deep.len).collect()
+            };
+            if let Ok(crate::types::chunk::Column::Bool(arr)) =
+                crate::runtime::vector::eval_vec(predicate, &flat, &gatherer, ctx)
+            {
+                use arrow::array::Array;
+                let mut new_active = Vec::with_capacity(active_before.len());
+                for (pos, &phys_idx) in active_before.iter().enumerate() {
+                    if !arr.is_null(pos) && arr.value(pos) {
+                        new_active.push(phys_idx as u32);
+                    }
+                }
+                let deep = fc.deepest_mut();
+                deep.selection = crate::types::chunk::SelectionVector::from_indices(new_active);
+            } else {
+                let mut new_active = Vec::with_capacity(active_before.len());
+                for (pos, &phys_idx) in active_before.iter().enumerate() {
+                    let row = flat.row_view(pos);
+                    let pass = crate::runtime::eval::eval_predicate_row(predicate, &row, ctx)
+                        .is_ok_and(|t| t.is_true());
+                    if pass {
+                        new_active.push(phys_idx as u32);
+                    }
+                }
+                let deep = fc.deepest_mut();
+                deep.selection = crate::types::chunk::SelectionVector::from_indices(new_active);
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Core plan execution. All variants delegate here.
 #[allow(clippy::too_many_arguments)]
 fn execute_plan_inner(
@@ -660,7 +782,6 @@ fn execute_plan_inner(
     options: &crate::GqlOptions,
     csr: Option<&selene_graph::CsrAdjacency>,
 ) -> Result<GqlResult, GqlError> {
-    // Create evaluation context with optional parameters
     let registry = FunctionRegistry::builtins();
     let mut ctx = EvalContext::new(graph, registry)
         .with_options(options.clone())
@@ -669,33 +790,9 @@ fn execute_plan_inner(
         ctx = ctx.with_parameters(params);
     }
 
-    // ── Count-only short-circuit ──
-    // Skip all binding materialization. Return a single row with the count.
-    if plan.count_only
-        && let Some(count) = execute_count_only(plan, graph, scope, &ctx)?
-    {
-        let count_alias = plan
-            .display_schema
-            .fields()
-            .first()
-            .map_or("count(*)", |f| f.name().as_str());
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new(count_alias, arrow::datatypes::DataType::Int64, false),
-        ]));
-        let array = arrow::array::Int64Array::from(vec![count as i64]);
-        let batch =
-            arrow::record_batch::RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
-                .map_err(|e| GqlError::internal(format!("Arrow batch: {e}")))?;
-        return Ok(GqlResult {
-            schema,
-            batches: vec![batch],
-            status: GqlStatus::success(1),
-            mutations: MutationStats::default(),
-            profile: None,
-            changes: vec![],
-        });
+    if let Some(result) = try_count_only_shortcut(plan, graph, scope, &ctx)? {
+        return Ok(result);
     }
-    // Fall through to normal execution if short-circuit not applicable
 
     // Detect simple LIMIT pushdown: single LabelScan + pipeline ends with LIMIT
     let scan_limit = detect_scan_limit(&plan.pattern_ops, &plan.pipeline);
@@ -772,25 +869,9 @@ fn execute_plan_inner(
         check_chunk_limit(c)?;
     }
 
-    // Pipeline stages that come before mutations (FILTER).
-    // Mutations need filtered bindings, not all pattern matches.
-    let mut pre_mutation_pipeline = Vec::new();
-    let mut post_mutation_pipeline = Vec::new();
-    let mut seen_return = false;
-    for op in &plan.pipeline {
-        if matches!(op, PipelineOp::Return { .. }) {
-            seen_return = true;
-        }
-        if !plan.mutations.is_empty() && !seen_return {
-            // Pipeline ops before RETURN apply before mutations
-            match op {
-                PipelineOp::Filter { .. } => pre_mutation_pipeline.push(op),
-                _ => post_mutation_pipeline.push(op),
-            }
-        } else {
-            post_mutation_pipeline.push(op);
-        }
-    }
+    // Pre-mutation FILTERs run before mutations execute so the mutation operates
+    // on the filtered row set; everything else runs after.
+    let (pre_mutation_pipeline, post_mutation_pipeline) = partition_pipeline(plan);
 
     // Apply pre-mutation filters
     for op in &pre_mutation_pipeline {
@@ -819,78 +900,15 @@ fn execute_plan_inner(
     while op_idx < post_mutation_pipeline.len() {
         let op = post_mutation_pipeline[op_idx];
 
-        // Factorized-native path for simple streaming ops
-        if factorized.is_some() {
-            match op {
-                PipelineOp::Offset { value } => {
-                    let n = value.resolve(ctx.parameters)? as usize;
-                    let fc = factorized.as_mut().unwrap();
-                    let deep = fc.deepest_mut();
-                    let phys_len = deep.len;
-                    deep.selection.skip(n, phys_len);
-                    op_idx += 1;
-                    continue;
-                }
-                PipelineOp::Limit { value } => {
-                    let n = value.resolve(ctx.parameters)? as usize;
-                    let fc = factorized.as_mut().unwrap();
-                    let deep = fc.deepest_mut();
-                    let phys_len = deep.len;
-                    deep.selection.truncate(n, phys_len);
-                    op_idx += 1;
-                    continue;
-                }
-                PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
-                    // Flatten temporarily for eval_vec, apply result back.
-                    // Use the main ctx (which has parameters and scope).
-                    let fc = factorized.as_mut().unwrap();
-                    let flat = fc.flatten();
-                    let gatherer =
-                        crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
-
-                    let active_before: Vec<usize> = {
-                        let deep = fc.deepest();
-                        deep.selection.active_indices(deep.len).collect()
-                    };
-
-                    if let Ok(crate::types::chunk::Column::Bool(arr)) =
-                        crate::runtime::vector::eval_vec(predicate, &flat, &gatherer, &ctx)
-                    {
-                        use arrow::array::Array;
-                        let mut new_active = Vec::with_capacity(active_before.len());
-                        for (pos, &phys_idx) in active_before.iter().enumerate() {
-                            if !arr.is_null(pos) && arr.value(pos) {
-                                new_active.push(phys_idx as u32);
-                            }
-                        }
-                        let deep = fc.deepest_mut();
-                        deep.selection =
-                            crate::types::chunk::SelectionVector::from_indices(new_active);
-                    } else {
-                        // Per-row fallback
-                        let mut new_active = Vec::with_capacity(active_before.len());
-                        for (pos, &phys_idx) in active_before.iter().enumerate() {
-                            let row = flat.row_view(pos);
-                            let pass =
-                                crate::runtime::eval::eval_predicate_row(predicate, &row, &ctx)
-                                    .is_ok_and(|t| t.is_true());
-                            if pass {
-                                new_active.push(phys_idx as u32);
-                            }
-                        }
-                        let deep = fc.deepest_mut();
-                        deep.selection =
-                            crate::types::chunk::SelectionVector::from_indices(new_active);
-                    }
-                    op_idx += 1;
-                    continue;
-                }
-                // All other ops: flatten and fall through to flat path
-                _ => {
-                    let c = ensure_flat(&mut chunk, &mut factorized);
-                    chunk = Some(c);
-                }
+        // Factorized-native path: try handling the op without flattening.
+        // On unsupported ops, flatten and fall through to the flat path.
+        if let Some(fc) = factorized.as_mut() {
+            if apply_factorized_streaming_op(fc, op, graph, &ctx)? {
+                op_idx += 1;
+                continue;
             }
+            let c = ensure_flat(&mut chunk, &mut factorized);
+            chunk = Some(c);
         }
 
         // Flat path (original logic)

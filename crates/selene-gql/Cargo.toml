@@ -34,8 +34,11 @@ candle-nn = { version = "0.10", optional = true }
 candle-transformers = { version = "0.10", optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"], optional = true }
 
-# HTTP embedding fallback (always compiled)
+# HTTP embedding fallback (always compiled). `tokio` is used only by the HTTP
+# provider to call `block_in_place` so the blocking `ureq` call does not
+# starve the tokio worker when invoked from an async server context.
 ureq = { version = "2", features = ["json"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [features]
 default = ["embed"]
