@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP tool hot-path benchmarks** (`crates/selene-server/benches/mcp_tool_bench.rs`). Five criterion groups cover the ops functions that MCP tools delegate to: `graph_stats`, `health`, `list_nodes`, parameterized GQL reads, and GQL INSERTs. Runs under the standard `SELENE_BENCH_PROFILE` scales; integrated into the per-crate bench run commands.
+
+### Changed
+
+- **`execute_plan_inner` refactor** (`crates/selene-gql/src/runtime/execute/mod.rs`). Extracted three named helpers — `try_count_only_shortcut`, `partition_pipeline`, and `apply_factorized_streaming_op` — to reduce the core execution function from 383 to 280 lines. No behavioral change; all 1,182 selene-gql tests pass unchanged.
+
 ### Removed
 
 - **Multi-agent coordination bridge** removed from the server. The 19 MCP tools (`register_agent`, `heartbeat`, `deregister_agent`, `list_agents`, `share_context`, `get_shared_context`, `claim_intent`, `release_intent`, `check_conflicts`, `start_investigation`, `close_investigation`, `list_investigations`, `find_capable_agent`, `agent_stats`, `propose_task`, `accept_task`, `reject_task`, `complete_task`, `list_tasks`), the `selene://agents` and `selene://agents/{project}` MCP resources, and the background agent-session reaper have all been removed. SeleneDB is refocusing on graph-database primitives; coordination patterns belong in consumers that use Selene as a substrate. Existing `__AgentSession`, `__SharedContext`, `__Investigation`, `__Intent`, and `__Task` nodes in persisted graphs are still queryable via GQL but are no longer maintained by the server.
