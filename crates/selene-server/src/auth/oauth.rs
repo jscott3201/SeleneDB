@@ -73,6 +73,10 @@ pub struct McpTokenClaims {
 pub(crate) struct RefreshRecord {
     /// Principal identity (the `sub` claim).
     pub(crate) principal: String,
+    /// Role granted at issue time. Used by `refresh_standalone` to reissue
+    /// without consulting the graph. `refresh` (graph-backed) still reads
+    /// the live role from the graph so role changes take effect immediately.
+    pub(crate) role: String,
     /// Unix timestamp (seconds) at which the refresh token expires.
     pub(crate) expires_at: u64,
 }
@@ -167,6 +171,7 @@ impl OAuthTokenService {
                 refresh_token.clone(),
                 RefreshRecord {
                     principal: principal.to_string(),
+                    role: role.to_string(),
                     expires_at: now + self.refresh_ttl.as_secs(),
                 },
             );
@@ -315,8 +320,10 @@ impl OAuthTokenService {
             return Err(OAuthError::InvalidRefreshToken);
         }
 
-        // Re-issue with the original principal (no graph re-validation).
-        self.issue(&record.principal, "operator")
+        // Re-issue with the originally-granted role. The role was captured
+        // at `issue()` time; refresh_standalone cannot consult the graph to
+        // pick up post-issue role changes, so stored role is authoritative.
+        self.issue(&record.principal, &record.role)
     }
 
     // -- Revoke / prune ------------------------------------------------------
@@ -697,6 +704,23 @@ mod tests {
         let data = jsonwebtoken::dangerous::insecure_decode::<McpTokenClaims>(&jwt).unwrap();
         let deny = svc.deny_list.read();
         assert!(deny.contains_key(&data.claims.jti));
+    }
+
+    #[test]
+    fn refresh_standalone_preserves_original_role() {
+        let svc = test_service();
+
+        for role in ["reader", "device", "operator", "admin", "service"] {
+            let (_, refresh) = svc.issue("alice", role).unwrap();
+            let (jwt, _) = svc.refresh_standalone(&refresh).unwrap();
+
+            let data = jsonwebtoken::dangerous::insecure_decode::<McpTokenClaims>(&jwt).unwrap();
+            assert_eq!(
+                data.claims.role, role,
+                "refresh_standalone must reissue with the original role"
+            );
+            assert_eq!(data.claims.sub, "alice");
+        }
     }
 
     #[test]
