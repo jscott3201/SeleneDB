@@ -37,7 +37,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["fancy-re
 # HTTP embedding fallback (always compiled). `tokio` is used only by the HTTP
 # provider to call `block_in_place` so the blocking `ureq` call does not
 # starve the tokio worker when invoked from an async server context.
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [features]
