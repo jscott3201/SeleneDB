@@ -73,10 +73,11 @@ impl HttpEmbeddingProvider {
             });
         }
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(5))
-            .timeout_read(std::time::Duration::from_secs(30))
-            .build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .new_agent();
 
         // Leak the model name — the provider lives in an OnceLock for the
         // entire process lifetime, so this is a one-time allocation.
@@ -112,15 +113,17 @@ impl HttpEmbeddingProvider {
         // parks the thread. Outside a runtime (e.g. direct unit tests) or on
         // current-thread runtimes, call directly.
         let call = || -> Result<EmbedResponse, GqlError> {
-            let resp = self
+            let mut resp = self
                 .agent
                 .post(&self.endpoint)
                 .send_json(&request)
                 .map_err(|e| GqlError::internal(format!("embedding endpoint error: {e}")))?;
-            // Cap response body: `ureq::Response::into_json` uses `into_reader()`
-            // which has no default size limit, so a runaway endpoint could OOM
-            // the server before the dimension check runs.
-            let reader = resp.into_reader().take(MAX_RESPONSE_BYTES);
+            // Cap response body: `Body::as_reader` has no default size limit,
+            // so a runaway endpoint could OOM the server before the dimension
+            // check runs. `take(MAX_RESPONSE_BYTES)` returns at most that many
+            // bytes and then EOFs, so `serde_json::from_reader` surfaces a
+            // parse error (unexpected EOF) rather than a memory exhaustion.
+            let reader = resp.body_mut().as_reader().take(MAX_RESPONSE_BYTES);
             serde_json::from_reader(reader)
                 .map_err(|e| GqlError::internal(format!("embedding response parse error: {e}")))
         };
