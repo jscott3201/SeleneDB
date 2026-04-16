@@ -59,7 +59,7 @@ SeleneDB does not just store data for AI. It runs inference natively:
 
 Most databases assume a data center. SeleneDB assumes you might be running on a building controller, a factory gateway, or a Raspberry Pi, and it should work just as well on a cloud VM with a GPU.
 
-- **~14 MB CPU image** (distroless, statically linked, no shell or package manager). GPU acceleration (Metal on Apple Silicon, CUDA on NVIDIA) is available by building from source with `--features metal` or `--features cuda`.
+- **~14 MB CPU image** (distroless, statically linked, no shell or package manager). GPU acceleration (Metal on Apple Silicon, CUDA on NVIDIA) is available by building from source with `cargo build -p selene-server --features metal` or `cargo build -p selene-server --features cuda`.
 - **Sub-second cold start**: binary snapshot recovery in ~1.8 ms on a 10K-node graph
 - **Runtime profiles**: `--profile edge` for constrained devices, `--profile cloud` for full services
 - **Offline-first sync**: edge nodes operate independently and sync bidirectionally with LWW conflict resolution

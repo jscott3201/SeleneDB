@@ -127,7 +127,10 @@ impl HttpEmbeddingProvider {
 
         let response: EmbedResponse = match tokio::runtime::Handle::try_current() {
             Ok(h)
-                if matches!(h.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread) =>
+                if matches!(
+                    h.runtime_flavor(),
+                    tokio::runtime::RuntimeFlavor::MultiThread
+                ) =>
             {
                 tokio::task::block_in_place(call)?
             }
