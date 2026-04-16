@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Multi-agent coordination bridge** removed from the server. The 19 MCP tools (`register_agent`, `heartbeat`, `deregister_agent`, `list_agents`, `share_context`, `get_shared_context`, `claim_intent`, `release_intent`, `check_conflicts`, `start_investigation`, `close_investigation`, `list_investigations`, `find_capable_agent`, `agent_stats`, `propose_task`, `accept_task`, `reject_task`, `complete_task`, `list_tasks`), the `selene://agents` and `selene://agents/{project}` MCP resources, and the background agent-session reaper have all been removed. SeleneDB is refocusing on graph-database primitives; coordination patterns belong in consumers that use Selene as a substrate. Existing `__AgentSession`, `__SharedContext`, `__Investigation`, `__Intent`, and `__Task` nodes in persisted graphs are still queryable via GQL but are no longer maintained by the server.
+
 ## [1.0.0] - 2026-04-12
 
 ### Added
