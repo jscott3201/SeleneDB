@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
 
 use selene_core::{LabelSet, PropertyMap, Value};
@@ -145,31 +145,45 @@ fn bench_gql_read(c: &mut Criterion) {
 }
 
 // ── create_node via GQL mutation path ──────────────────────────────
+//
+// Uses `iter_batched` so every iteration runs against a freshly built
+// state of constant size. Without that, each INSERT would grow the
+// underlying graph/WAL/indexes during the measurement window, so the
+// sample would drift upward as the run progressed and would no longer
+// reflect a steady-state insert cost.
 
 fn bench_create_node(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("mcp_create_node");
-
-    let (state, _dir) = build_state(&rt, 1_000);
     let auth = admin();
-    let state = Arc::new(state);
 
     group.bench_function("single_insert", |b| {
-        b.iter(|| {
-            let mut params: HashMap<String, Value> = HashMap::new();
-            params.insert("name".into(), Value::String("bench-node".into()));
-            let result = ops::gql::execute_gql(
-                &state,
-                &auth,
-                "INSERT (n:bench {name: $name}) RETURN id(n) AS id",
-                Some(&params),
-                false,
-                false,
-                ops::gql::ResultFormat::Json,
-            )
-            .expect("create_node");
-            std::hint::black_box(result);
-        });
+        b.iter_batched(
+            || {
+                // Seed 100 nodes (not 1K): fresh state per iteration keeps
+                // every sample at a constant starting size, and 100 is
+                // enough to exercise label-index and WAL code paths without
+                // dominating the routine with setup variance.
+                let (state, dir) = build_state(&rt, 100);
+                (Arc::new(state), dir)
+            },
+            |(state, _dir)| {
+                let mut params: HashMap<String, Value> = HashMap::new();
+                params.insert("name".into(), Value::String("bench-node".into()));
+                let result = ops::gql::execute_gql(
+                    &state,
+                    &auth,
+                    "INSERT (n:bench {name: $name}) RETURN id(n) AS id",
+                    Some(&params),
+                    false,
+                    false,
+                    ops::gql::ResultFormat::Json,
+                )
+                .expect("create_node");
+                std::hint::black_box(result);
+            },
+            BatchSize::SmallInput,
+        );
     });
     group.finish();
 }

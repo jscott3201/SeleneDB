@@ -579,9 +579,15 @@ the graph ~doubles the cost.
 
 | Operation | Median |
 |-----------|--------|
-| Single INSERT | 112 us |
+| Single INSERT | ~686 us |
 
-Includes parse + plan + mutation-batcher round-trip + WAL enqueue.
+Includes parse + plan + mutation-batcher round-trip + WAL enqueue. Measured
+with `iter_batched` against a freshly built 100-node state per iteration, so
+each sample reflects steady-state insert cost rather than drifting as the
+graph grows during the measurement window. Setup cost (async `ServerState`
+bootstrap, tempdir creation) dominates iteration-to-iteration variance, so
+treat the CI as indicative of order-of-magnitude rather than ±µs-level
+precision.
 
 ---
 
