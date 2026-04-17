@@ -18,6 +18,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::bootstrap::ServerState;
 use crate::http::auth::HttpAuth;
+use crate::http::changelog_event::lagged_payload;
 
 /// Query parameters for SSE subscription filtering.
 #[derive(serde::Deserialize, Default)]
@@ -269,42 +270,5 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "key": key.as_str(),
             "timestamp_ms": ts_ms,
         }),
-    }
-}
-
-/// JSON body of the `subscriber_lagged` SSE event. Pulled out so the wire
-/// shape is unit-testable independent of the full streaming pipeline.
-fn lagged_payload(dropped_count: u64) -> serde_json::Value {
-    serde_json::json!({
-        "type": "subscriber_lagged",
-        "dropped_count": dropped_count,
-        "hint": "the changelog queue overflowed; fetch a fresh snapshot if you require strict continuity",
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::lagged_payload;
-
-    #[test]
-    fn lagged_payload_carries_typed_kind_and_count() {
-        // Clients dispatch on the `type` discriminator and report
-        // `dropped_count` to the user; both must be present and stable.
-        let p = lagged_payload(7);
-        assert_eq!(p["type"], "subscriber_lagged");
-        assert_eq!(p["dropped_count"], 7);
-        assert!(
-            p["hint"].as_str().unwrap().contains("snapshot"),
-            "hint should suggest snapshot recovery"
-        );
-    }
-
-    #[test]
-    fn lagged_payload_handles_zero_drop_count() {
-        // Edge case: BroadcastStreamRecvError::Lagged(0) is technically
-        // possible if the channel underflows; payload should still be
-        // well-formed.
-        let p = lagged_payload(0);
-        assert_eq!(p["dropped_count"], 0);
     }
 }

@@ -17,6 +17,7 @@ use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 
 use super::auth::HttpAuth;
+use super::changelog_event::lagged_payload;
 
 /// Global connection counter for enforcing max subscriptions.
 static WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -197,7 +198,13 @@ async fn handle_ws(mut socket: WebSocket, auth: AuthContext, state: Arc<ServerSt
                         }
                         let _ = socket
                             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                code: 1011, // Internal Error / server is terminating
+                                // RFC 6455 §7.4: 1011 is the closest match for
+                                // "the server is unable to fulfill the request"
+                                // when the cause is internal backpressure rather
+                                // than a protocol violation. The server itself
+                                // is healthy; only this subscription is being
+                                // dropped due to changelog overflow.
+                                code: 1011,
                                 reason: "subscriber lagged".into(),
                             })))
                             .await;
@@ -371,32 +378,4 @@ fn filter_changes(
     }
 
     result
-}
-
-/// JSON body of the `subscriber_lagged` notification. Mirrors the SSE
-/// version in routes/subscribe.rs so clients see one wire contract
-/// across both transports.
-fn lagged_payload(dropped_count: u64) -> serde_json::Value {
-    serde_json::json!({
-        "type": "subscriber_lagged",
-        "dropped_count": dropped_count,
-        "hint": "the changelog queue overflowed; fetch a fresh snapshot if you require strict continuity",
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::lagged_payload;
-
-    #[test]
-    fn lagged_payload_matches_sse_contract() {
-        // WS and SSE must agree on this shape. The corresponding SSE test
-        // lives in routes/subscribe.rs; both should keep checking the same
-        // discriminator + count fields so a client can dispatch on `type`
-        // regardless of transport.
-        let p = lagged_payload(42);
-        assert_eq!(p["type"], "subscriber_lagged");
-        assert_eq!(p["dropped_count"], 42);
-        assert!(p["hint"].is_string());
-    }
 }
