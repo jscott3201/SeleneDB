@@ -4,6 +4,7 @@
 //! Each operation takes typed Rust inputs, checks authorization, performs
 //! the graph/TS/query operation, and returns typed results.
 
+pub mod api_keys;
 pub mod csv_io;
 pub mod edges;
 pub mod gql;

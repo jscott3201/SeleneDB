@@ -904,6 +904,34 @@ pub(crate) struct RotateCredentialParams {
     pub(crate) new_password: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreateApiKeyParams {
+    /// Human-readable name for this key (for example, "ci-runner" or "mobile-app").
+    pub(crate) name: String,
+    /// Identity of the principal this key authenticates as.
+    pub(crate) identity: String,
+    /// Optional TTL in days. Omit for a non-expiring key.
+    #[serde(default)]
+    pub(crate) ttl_days: Option<u32>,
+    /// Optional scope tags recorded on the key for downstream enforcement.
+    #[serde(default)]
+    pub(crate) scopes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ListApiKeysParams {
+    /// Filter to keys issued to this identity. Omit to list all.
+    #[serde(default)]
+    pub(crate) identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeApiKeyParams {
+    /// Node ID of the api_key to revoke.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) key_id: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,7 @@
 //! MCP tool implementations for graph, time-series, schema, and data operations.
 
 mod ai;
+mod api_keys;
 mod memory;
 mod principals;
 mod proposals;
@@ -2274,6 +2275,65 @@ impl SeleneTools {
         params: Parameters<RotateCredentialParams>,
     ) -> Result<CallToolResult, McpError> {
         principals::rotate_credential_impl(self, params.0).await
+    }
+
+    // ── API-key Management ─────────────────────────────────────────────
+
+    #[tool(
+        name = "create_api_key",
+        description = "Issue a new bearer API key for a principal. \
+        Returns the key metadata plus a one-time plaintext token (format: selk_<prefix>.<secret>). \
+        The token is never recoverable afterwards — only its argon2id hash is persisted. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_api_key(
+        &self,
+        params: Parameters<CreateApiKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::create_api_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_api_keys",
+        description = "List issued API keys with metadata (id, name, identity, prefix, \
+        created_at, expires_at, scopes, enabled). Hashes are never returned. \
+        Optionally filter by identity. Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_api_keys(
+        &self,
+        params: Parameters<ListApiKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::list_api_keys_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "revoke_api_key",
+        description = "Disable an API key by node ID. The key row is preserved for audit, \
+        but verify_api_key will reject it. Idempotent. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn revoke_api_key(
+        &self,
+        params: Parameters<RevokeApiKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::revoke_api_key_impl(self, params.0).await
     }
 }
 
