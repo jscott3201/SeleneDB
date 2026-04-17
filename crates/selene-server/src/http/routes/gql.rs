@@ -355,7 +355,7 @@ async fn execute_batch(
                         Json(serde_json::json!({
                             "batch": true,
                             "total": statements.len(),
-                            "completed": i,
+                            "completed": results.len(),
                             "error": true,
                             "results": results,
                         })),
@@ -379,14 +379,18 @@ async fn execute_batch(
                     "error": stmt_error,
                 }));
                 // Abort on error status. The `0A` (feature-not-supported)
-                // class is treated here as continuable for legacy reasons.
-                if !r.status_code.starts_with("00") && !r.status_code.starts_with("0A") {
+                // class is continuable for legacy reasons; everything else
+                // the shared classifier flags as an error stops the batch.
+                // (Without this alignment, `02xxx` "no data" — which the
+                // classifier correctly treats as success — would otherwise
+                // abort, contradicting the new contract.)
+                if stmt_error && !r.status_code.starts_with("0A") {
                     return (
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "batch": true,
                             "total": statements.len(),
-                            "completed": i,
+                            "completed": results.len(),
                             "error": true,
                             "results": results,
                         })),
@@ -406,7 +410,7 @@ async fn execute_batch(
                     Json(serde_json::json!({
                         "batch": true,
                         "total": statements.len(),
-                        "completed": i,
+                        "completed": results.len(),
                         "error": true,
                         "results": results,
                     })),

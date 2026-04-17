@@ -123,6 +123,25 @@ impl EndpointRateLimiter {
     }
 }
 
+/// Heuristic: does this `Authorization` header value look like a bearer
+/// token a downstream extractor might accept?
+///
+/// Filters out empty values, whitespace-only values, and headers that
+/// don't carry the `Bearer ` scheme. Does NOT validate the token — that
+/// happens downstream. This is purely a tier-routing decision: callers
+/// that pass this check are charged against the per-tier (authenticated)
+/// budgets; callers that fail go to [`Tier::Anonymous`].
+fn looks_like_bearer(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+    else {
+        return false;
+    };
+    !rest.trim().is_empty()
+}
+
 /// Classify a request into a rate limit tier by path, method, and whether
 /// the caller presented an `Authorization` header.
 ///
@@ -178,14 +197,25 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    // Presence-check only — the auth extractor downstream validates the
-    // bearer. We just need to know which budget to charge: a missing or
-    // empty Authorization header gets bucketed under Anonymous.
+    // We need to decide which budget to charge *before* running the auth
+    // extractor (which is downstream in the route handler). A truly robust
+    // fix would reorder so auth runs as middleware and the rate limiter
+    // reads the resolved principal from request extensions; that's a
+    // larger restructuring tracked separately.
+    //
+    // For now, classify as authenticated only when the header looks like a
+    // well-formed `Bearer <token>` with a non-trivial token. This rejects
+    // empty values, whitespace, and obvious garbage, so casual probes go
+    // to the Anonymous bucket. A motivated attacker can still send a
+    // syntactically-valid bearer with a bogus secret and be classified as
+    // authenticated, but the auth extractor will reject the request before
+    // any expensive work runs and the auth-failure rate limiter
+    // (`AuthRateLimiter`) takes over after 5 failed attempts per identity.
     let authenticated = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .is_some_and(|v| !v.trim().is_empty());
+        .is_some_and(looks_like_bearer);
     let tier = classify(req.method(), req.uri().path(), authenticated);
 
     match limiter.try_acquire(tier) {
@@ -267,6 +297,24 @@ mod tests {
             classify(&Method::DELETE, "/edges/5", false),
             Tier::Anonymous
         );
+    }
+
+    #[test]
+    fn looks_like_bearer_filters_garbage() {
+        // Accept: well-formed Bearer values
+        assert!(super::looks_like_bearer("Bearer xyz123"));
+        assert!(super::looks_like_bearer("bearer xyz123")); // case-insensitive scheme
+        assert!(super::looks_like_bearer("  Bearer abc  ")); // leading/trailing space ok
+        assert!(super::looks_like_bearer("Bearer principal:secret")); // colon-separated form Selene uses
+
+        // Reject: anything that wouldn't pass downstream auth anyway
+        assert!(!super::looks_like_bearer(""));
+        assert!(!super::looks_like_bearer("   "));
+        assert!(!super::looks_like_bearer("Bearer "));
+        assert!(!super::looks_like_bearer("Bearer  "));
+        assert!(!super::looks_like_bearer("Basic abc"));
+        assert!(!super::looks_like_bearer("xyz123"));
+        assert!(!super::looks_like_bearer("BearerNoSpace"));
     }
 
     #[test]
