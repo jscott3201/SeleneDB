@@ -44,13 +44,16 @@ show_materialized_views = { ^"SHOW" ~ ^"MATERIALIZED" ~ ^"VIEWS" }
 create_node_type = {
     ^"CREATE" ~ or_replace? ~ ^"NODE" ~ ^"TYPE" ~ if_not_exists? ~
     ":" ~ ident ~ (^"EXTENDS" ~ ":" ~ ident)? ~
-    "(" ~ type_prop_def_list? ~ ")"
+    "(" ~ type_prop_def_list? ~ ")" ~
+    validation_mode_clause?
 }
 create_edge_type = {
     ^"CREATE" ~ or_replace? ~ ^"EDGE" ~ ^"TYPE" ~ if_not_exists? ~
     ":" ~ ident ~
-    "(" ~ edge_endpoint_clause? ~ ","? ~ type_prop_def_list? ~ ")"
+    "(" ~ edge_endpoint_clause? ~ ","? ~ type_prop_def_list? ~ ")" ~
+    validation_mode_clause?
 }
+validation_mode_clause = { ^"STRICT" | ^"WARN" }
 or_replace = { ^"OR" ~ ^"REPLACE" }
 drop_node_type   = { ^"DROP" ~ ^"NODE" ~ ^"TYPE" ~ if_exists? ~ ":" ~ ident }
 drop_edge_type   = { ^"DROP" ~ ^"EDGE" ~ ^"TYPE" ~ if_exists? ~ ":" ~ ident }
@@ -297,6 +300,7 @@ xor_kw  = @{ ^"XOR"  ~ !(LETTER | NUMBER | "_") }
 and_kw  = @{ ^"AND"  ~ !(LETTER | NUMBER | "_") }
 not_kw  = @{ ^"NOT"  ~ !(LETTER | NUMBER | "_") }
 is_kw   = @{ ^"IS"   ~ !(LETTER | NUMBER | "_") }
+in_kw   = @{ ^"IN"   ~ !(LETTER | NUMBER | "_") }
 null_kw    = @{ ^"NULL"    ~ !(LETTER | NUMBER | "_") }
 like_kw    = @{ ^"LIKE"    ~ !(LETTER | NUMBER | "_") }
 between_kw = @{ ^"BETWEEN" ~ !(LETTER | NUMBER | "_") }
@@ -349,6 +353,7 @@ list_access_op = { "[" ~ expr ~ "]" }
 primary = {
     count_subquery_expr
   | exists_expr
+  | list_iter_expr
   | all_different_expr
   | same_expr
   | property_exists_expr
@@ -364,6 +369,28 @@ primary = {
   | param_ref
   | var_ref
 }
+
+// ── List iteration expressions (spec §20.10-11) ───────────────────
+// List comprehension:  [ x IN list WHERE pred | projection ]
+// Quantifier predicates: any|all|none|single ( x IN list WHERE pred )
+// Reduce:               reduce ( acc = init, x IN list | step )
+//
+// PEG ordering: tried before `function_call` so `any(x IN list WHERE p)`
+// does not greedily match as a user function. A plain call like `any(x)`
+// (no `IN`) fails the rule and backtracks to `function_call`. Likewise,
+// a list literal `[1, 2, 3]` fails at the missing `IN` after the first
+// element and backtracks to `list_lit`. Iteration-variable names are
+// not reserved keywords — only the rule head tokens (ANY/ALL/NONE/SINGLE
+// as list_quant_op; REDUCE as list_reduce) are matched by the rule.
+list_iter_expr     = { list_comprehension | list_quant | list_reduce }
+// Note: use `in_kw` (atomic, word-bounded) not bare ^"IN". Non-atomic `~`
+// skips whitespace BEFORE checking the boundary, so `^"IN" ~ !(LETTER|...)`
+// fails on legitimate expressions like `IN null` or `IN my_var`.
+list_comprehension = { "[" ~ ident ~ in_kw ~ expr ~ list_iter_where? ~ "|" ~ expr ~ "]" }
+list_quant         = { list_quant_op ~ "(" ~ ident ~ in_kw ~ expr ~ list_iter_where ~ ")" }
+list_quant_op      = { ^"ALL" | ^"ANY" | ^"NONE" | ^"SINGLE" }
+list_reduce        = { ^"REDUCE" ~ "(" ~ ident ~ "=" ~ expr ~ "," ~ ident ~ in_kw ~ expr ~ "|" ~ expr ~ ")" }
+list_iter_where    = { ^"WHERE" ~ expr }
 
 count_subquery_expr  = { ^"COUNT" ~ "{" ~ match_stmt ~ "}" }
 exists_expr          = { not_kw? ~ ^"EXISTS" ~ "{" ~ match_stmt ~ "}" }
@@ -552,6 +579,7 @@ keyword = @{
     | ^"BETWEEN" | ^"LIKE" | ^"ARRAY"
     | ^"BINDING" | ^"CONNECTING" | ^"DIFFERENT" | ^"KEEP" | ^"ONLY"
     | ^"MATERIALIZED" | ^"VIEW" | ^"VIEWS"
+    | ^"STRICT" | ^"WARN"
     ) ~ !(LETTER | NUMBER | "_")
 }
 

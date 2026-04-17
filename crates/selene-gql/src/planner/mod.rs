@@ -1135,6 +1135,29 @@ fn expr_references_outer_var(expr: &Expr, inner_vars: &std::collections::HashSet
                 .as_deref()
                 .is_some_and(|e| expr_references_outer_var(e, inner_vars))
         }
+        Expr::ListIter {
+            source,
+            predicate,
+            projection,
+            reduce_init,
+            ..
+        } => {
+            // Conservative: iteration variable shadows outer scope, but we
+            // don't subtract it from inner_vars here. A stray reference to
+            // the iteration var inside predicate/projection would be flagged
+            // as "outer" unless it happens to collide with an existing inner
+            // var name. Safe over-approximation for routing decisions.
+            expr_references_outer_var(source, inner_vars)
+                || predicate
+                    .as_deref()
+                    .is_some_and(|p| expr_references_outer_var(p, inner_vars))
+                || projection
+                    .as_deref()
+                    .is_some_and(|p| expr_references_outer_var(p, inner_vars))
+                || reduce_init
+                    .as_ref()
+                    .is_some_and(|(_, init)| expr_references_outer_var(init, inner_vars))
+        }
         // Subquery expressions, parameters, and literals do not reference outer
         // variables in a way that requires this routing decision.
         Expr::Literal(_)

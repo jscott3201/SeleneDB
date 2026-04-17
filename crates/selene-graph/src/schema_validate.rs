@@ -15,12 +15,20 @@ use crate::schema::{SchemaValidator, ValidationIssue};
 
 impl SchemaValidator {
     /// Validate a node against all registered schemas whose labels appear on it.
+    ///
+    /// Each issue carries the label it was produced under, so enforcement can
+    /// consult per-type validation mode overrides in [`Self::effective_mode_for_label`].
     pub fn validate_node(&self, node: &Node) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
         for label in node.labels.iter() {
             if let Some(schema) = self.node_schemas.get(&label) {
+                let start = issues.len();
                 check_properties(&schema.properties, &node.properties, &mut issues);
+                // Tag every issue emitted for this label.
+                for issue in &mut issues[start..] {
+                    issue.label = Some(schema.label.as_ref().into());
+                }
             }
         }
 
@@ -30,11 +38,16 @@ impl SchemaValidator {
     /// Validate an edge against its registered schema (if any).
     ///
     /// Checks both property definitions and source/target label constraints.
+    /// Issues are labeled with the edge type so per-type mode overrides apply.
     pub fn validate_edge(&self, edge: &Edge) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
         if let Some(schema) = self.edge_schemas.get(&edge.label) {
+            let start = issues.len();
             check_properties(&schema.properties, &edge.properties, &mut issues);
+            for issue in &mut issues[start..] {
+                issue.label = Some(schema.label.as_ref().into());
+            }
         }
 
         issues
@@ -59,16 +72,19 @@ impl SchemaValidator {
                     .iter()
                     .any(|l| source_labels.contains_str(l))
             {
-                issues.push(ValidationIssue::new(format!(
-                    "edge '{}' source must have one of labels {:?}, got {:?}",
-                    label,
-                    schema
-                        .source_labels
-                        .iter()
-                        .map(|l| &**l)
-                        .collect::<Vec<_>>(),
-                    source_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
-                )));
+                issues.push(
+                    ValidationIssue::new(format!(
+                        "edge '{}' source must have one of labels {:?}, got {:?}",
+                        label,
+                        schema
+                            .source_labels
+                            .iter()
+                            .map(|l| &**l)
+                            .collect::<Vec<_>>(),
+                        source_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                    ))
+                    .with_label(label),
+                );
             }
             if !schema.target_labels.is_empty()
                 && !schema
@@ -76,16 +92,19 @@ impl SchemaValidator {
                     .iter()
                     .any(|l| target_labels.contains_str(l))
             {
-                issues.push(ValidationIssue::new(format!(
-                    "edge '{}' target must have one of labels {:?}, got {:?}",
-                    label,
-                    schema
-                        .target_labels
-                        .iter()
-                        .map(|l| &**l)
-                        .collect::<Vec<_>>(),
-                    target_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
-                )));
+                issues.push(
+                    ValidationIssue::new(format!(
+                        "edge '{}' target must have one of labels {:?}, got {:?}",
+                        label,
+                        schema
+                            .target_labels
+                            .iter()
+                            .map(|l| &**l)
+                            .collect::<Vec<_>>(),
+                        target_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                    ))
+                    .with_label(label),
+                );
             }
         }
 
@@ -131,16 +150,22 @@ impl SchemaValidator {
             if let Some(max_out) = schema.max_out_degree
                 && source_out_count > max_out as usize
             {
-                issues.push(ValidationIssue::new(format!(
+                issues.push(
+                    ValidationIssue::new(format!(
                         "edge '{edge_label}' source exceeds max_out_degree {max_out} (has {source_out_count})"
-                    )));
+                    ))
+                    .with_label(edge_label),
+                );
             }
             if let Some(max_in) = schema.max_in_degree
                 && target_in_count > max_in as usize
             {
-                issues.push(ValidationIssue::new(format!(
+                issues.push(
+                    ValidationIssue::new(format!(
                         "edge '{edge_label}' target exceeds max_in_degree {max_in} (has {target_in_count})"
-                    )));
+                    ))
+                    .with_label(edge_label),
+                );
             }
         }
         issues
@@ -174,9 +199,12 @@ impl SchemaValidator {
                 if label_match {
                     let actual = outgoing_by_label.get(edge_label).copied().unwrap_or(0);
                     if actual < min_out as usize {
-                        issues.push(ValidationIssue::new(format!(
-                            "node requires at least {min_out} outgoing '{edge_label}' edge(s), has {actual}"
-                        )));
+                        issues.push(
+                            ValidationIssue::new(format!(
+                                "node requires at least {min_out} outgoing '{edge_label}' edge(s), has {actual}"
+                            ))
+                            .with_label(edge_label.as_str()),
+                        );
                     }
                 }
             }
@@ -192,9 +220,12 @@ impl SchemaValidator {
                 if label_match {
                     let actual = incoming_by_label.get(edge_label).copied().unwrap_or(0);
                     if actual < min_in as usize {
-                        issues.push(ValidationIssue::new(format!(
-                            "node requires at least {min_in} incoming '{edge_label}' edge(s), has {actual}"
-                        )));
+                        issues.push(
+                            ValidationIssue::new(format!(
+                                "node requires at least {min_in} incoming '{edge_label}' edge(s), has {actual}"
+                            ))
+                            .with_label(edge_label.as_str()),
+                        );
                     }
                 }
             }

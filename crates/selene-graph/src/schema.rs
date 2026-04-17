@@ -26,16 +26,31 @@ const MAX_INHERITANCE_DEPTH: usize = 32;
 ///
 /// The caller uses the validator's [`ValidationMode`] to decide whether an
 /// issue should be logged as a warning or cause a write to be rejected.
+///
+/// `label` — the node or edge label the issue is attributable to, used by
+/// [`SchemaValidator::effective_mode_for_label`] to resolve per-type mode
+/// overrides. `None` means the issue is schema-agnostic (e.g., unique or
+/// composite-key checks that span multiple labels).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationIssue {
     pub message: String,
+    pub label: Option<IStr>,
 }
 
 impl ValidationIssue {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            label: None,
         }
+    }
+
+    /// Attach a label to this issue so per-type validation mode can be
+    /// resolved at enforcement time.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<IStr>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
@@ -82,6 +97,54 @@ impl SchemaValidator {
 
     /// The global validation mode.
     pub fn mode(&self) -> ValidationMode {
+        self.mode
+    }
+
+    /// Partition issues into `(strict, warn)` buckets using per-issue effective
+    /// mode. An issue's label (if any) is consulted first; unlabeled issues or
+    /// labels without an override fall back to the global mode.
+    ///
+    /// Returns a pair where:
+    /// - `strict` contains issues that must reject the transaction
+    /// - `warn` contains issues that should only be logged
+    pub fn partition_issues_by_mode(
+        &self,
+        issues: Vec<ValidationIssue>,
+    ) -> (Vec<ValidationIssue>, Vec<ValidationIssue>) {
+        let mut strict = Vec::new();
+        let mut warn = Vec::new();
+        for issue in issues {
+            let mode = self.effective_mode_for_label(issue.label.as_ref().map(|s| s.as_str()));
+            match mode {
+                ValidationMode::Strict => strict.push(issue),
+                ValidationMode::Warn => warn.push(issue),
+            }
+        }
+        (strict, warn)
+    }
+
+    /// Resolve the effective validation mode for a given label.
+    ///
+    /// Per-type override (set via `CREATE NODE TYPE ... STRICT/WARN` or
+    /// `validation_mode` in a schema pack) wins over the global default.
+    /// `None` label or unknown label falls back to global mode — this covers
+    /// cross-label checks like composite keys and structural violations that
+    /// aren't attributable to a single type.
+    pub fn effective_mode_for_label(&self, label: Option<&str>) -> ValidationMode {
+        let Some(lbl) = label else {
+            return self.mode;
+        };
+        let key = IStr::new(lbl);
+        if let Some(node_schema) = self.node_schemas.get(&key)
+            && let Some(mode) = node_schema.validation_mode
+        {
+            return mode;
+        }
+        if let Some(edge_schema) = self.edge_schemas.get(&key)
+            && let Some(mode) = edge_schema.validation_mode
+        {
+            return mode;
+        }
         self.mode
     }
 

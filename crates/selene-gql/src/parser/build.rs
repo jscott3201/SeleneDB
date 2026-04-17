@@ -535,6 +535,7 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
             let mut parent = None;
             let mut properties = Vec::new();
             let mut idents = Vec::new();
+            let mut validation_mode = None;
 
             for p in inner.into_inner() {
                 match p.as_rule() {
@@ -543,6 +544,9 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                     Rule::or_replace => or_replace = true,
                     Rule::type_prop_def_list => {
                         properties = build_type_prop_def_list(p)?;
+                    }
+                    Rule::validation_mode_clause => {
+                        validation_mode = Some(build_validation_mode(p));
                     }
                     _ => {}
                 }
@@ -560,6 +564,7 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                 properties,
                 or_replace,
                 if_not_exists,
+                validation_mode,
             })
         }
         Rule::drop_node_type => {
@@ -583,6 +588,7 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
             let mut source_labels = Vec::new();
             let mut target_labels = Vec::new();
             let mut properties = Vec::new();
+            let mut validation_mode = None;
 
             for p in inner.into_inner() {
                 match p.as_rule() {
@@ -597,6 +603,9 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                     Rule::type_prop_def_list => {
                         properties = build_type_prop_def_list(p)?;
                     }
+                    Rule::validation_mode_clause => {
+                        validation_mode = Some(build_validation_mode(p));
+                    }
                     _ => {}
                 }
             }
@@ -607,6 +616,7 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                 properties,
                 or_replace,
                 if_not_exists,
+                validation_mode,
             })
         }
         Rule::drop_edge_type => {
@@ -739,6 +749,16 @@ fn build_edge_endpoint_clause(pair: Pair<'_, Rule>) -> (Vec<String>, Vec<String>
         lists.remove(0)
     };
     (source, target)
+}
+
+/// Parse a `validation_mode_clause` (STRICT | WARN) to ValidationMode.
+fn build_validation_mode(pair: Pair<'_, Rule>) -> selene_core::ValidationMode {
+    // Case-insensitive: grammar uses ^"STRICT" / ^"WARN"; compare uppercased.
+    if pair.as_str().trim().eq_ignore_ascii_case("strict") {
+        selene_core::ValidationMode::Strict
+    } else {
+        selene_core::ValidationMode::Warn
+    }
 }
 
 // ── Query pipeline ─────────────────────────────────────────────────

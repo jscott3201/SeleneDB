@@ -329,6 +329,134 @@ fn e2e_unwind_keyword() {
     assert_eq!(result.row_count(), 3);
 }
 
+// UNWIND as a full pipeline clause: must compose with MATCH upstream and downstream,
+// consume parameter lists, and handle empty/null/non-list edge cases.
+
+#[test]
+fn e2e_unwind_after_match_multiplies_rows() {
+    let g = setup_graph();
+    // 2 sensors × 3 tags = 6 rows
+    let result = QueryBuilder::new(
+        "MATCH (s:sensor) UNWIND ['a', 'b', 'c'] AS tag RETURN s.name AS name, tag",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 6);
+}
+
+#[test]
+fn e2e_unwind_before_match_binds_downstream() {
+    let g = setup_graph();
+    // Unwind a list of names, then MATCH sensors whose name matches.
+    // This proves UNWIND-produced bindings are visible to a later MATCH's WHERE.
+    let result = QueryBuilder::new(
+        "UNWIND ['TempSensor-1', 'TempSensor-2'] AS needle \
+         MATCH (s:sensor) WHERE s.name = needle \
+         RETURN s.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn e2e_unwind_with_parameter_list() {
+    let g = setup_graph();
+    let mut params = ParameterMap::new();
+    let list = crate::types::value::GqlList {
+        element_type: crate::types::value::GqlType::Int,
+        elements: std::sync::Arc::from(vec![
+            crate::types::value::GqlValue::Int(1),
+            crate::types::value::GqlValue::Int(2),
+            crate::types::value::GqlValue::Int(3),
+        ]),
+    };
+    params.insert(
+        selene_core::IStr::new("items"),
+        crate::types::value::GqlValue::List(list),
+    );
+    let result = QueryBuilder::new("UNWIND $items AS x RETURN x", &g)
+        .with_parameters(&params)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 3);
+}
+
+#[test]
+fn e2e_unwind_empty_list_yields_zero_rows() {
+    let g = setup_graph();
+    let result = QueryBuilder::new("UNWIND [] AS x RETURN x", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 0);
+}
+
+#[test]
+fn e2e_unwind_null_yields_zero_rows() {
+    let g = setup_graph();
+    // UNWIND NULL is defined to produce no rows (matches ISO GQL / openCypher).
+    let result = QueryBuilder::new("UNWIND null AS x RETURN x", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 0);
+}
+
+#[test]
+fn e2e_unwind_non_list_errors() {
+    let g = setup_graph();
+    let err = QueryBuilder::new("UNWIND 42 AS x RETURN x", &g)
+        .execute()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("list") || err.contains("LIST"),
+        "error should mention list typing: {err}"
+    );
+}
+
+#[test]
+fn e2e_unwind_chained() {
+    let g = setup_graph();
+    // 2 outer × 3 inner = 6 rows
+    let result = QueryBuilder::new(
+        "UNWIND [1, 2] AS a UNWIND ['x', 'y', 'z'] AS b RETURN a, b",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 6);
+}
+
+#[test]
+fn e2e_unwind_cached_repeat_is_stable() {
+    let g = setup_graph();
+    // Execute the same UNWIND query twice: second call should hit the plan cache
+    // and still produce the same binding shape. If cache accidentally stored
+    // scope state or bindings, the second call would diverge.
+    let q = "UNWIND [10, 20, 30] AS v RETURN v";
+    let first = QueryBuilder::new(q, &g).execute().unwrap();
+    let second = QueryBuilder::new(q, &g).execute().unwrap();
+    assert_eq!(first.row_count(), 3);
+    assert_eq!(second.row_count(), 3);
+}
+
+#[test]
+fn e2e_unwind_with_filter_and_return_order() {
+    let g = setup_graph();
+    // Filter on the unwound variable, then return ordered by it.
+    let result = QueryBuilder::new(
+        "UNWIND [3, 1, 4, 1, 5, 9, 2, 6] AS n \
+         FILTER n > 2 \
+         RETURN n ORDER BY n",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 5); // 3, 4, 5, 9, 6 → 5 rows
+}
+
 #[test]
 fn e2e_collect_alias() {
     let g = setup_graph();
@@ -707,5 +835,223 @@ fn e2e_parameterized_limit_unbound_error() {
     assert!(
         err.contains("not bound"),
         "error should mention not bound: {err}"
+    );
+}
+
+// ── List iteration: comprehension, quantifiers (ANY/ALL/NONE/SINGLE), REDUCE ──
+//
+// Driver-row pattern: each query prefixes with `MATCH (b:building)` from
+// setup_graph(), which yields exactly one row. That single row drives the
+// RETURN expression evaluation so we can assert on exactly one result.
+
+#[test]
+fn e2e_list_comprehension_projection() {
+    let g = setup_graph();
+    // [x IN [1,2,3] | x*x] → [1, 4, 9]
+    let result = QueryBuilder::new(
+        "MATCH (b:building) RETURN [x IN [1, 2, 3] | x * x] AS squares",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    assert_eq!(result.column_count(), 1);
+}
+
+#[test]
+fn e2e_list_comprehension_with_where() {
+    let g = setup_graph();
+    // Filter-only comprehension: [x IN xs WHERE p] projects x by default.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 2 | x] AS big",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_list_comprehension_empty_source() {
+    let g = setup_graph();
+    // Empty source list → empty result list, not error.
+    let result = QueryBuilder::new("MATCH (b:building) RETURN [x IN [] | x * 2] AS out", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_list_comprehension_null_source() {
+    let g = setup_graph();
+    // Null source propagates to null (LIST-typed null), matching UNWIND null.
+    let result = QueryBuilder::new("MATCH (b:building) RETURN [x IN null | x * 2] AS out", &g)
+        .execute()
+        .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_quantifier_any_true() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE ANY(x IN [1, 2, 3] WHERE x > 2) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_quantifier_any_false_filters_row_out() {
+    let g = setup_graph();
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE ANY(x IN [1, 2, 3] WHERE x > 99) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 0);
+}
+
+#[test]
+fn e2e_quantifier_all_true_on_empty() {
+    let g = setup_graph();
+    // Vacuous truth: ALL over empty list → true. Row should pass the filter.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE ALL(x IN [] WHERE x > 0) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_quantifier_any_false_on_empty() {
+    let g = setup_graph();
+    // Vacuous falsity: ANY over empty list → false. Row should be filtered out.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE ANY(x IN [] WHERE x > 0) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 0);
+}
+
+#[test]
+fn e2e_quantifier_none() {
+    let g = setup_graph();
+    // NONE(x IN [1,2,3] WHERE x > 99) → true (no element > 99).
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE NONE(x IN [1, 2, 3] WHERE x > 99) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_quantifier_single_exactly_one() {
+    let g = setup_graph();
+    // SINGLE(x IN [1,2,3,4,5] WHERE x = 3) → true (exactly one match).
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE SINGLE(x IN [1, 2, 3, 4, 5] WHERE x = 3) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn e2e_quantifier_single_multiple_matches_is_false() {
+    let g = setup_graph();
+    // SINGLE(...) with >1 match → false, row filtered out.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) WHERE SINGLE(x IN [1, 2, 3, 4, 5] WHERE x > 2) RETURN b.name AS name",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 0);
+}
+
+#[test]
+fn e2e_reduce_sum() {
+    let g = setup_graph();
+    // REDUCE(acc = 0, x IN [1,2,3,4] | acc + x) → 10
+    let result = QueryBuilder::new(
+        "MATCH (b:building) RETURN REDUCE(s = 0, x IN [1, 2, 3, 4] | s + x) AS total",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+
+    let batch = &result.batches[0];
+    let total = batch
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("total should be Int64");
+    assert_eq!(total.value(0), 10);
+}
+
+#[test]
+fn e2e_reduce_empty_list_returns_init() {
+    let g = setup_graph();
+    // REDUCE over empty list returns the init value unchanged.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) RETURN REDUCE(s = 42, x IN [] | s + x) AS out",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+
+    let batch = &result.batches[0];
+    let out = batch
+        .column_by_name("out")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("out should be Int64");
+    assert_eq!(out.value(0), 42);
+}
+
+#[test]
+fn e2e_list_iteration_var_shadows_outer_scope() {
+    let g = setup_graph();
+    // The comprehension's `x` must not leak into the outer RETURN. After the
+    // comprehension closes, `b.name` is still visible and `x` is unbound —
+    // the clone-based scoping ensures the outer binding is unchanged.
+    let result = QueryBuilder::new(
+        "MATCH (b:building) \
+         RETURN b.name AS name, [x IN [1, 2, 3] | x + 1] AS incremented",
+        &g,
+    )
+    .execute()
+    .unwrap();
+    assert_eq!(result.row_count(), 1);
+    assert_eq!(result.column_count(), 2);
+}
+
+#[test]
+fn e2e_comprehension_non_list_source_errors_in_return() {
+    let g = setup_graph();
+    // RETURN propagates eval errors up (unlike WHERE, which silently filters).
+    // Using comprehension (not quantifier) in RETURN surfaces the type error.
+    let err = QueryBuilder::new("MATCH (b:building) RETURN [x IN 42 | x * 2] AS out", &g)
+        .execute()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("LIST") || err.contains("list"),
+        "error should mention list typing: {err}"
     );
 }

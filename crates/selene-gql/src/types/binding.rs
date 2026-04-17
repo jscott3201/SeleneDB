@@ -71,6 +71,15 @@ impl Binding {
             .map(|idx| &self.vars[idx].1)
     }
 
+    /// Remove a variable and return its previous value, if any.
+    /// Used by scoped expressions (list iteration) to restore outer scope.
+    pub fn unbind(&mut self, var: &IStr) -> Option<BoundValue> {
+        match self.vars.binary_search_by_key(var, |(k, _)| *k) {
+            Ok(idx) => Some(self.vars.remove(idx).1),
+            Err(_) => None,
+        }
+    }
+
     /// Look up a variable and extract its NodeId, or return an error.
     pub fn get_node_id(&self, var: &IStr) -> Result<NodeId, GqlError> {
         match self.get(var) {

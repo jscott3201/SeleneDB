@@ -132,13 +132,17 @@ pub enum GqlStatement {
     ShowMaterializedViews,
 
     // ── Type DDL statements ────────────────────────────────────────
-    /// CREATE [OR REPLACE] NODE TYPE [IF NOT EXISTS] :label [EXTENDS :parent] (props)
+    /// CREATE [OR REPLACE] NODE TYPE [IF NOT EXISTS] :label [EXTENDS :parent] (props) [STRICT|WARN]
     CreateNodeType {
         label: String,
         parent: Option<String>,
         properties: Vec<DdlPropertyDef>,
         or_replace: bool,
         if_not_exists: bool,
+        /// Optional per-type validation mode override. `None` inherits the
+        /// global default (Warn). `STRICT` rejects writes with undeclared
+        /// properties; `WARN` logs but accepts them.
+        validation_mode: Option<selene_core::ValidationMode>,
     },
     /// DROP NODE TYPE [IF EXISTS] :label
     DropNodeType {
@@ -147,7 +151,7 @@ pub enum GqlStatement {
     },
     /// SHOW NODE TYPES
     ShowNodeTypes,
-    /// CREATE [OR REPLACE] EDGE TYPE [IF NOT EXISTS] :label (FROM ... TO ..., props)
+    /// CREATE [OR REPLACE] EDGE TYPE [IF NOT EXISTS] :label (FROM ... TO ..., props) [STRICT|WARN]
     CreateEdgeType {
         label: String,
         source_labels: Vec<String>,
@@ -155,6 +159,8 @@ pub enum GqlStatement {
         properties: Vec<DdlPropertyDef>,
         or_replace: bool,
         if_not_exists: bool,
+        /// Optional per-type validation mode override. See CreateNodeType.
+        validation_mode: Option<selene_core::ValidationMode>,
     },
     /// DROP EDGE TYPE [IF EXISTS] :label
     DropEdgeType {
