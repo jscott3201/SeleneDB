@@ -18,6 +18,7 @@ pub mod nodes;
 pub mod principals;
 pub mod reactflow;
 pub mod schema;
+pub mod signing_key;
 pub mod ts;
 
 use std::time::Instant;

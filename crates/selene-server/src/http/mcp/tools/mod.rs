@@ -6,6 +6,7 @@ mod memory;
 mod principals;
 mod proposals;
 mod schemas;
+mod signing_key;
 mod traces;
 
 use std::collections::HashMap;
@@ -2334,6 +2335,27 @@ impl SeleneTools {
         params: Parameters<RevokeApiKeyParams>,
     ) -> Result<CallToolResult, McpError> {
         api_keys::revoke_api_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "rotate_signing_key",
+        description = "Rotate the OAuth access-token signing key. Generates a new 32-byte \
+        HMAC-SHA256 secret, persists it in the encrypted vault, and installs it on the \
+        running token service. The previous key is retained in an in-memory retired ring \
+        for `retire_for_secs` (default 86400) so access tokens signed under it remain \
+        valid during the grace period. Refresh tokens are unaffected. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rotate_signing_key(
+        &self,
+        params: Parameters<RotateSigningKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        signing_key::rotate_signing_key_impl(self, params.0).await
     }
 }
 

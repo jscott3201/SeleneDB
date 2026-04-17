@@ -201,6 +201,54 @@ impl VaultHandle {
         Ok(key.to_vec())
     }
 
+    /// Rotate the OAuth signing key: generate a new 32-byte secret, persist
+    /// it in the `oauth_signing_key` vault_config node (replacing the prior
+    /// value), and return the new key bytes.
+    ///
+    /// The prior key bytes are *not* persisted — callers that need a grace
+    /// period for in-flight access tokens should capture the previous key via
+    /// `resolve_signing_key` before calling this, and hand it to the
+    /// OAuthTokenService's retired-key ring.
+    pub fn rotate_signing_key(&self, master: &MasterKey) -> Result<Vec<u8>, VaultError> {
+        use rand::RngExt;
+        let mut key = [0u8; 32];
+        rand::rng().fill(&mut key[..]);
+        let b64 = encode_base64(&key);
+
+        // Find the existing node (if any) and set its value in place.
+        let existing = self.graph.read(|g| {
+            g.nodes_by_label("vault_config")
+                .find(|&nid| {
+                    g.get_node(nid).is_some_and(|n| {
+                        n.property("key")
+                            .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
+                    })
+                })
+        });
+
+        self.graph
+            .write(|m| {
+                if let Some(nid) = existing {
+                    m.set_property(nid, IStr::new("value"), Value::str(&b64))?;
+                    Ok(())
+                } else {
+                    m.create_node(
+                        LabelSet::from_strs(&["vault_config"]),
+                        PropertyMap::from_pairs(vec![
+                            (IStr::new("key"), Value::str("oauth_signing_key")),
+                            (IStr::new("value"), Value::str(&b64)),
+                        ]),
+                    )
+                    .map(|_| ())
+                }
+            })
+            .map_err(|e| VaultError::InvalidFormat(format!("signing key rotate failed: {e}")))?;
+
+        self.flush(master)?;
+        tracing::info!("OAuth signing key rotated and persisted to vault");
+        Ok(key.to_vec())
+    }
+
     /// Save the token deny list to the vault graph.
     ///
     /// Replaces all existing `revoked_token` nodes with the current deny list.

@@ -932,6 +932,15 @@ pub(crate) struct RevokeApiKeyParams {
     pub(crate) key_id: u64,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RotateSigningKeyParams {
+    /// Seconds to keep the previous signing key valid for decoding existing
+    /// access tokens. Defaults to 86400 (24 hours) when omitted. Set to 0 to
+    /// invalidate all outstanding access tokens immediately.
+    #[serde(default)]
+    pub(crate) retire_for_secs: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

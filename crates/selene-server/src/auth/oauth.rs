@@ -85,13 +85,53 @@ pub(crate) struct RefreshRecord {
 // Token service
 // ---------------------------------------------------------------------------
 
+/// A rotating signing-key ring.
+///
+/// Holds the currently active encoding + decoding key, plus a list of
+/// recently-retired decoding keys that remain valid until their grace-period
+/// expiry. `validate` tries the active key first, then falls back to retired
+/// keys whose `expires_at` is still in the future. Retired keys are dropped
+/// when `prune_expired` runs or when the ring is rotated again.
+///
+/// Retired keys are *not* persisted across restart. A restart invalidates
+/// in-flight access tokens issued under a prior key; clients recover by
+/// exchanging their (still valid) refresh token.
+pub(crate) struct SigningKeyRing {
+    active_encoding: EncodingKey,
+    active_decoding: DecodingKey,
+    /// (decoding_key, expires_at_unix_secs)
+    retired: Vec<(DecodingKey, u64)>,
+}
+
+impl SigningKeyRing {
+    fn new(secret: &[u8]) -> Self {
+        Self {
+            active_encoding: EncodingKey::from_secret(secret),
+            active_decoding: DecodingKey::from_secret(secret),
+            retired: Vec::new(),
+        }
+    }
+
+    /// Replace the active key with a new one and move the previous active
+    /// decoding key into the retired ring until `retire_until` (unix secs).
+    fn rotate(&mut self, new_secret: &[u8], retire_until: u64) {
+        let new_enc = EncodingKey::from_secret(new_secret);
+        let new_dec = DecodingKey::from_secret(new_secret);
+        let old_dec = std::mem::replace(&mut self.active_decoding, new_dec);
+        self.active_encoding = new_enc;
+        self.retired.push((old_dec, retire_until));
+    }
+
+    fn prune(&mut self, now: u64) {
+        self.retired.retain(|(_, exp)| *exp > now);
+    }
+}
+
 /// Stateful service for issuing, validating, refreshing, and revoking
 /// MCP OAuth 2.1 access tokens.
 pub struct OAuthTokenService {
-    /// Pre-computed HMAC-SHA256 encoding key.
-    encoding_key: EncodingKey,
-    /// Pre-computed HMAC-SHA256 decoding key.
-    decoding_key: DecodingKey,
+    /// Rotating signing key ring (active + retired decoding keys).
+    key_ring: RwLock<SigningKeyRing>,
     /// Pre-built JWT validation rules (avoids per-request allocation).
     validation: Validation,
     /// Lifetime of an access token.
@@ -126,8 +166,7 @@ impl OAuthTokenService {
         validation.algorithms = vec![Algorithm::HS256];
 
         Self {
-            encoding_key: EncodingKey::from_secret(signing_secret),
-            decoding_key: DecodingKey::from_secret(signing_secret),
+            key_ring: RwLock::new(SigningKeyRing::new(signing_secret)),
             validation,
             access_ttl,
             refresh_ttl,
@@ -136,6 +175,55 @@ impl OAuthTokenService {
             deny_dirty: AtomicBool::new(false),
             principal_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Rotate the signing key. Existing access tokens signed with the prior
+    /// key remain validatable until `retire_until_secs` (unix seconds).
+    ///
+    /// New tokens are signed with `new_secret`. Refresh tokens are unaffected
+    /// because they are opaque and stored server-side, not signed.
+    pub fn rotate_signing_key(&self, new_secret: &[u8], retire_until_secs: u64) {
+        let mut ring = self.key_ring.write();
+        ring.rotate(new_secret, retire_until_secs);
+        ring.prune(now_secs());
+    }
+
+    /// Try to decode a JWT against the active key, falling back to retired
+    /// keys whose grace period has not expired.
+    ///
+    /// Returns whichever error the *active* key produced unless a retired
+    /// key succeeded, so expiry/malformed errors are not masked.
+    fn decode_with_ring(
+        &self,
+        token: &str,
+        validation: &Validation,
+    ) -> jsonwebtoken::errors::Result<jsonwebtoken::TokenData<McpTokenClaims>> {
+        let ring = self.key_ring.read();
+        let active_result = decode::<McpTokenClaims>(token, &ring.active_decoding, validation);
+        if active_result.is_ok() {
+            return active_result;
+        }
+        // Fall back to retired keys only on signature failure — expiry or
+        // malformed-structure errors are key-agnostic and should be returned
+        // as-is so the caller sees TokenExpired, not TokenRevoked-looking
+        // InvalidSignature noise.
+        let err = active_result.err().unwrap();
+        if !matches!(
+            err.kind(),
+            jsonwebtoken::errors::ErrorKind::InvalidSignature
+        ) {
+            return Err(err);
+        }
+        let now = now_secs();
+        for (retired_key, exp) in &ring.retired {
+            if *exp <= now {
+                continue;
+            }
+            if let Ok(td) = decode::<McpTokenClaims>(token, retired_key, validation) {
+                return Ok(td);
+            }
+        }
+        Err(err)
     }
 
     // -- Issue ---------------------------------------------------------------
@@ -156,8 +244,11 @@ impl OAuthTokenService {
             iat: now,
         };
 
-        let jwt = encode(&Header::default(), &claims, &self.encoding_key)
-            .map_err(|e| OAuthError::InvalidToken(format!("JWT encode error: {e}")))?;
+        let jwt = {
+            let ring = self.key_ring.read();
+            encode(&Header::default(), &claims, &ring.active_encoding)
+                .map_err(|e| OAuthError::InvalidToken(format!("JWT encode error: {e}")))?
+        };
 
         // Generate an opaque refresh token and atomically check capacity +
         // insert under a single write lock to avoid a TOCTOU race.
@@ -188,11 +279,13 @@ impl OAuthTokenService {
     /// deny-list lookup, principal graph lookup, and scope resolution.
     pub fn validate(&self, token: &str, graph: &SharedGraph) -> Result<AuthContext, OAuthError> {
         // 1+2. Decode and verify HMAC signature + expiry (pre-built Validation).
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &self.validation)
-            .map_err(|e| match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
-                _ => OAuthError::InvalidToken(e.to_string()),
-            })?;
+        // Tries the active key first, then retired keys still within grace period.
+        let token_data =
+            self.decode_with_ring(token, &self.validation)
+                .map_err(|e| match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
+                    _ => OAuthError::InvalidToken(e.to_string()),
+                })?;
 
         let claims = token_data.claims;
 
@@ -243,11 +336,12 @@ impl OAuthTokenService {
     /// decoded claims. Use this when the graph is not accessible (e.g.,
     /// Aether server validating tokens independently of SeleneDB).
     pub fn validate_standalone(&self, token: &str) -> Result<McpTokenClaims, OAuthError> {
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &self.validation)
-            .map_err(|e| match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
-                _ => OAuthError::InvalidToken(e.to_string()),
-            })?;
+        let token_data =
+            self.decode_with_ring(token, &self.validation)
+                .map_err(|e| match e.kind() {
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
+                    _ => OAuthError::InvalidToken(e.to_string()),
+                })?;
 
         let claims = token_data.claims;
 
@@ -338,7 +432,8 @@ impl OAuthTokenService {
         // Decode allowing expired tokens (we still want to revoke them)
         let mut relaxed = self.validation.clone();
         relaxed.validate_exp = false;
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &relaxed)
+        let token_data = self
+            .decode_with_ring(token, &relaxed)
             .map_err(|e| OAuthError::InvalidToken(e.to_string()))?;
         self.revoke(&token_data.claims.jti, token_data.claims.exp);
         Ok(())
