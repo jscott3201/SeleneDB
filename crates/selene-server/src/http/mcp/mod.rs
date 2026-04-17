@@ -203,9 +203,30 @@ impl SeleneTools {
     }
 }
 
+/// Map an [`ops::OpError`] into an [`McpError`] suitable for return to a JSON-RPC client.
+///
+/// In addition to the standard `code` + `message`, every error carries a structured
+/// `data` payload of shape:
+///
+/// ```json
+/// {
+///   "kind": "<stable_string_discriminator>",
+///   "retryable": <bool>,
+///   "entity": "node" | "edge" | "...",   // NotFound only
+///   "id": <u64>,                         // NotFound only
+///   "hint": "<actionable suggestion>"    // when applicable
+/// }
+/// ```
+///
+/// The `kind` discriminator is stable and machine-checkable; `retryable` lets a
+/// client decide whether retry is plausible without re-parsing `message`. `hint`
+/// is a free-form human-readable suggestion suitable for surfacing to a user or LLM.
 pub(crate) fn op_err(e: ops::OpError) -> McpError {
     let code = match &e {
-        ops::OpError::NotFound { .. } => ErrorCode::INVALID_PARAMS,
+        // NotFound is a request-level error (the named resource did not resolve to
+        // a known entity), not a parameter type/shape error — INVALID_REQUEST is
+        // the more accurate JSON-RPC class.
+        ops::OpError::NotFound { .. } => ErrorCode::INVALID_REQUEST,
         ops::OpError::AuthDenied => ErrorCode::INVALID_REQUEST,
         ops::OpError::InvalidRequest(_) => ErrorCode::INVALID_PARAMS,
         ops::OpError::SchemaViolation(_) => ErrorCode::INVALID_PARAMS,
@@ -217,8 +238,40 @@ pub(crate) fn op_err(e: ops::OpError) -> McpError {
     McpError {
         code,
         message: e.to_string().into(),
-        data: None,
+        data: Some(error_data(&e)),
     }
+}
+
+/// Build the structured `data` field for an [`McpError`] derived from an [`ops::OpError`].
+fn error_data(e: &ops::OpError) -> serde_json::Value {
+    let kind = match e {
+        ops::OpError::NotFound { .. } => "not_found",
+        ops::OpError::AuthDenied => "auth_denied",
+        ops::OpError::SchemaViolation(_) => "schema_violation",
+        ops::OpError::InvalidRequest(_) => "invalid_request",
+        ops::OpError::QueryError(_) => "query_error",
+        ops::OpError::Internal(_) => "internal",
+        ops::OpError::ReadOnly => "read_only",
+        ops::OpError::Conflict(_) => "conflict",
+        ops::OpError::ResourcesExhausted(_) => "resources_exhausted",
+    };
+    // Retry hint: only transient classes return retryable=true. Internal errors
+    // are deliberately retryable=false because they typically indicate a bug or
+    // persistent state issue — silent retry would mask the real problem.
+    let retryable = matches!(e, ops::OpError::ResourcesExhausted(_));
+    let mut data = serde_json::json!({
+        "kind": kind,
+        "retryable": retryable,
+    });
+    if let ops::OpError::NotFound { entity, id } = e {
+        data["entity"] = serde_json::json!(entity);
+        data["id"] = serde_json::json!(id);
+    }
+    if matches!(e, ops::OpError::ReadOnly) {
+        data["hint"] =
+            serde_json::json!("This server is a read-only replica. Route writes to the primary.");
+    }
+    data
 }
 
 pub(crate) fn reject_replica(state: &ServerState) -> Result<(), McpError> {
@@ -703,5 +756,92 @@ impl rmcp::ServerHandler for SeleneTools {
     ) -> impl std::future::Future<Output = Result<rmcp::model::ReadResourceResult, McpError>> + Send + '_
     {
         self.handle_read_resource(request, context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorCode, error_data, op_err};
+    use crate::ops;
+
+    fn data_kind(e: ops::OpError) -> String {
+        let mcp = op_err(e);
+        let data = mcp.data.expect("op_err must always populate data");
+        data["kind"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn op_err_populates_structured_data() {
+        let mcp = op_err(ops::OpError::AuthDenied);
+        assert!(mcp.data.is_some(), "data field must always be set");
+    }
+
+    #[test]
+    fn not_found_maps_to_invalid_request_with_entity_and_id() {
+        let mcp = op_err(ops::OpError::NotFound {
+            entity: "node",
+            id: 42,
+        });
+        assert_eq!(mcp.code, ErrorCode::INVALID_REQUEST);
+        let data = mcp.data.unwrap();
+        assert_eq!(data["kind"], "not_found");
+        assert_eq!(data["entity"], "node");
+        assert_eq!(data["id"], 42);
+        assert_eq!(data["retryable"], false);
+    }
+
+    #[test]
+    fn read_only_carries_hint() {
+        let mcp = op_err(ops::OpError::ReadOnly);
+        let data = mcp.data.unwrap();
+        assert_eq!(data["kind"], "read_only");
+        assert!(data["hint"].as_str().unwrap().contains("primary"));
+    }
+
+    #[test]
+    fn resources_exhausted_is_retryable() {
+        let mcp = op_err(ops::OpError::ResourcesExhausted("budget".into()));
+        assert_eq!(mcp.data.unwrap()["retryable"], true);
+    }
+
+    #[test]
+    fn internal_is_not_retryable() {
+        // Silent retry on Internal would mask real bugs; assert it's marked
+        // non-retryable so clients don't loop on persistent failures.
+        let mcp = op_err(ops::OpError::Internal("boom".into()));
+        assert_eq!(mcp.data.unwrap()["retryable"], false);
+    }
+
+    #[test]
+    fn kind_strings_are_stable_discriminators() {
+        // Stability matters: clients key on these strings to dispatch.
+        assert_eq!(data_kind(ops::OpError::AuthDenied), "auth_denied");
+        assert_eq!(
+            data_kind(ops::OpError::SchemaViolation("x".into())),
+            "schema_violation"
+        );
+        assert_eq!(
+            data_kind(ops::OpError::InvalidRequest("x".into())),
+            "invalid_request"
+        );
+        assert_eq!(
+            data_kind(ops::OpError::QueryError("x".into())),
+            "query_error"
+        );
+        assert_eq!(data_kind(ops::OpError::Internal("x".into())), "internal");
+        assert_eq!(data_kind(ops::OpError::ReadOnly), "read_only");
+        assert_eq!(data_kind(ops::OpError::Conflict("x".into())), "conflict");
+        assert_eq!(
+            data_kind(ops::OpError::ResourcesExhausted("x".into())),
+            "resources_exhausted"
+        );
+    }
+
+    #[test]
+    fn error_data_for_invalid_request_omits_entity_and_id() {
+        // Only NotFound carries entity+id; other variants should not include them.
+        let data = error_data(&ops::OpError::InvalidRequest("bad".into()));
+        assert!(data.get("entity").is_none());
+        assert!(data.get("id").is_none());
     }
 }

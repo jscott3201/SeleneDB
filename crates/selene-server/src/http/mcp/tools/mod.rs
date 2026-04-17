@@ -18,7 +18,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
-use super::format::{format_json, format_value, structured_result};
+use super::format::{format_json, format_value, structured_result, structured_text_result};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -84,7 +84,7 @@ impl SeleneTools {
             )
             .map_err(op_err)?
         };
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let data_text = result.data_json.clone().unwrap_or_else(|| "[]".to_string());
         let mut text = format!("Status: {} — {}\n", result.status_code, result.message);
         if let Some(m) = &result.mutations {
             let _ = writeln!(
@@ -98,8 +98,33 @@ impl SeleneTools {
                 m.properties_removed,
             );
         }
-        let _ = write!(text, "{data}\n({} rows)", result.row_count);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let _ = write!(text, "{data_text}\n({} rows)", result.row_count);
+
+        // Programmatic clients should not have to parse the human summary
+        // above. Hand them a structured envelope mirroring the HTTP /gql
+        // response: status, message, row_count, data, and (optionally)
+        // mutations counts. This is finding #1 of the MCP DX hardening pass.
+        let mut structured = serde_json::json!({
+            "status": result.status_code,
+            "message": result.message,
+            "row_count": result.row_count,
+        });
+        if let Some(json_str) = result.data_json.as_deref()
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            structured["data"] = parsed;
+        }
+        if let Some(m) = &result.mutations {
+            structured["mutations"] = serde_json::json!({
+                "nodes_created": m.nodes_created,
+                "nodes_deleted": m.nodes_deleted,
+                "edges_created": m.edges_created,
+                "edges_deleted": m.edges_deleted,
+                "properties_set": m.properties_set,
+                "properties_removed": m.properties_removed,
+            });
+        }
+        Ok(structured_text_result(text, structured))
     }
 
     #[tool(
@@ -1393,16 +1418,19 @@ impl SeleneTools {
             })
             .collect();
 
+        let returned = enriched.len();
         let mut text = format!(
             "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
             p.query_text,
             total,
-            enriched.len(),
+            returned,
             offset,
             format_json(&enriched)
         );
 
-        // Response size guard (char-boundary safe)
+        // Response size guard (char-boundary safe). Note: this only truncates
+        // the human text; the structured payload below is unbounded and lets
+        // programmatic clients see all results without the truncation hint.
         const MAX_RESPONSE_BYTES: usize = 50_000;
         if text.len() > MAX_RESPONSE_BYTES {
             let truncate_at = text
@@ -1415,7 +1443,16 @@ impl SeleneTools {
             text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
         }
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "query": p.query_text,
+                "total": total,
+                "offset": offset,
+                "returned": returned,
+                "results": enriched,
+            }),
+        ))
     }
 
     #[tool(
@@ -1436,12 +1473,41 @@ impl SeleneTools {
         let p = &params.0;
 
         if p.k <= 0 {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: "k must be a positive integer".into(),
-                data: None,
-            });
+            return Err(op_err(ops::OpError::InvalidRequest(
+                "k must be a positive integer".into(),
+            )));
         }
+
+        // Pre-flight: confirm the node exists and the named property is a Vector.
+        // Without this check the underlying CALL silently returns zero results
+        // for any non-vector property, leaving the caller guessing.
+        let node_id = selene_core::entity::NodeId(p.node_id);
+        let prop_check = self.state.graph.read(|g| {
+            let Some(node) = g.get_node(node_id) else {
+                return Err(ops::OpError::NotFound {
+                    entity: "node",
+                    id: p.node_id,
+                });
+            };
+            match node.property(&p.property) {
+                None => Err(ops::OpError::InvalidRequest(format!(
+                    "node {} has no property '{}' — populate it with an embedding first \
+                     (e.g. SET n.{} = embed($text) for arbitrary nodes, or enrich_communities \
+                     for __CommunitySummary nodes)",
+                    p.node_id, p.property, p.property
+                ))),
+                Some(selene_core::Value::Vector(_)) => Ok(()),
+                Some(other) => Err(ops::OpError::InvalidRequest(format!(
+                    "property '{}' on node {} is {}, not a vector — overwrite it with an \
+                     embedding via SET n.{} = embed($text) before similarity search",
+                    p.property,
+                    p.node_id,
+                    other.type_name(),
+                    p.property,
+                ))),
+            }
+        });
+        prop_check.map_err(op_err)?;
 
         let query = "CALL graph.similarNodes($nodeId, $prop, $k) \
                      YIELD node_id, score RETURN node_id, score";
@@ -1462,12 +1528,25 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let data_text = result.data_json.clone().unwrap_or_else(|| "[]".to_string());
         let text = format!(
-            "Similar to node {}: {} results\n{data}",
+            "Similar to node {}: {} results\n{data_text}",
             p.node_id, result.row_count
         );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let parsed: serde_json::Value = result
+            .data_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!([]));
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "node_id": p.node_id,
+                "property": p.property,
+                "row_count": result.row_count,
+                "results": parsed,
+            }),
+        ))
     }
 
     // ── Vector Quantization Stats ────────────────────────────────────
