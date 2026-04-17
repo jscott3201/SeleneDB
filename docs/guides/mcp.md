@@ -2,16 +2,14 @@
 
 ## Overview
 
-SeleneDB ships a full [Model Context Protocol](https://modelcontextprotocol.io/) server purpose-built for AI agents. This is not a generic API wrapper — every tool is designed around how agents actually work: progressive disclosure to minimize context tokens, parameterized queries to prevent injection, batch operations to minimize round-trips, and built-in memory for cross-session continuity.
-
-**64 tools. One endpoint. Zero orchestration overhead.**
+SeleneDB ships a [Model Context Protocol](https://modelcontextprotocol.io/) server over the GQL engine. Tool descriptions carry read/write/destructive annotations, all writes route through parameterized GQL, and batch operations keep round-trips low.
 
 Where a typical agentic workflow orchestrates three separate databases (graph for relationships, vector for similarity, time-series for telemetry), SeleneDB provides all three through a single MCP connection. Agents get graph queries, semantic search, GraphRAG retrieval, time-series analytics, and persistent memory in one place.
 
 MCP is served over Streamable HTTP at the `/mcp` endpoint (rmcp 1.3, JSON-RPC 2.0). Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Copilot, custom agents) can connect without a dedicated SDK.
 
 SeleneDB declares three MCP capabilities:
-- **Tools** (64): query, mutate, search, import/export, agent memory, admin, and AI operations
+- **Tools**: query, mutate, search, import/export, agent memory, admin, and AI operations
 - **Resources** (5): read-only data agents can inspect without a tool call round-trip
 - **Prompts** (3): guided workflow templates for common agent tasks
 
@@ -228,7 +226,7 @@ Prompt templates provide guided workflows for common agent tasks.
 
 ## Tool Reference
 
-SeleneDB exposes 64 MCP tools organized into fourteen categories. Each tool accepts a JSON
+MCP tools are grouped by capability below. Each tool accepts a JSON
 object of parameters and returns structured text results. All tools that accept user input
 use parameterized GQL queries (`$param` placeholders) — no string interpolation.
 

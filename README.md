@@ -151,7 +151,7 @@ See the [GQL guide](docs/guides/gql/overview.md) for the full language reference
 
 ### Networking and Deployment
 - **QUIC + HTTP + MCP**: three transports, one ops layer, identical behavior
-- **64 MCP tools**: Model Context Protocol server with read/write/destructive annotations
+- **MCP tools**: Model Context Protocol server with read/write/destructive annotations
 - **Federation**: cross-instance queries via `USE <graph>` over QUIC with Arrow IPC
 - **CDC replicas**: `--replica-of` for read scaling with live changelog streaming
 - **Bidirectional sync**: offline-first edge nodes with LWW conflict resolution
