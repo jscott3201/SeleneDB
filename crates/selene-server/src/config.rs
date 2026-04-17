@@ -73,6 +73,14 @@ pub struct RateLimitConfig {
     /// Requests/sec for heavy data endpoints: CSV/RDF import/export.
     #[serde(default = "default_rate_data")]
     pub data_per_sec: u32,
+    /// Requests/sec for unauthenticated requests on non-system endpoints.
+    /// Charged separately from the per-tier budgets above so a flood of
+    /// anonymous traffic cannot exhaust the budget that authenticated
+    /// clients depend on. Default: 10/sec, generous enough for legitimate
+    /// pre-auth probes (OpenAPI fetch, OAuth discovery) but tight enough
+    /// to bound brute-force surface area.
+    #[serde(default = "default_rate_anonymous")]
+    pub anonymous_per_sec: u32,
 }
 
 fn default_rate_read() -> u32 {
@@ -87,6 +95,9 @@ fn default_rate_query() -> u32 {
 fn default_rate_data() -> u32 {
     20
 }
+fn default_rate_anonymous() -> u32 {
+    10
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -95,6 +106,7 @@ impl Default for RateLimitConfig {
             write_per_sec: default_rate_write(),
             query_per_sec: default_rate_query(),
             data_per_sec: default_rate_data(),
+            anonymous_per_sec: default_rate_anonymous(),
         }
     }
 }

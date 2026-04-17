@@ -29,6 +29,10 @@ enum Tier {
     Query,
     /// CSV/RDF import/export, time-series bulk writes: heavy I/O.
     Data,
+    /// Unauthenticated requests on anything other than System endpoints.
+    /// Has its own (much tighter) bucket so that a flood of anonymous traffic
+    /// cannot exhaust the budget that authenticated clients depend on.
+    Anonymous,
 }
 
 /// Token bucket: permits `capacity` requests per second, refilling continuously.
@@ -83,6 +87,7 @@ pub struct EndpointRateLimiter {
     write: Mutex<TokenBucket>,
     query: Mutex<TokenBucket>,
     data: Mutex<TokenBucket>,
+    anonymous: Mutex<TokenBucket>,
 }
 
 impl EndpointRateLimiter {
@@ -92,6 +97,7 @@ impl EndpointRateLimiter {
             write: Mutex::new(TokenBucket::new(config.write_per_sec)),
             query: Mutex::new(TokenBucket::new(config.query_per_sec)),
             data: Mutex::new(TokenBucket::new(config.data_per_sec)),
+            anonymous: Mutex::new(TokenBucket::new(config.anonymous_per_sec)),
         }
     }
 
@@ -102,6 +108,7 @@ impl EndpointRateLimiter {
             Tier::Write => &self.write,
             Tier::Query => &self.query,
             Tier::Data => &self.data,
+            Tier::Anonymous => &self.anonymous,
         };
         let mut guard = bucket.lock();
         // Tier disabled (0 req/s in config): always permit.
@@ -116,14 +123,25 @@ impl EndpointRateLimiter {
     }
 }
 
-/// Classify a request into a rate limit tier by path and method.
-fn classify(method: &Method, path: &str) -> Tier {
-    // System endpoints: never rate-limited.
+/// Classify a request into a rate limit tier by path, method, and whether
+/// the caller presented an `Authorization` header.
+///
+/// Unauthenticated requests on anything other than a System endpoint go to
+/// the [`Tier::Anonymous`] bucket so that a flood of anonymous traffic can't
+/// drain the per-tier budget that authenticated clients depend on. Whether
+/// the bearer is *valid* is checked downstream by the auth extractor; we
+/// only need its presence here to decide which budget to charge.
+fn classify(method: &Method, path: &str, authenticated: bool) -> Tier {
+    // System endpoints: never rate-limited, even anonymously.
     match path {
         "/" | "/health" | "/ready" | "/info" | "/openapi.yaml" | "/metrics" => {
             return Tier::System;
         }
         _ => {}
+    }
+
+    if !authenticated {
+        return Tier::Anonymous;
     }
 
     // Query tier: GQL, SPARQL, graph slice.
@@ -160,7 +178,15 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let tier = classify(req.method(), req.uri().path());
+    // Presence-check only — the auth extractor downstream validates the
+    // bearer. We just need to know which budget to charge: a missing or
+    // empty Authorization header gets bucketed under Anonymous.
+    let authenticated = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| !v.trim().is_empty());
+    let tier = classify(req.method(), req.uri().path(), authenticated);
 
     match limiter.try_acquire(tier) {
         Ok(()) => next.run(req).await,
@@ -188,36 +214,66 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
 
+    // Helper: existing tests use authenticated=true; the unauthenticated
+    // path is exercised separately below.
+    fn cls(method: &Method, path: &str) -> Tier {
+        classify(method, path, true)
+    }
+
     #[test]
     fn classify_system_endpoints() {
-        assert_eq!(classify(&Method::GET, "/health"), Tier::System);
-        assert_eq!(classify(&Method::GET, "/ready"), Tier::System);
-        assert_eq!(classify(&Method::GET, "/info"), Tier::System);
-        assert_eq!(classify(&Method::GET, "/"), Tier::System);
+        assert_eq!(cls(&Method::GET, "/health"), Tier::System);
+        assert_eq!(cls(&Method::GET, "/ready"), Tier::System);
+        assert_eq!(cls(&Method::GET, "/info"), Tier::System);
+        assert_eq!(cls(&Method::GET, "/"), Tier::System);
     }
 
     #[test]
     fn classify_query_endpoints() {
-        assert_eq!(classify(&Method::POST, "/gql"), Tier::Query);
-        assert_eq!(classify(&Method::GET, "/sparql"), Tier::Query);
-        assert_eq!(classify(&Method::POST, "/graph/slice"), Tier::Query);
+        assert_eq!(cls(&Method::POST, "/gql"), Tier::Query);
+        assert_eq!(cls(&Method::GET, "/sparql"), Tier::Query);
+        assert_eq!(cls(&Method::POST, "/graph/slice"), Tier::Query);
     }
 
     #[test]
     fn classify_data_endpoints() {
-        assert_eq!(classify(&Method::POST, "/graph/csv"), Tier::Data);
-        assert_eq!(classify(&Method::POST, "/graph/rdf"), Tier::Data);
-        assert_eq!(classify(&Method::POST, "/ts/samples"), Tier::Data);
-        assert_eq!(classify(&Method::POST, "/mcp"), Tier::Data);
+        assert_eq!(cls(&Method::POST, "/graph/csv"), Tier::Data);
+        assert_eq!(cls(&Method::POST, "/graph/rdf"), Tier::Data);
+        assert_eq!(cls(&Method::POST, "/ts/samples"), Tier::Data);
+        assert_eq!(cls(&Method::POST, "/mcp"), Tier::Data);
     }
 
     #[test]
     fn classify_read_write() {
-        assert_eq!(classify(&Method::GET, "/nodes"), Tier::Read);
-        assert_eq!(classify(&Method::GET, "/edges/42"), Tier::Read);
-        assert_eq!(classify(&Method::POST, "/nodes"), Tier::Write);
-        assert_eq!(classify(&Method::PUT, "/nodes/1"), Tier::Write);
-        assert_eq!(classify(&Method::DELETE, "/edges/5"), Tier::Write);
+        assert_eq!(cls(&Method::GET, "/nodes"), Tier::Read);
+        assert_eq!(cls(&Method::GET, "/edges/42"), Tier::Read);
+        assert_eq!(cls(&Method::POST, "/nodes"), Tier::Write);
+        assert_eq!(cls(&Method::PUT, "/nodes/1"), Tier::Write);
+        assert_eq!(cls(&Method::DELETE, "/edges/5"), Tier::Write);
+    }
+
+    #[test]
+    fn unauthenticated_non_system_uses_anonymous_tier() {
+        // The whole point of the Anonymous tier: a flood of unauthenticated
+        // hits on /gql or /nodes must drain the Anonymous bucket, not the
+        // shared Query/Read budgets that authenticated callers depend on.
+        assert_eq!(classify(&Method::POST, "/gql", false), Tier::Anonymous);
+        assert_eq!(classify(&Method::GET, "/nodes", false), Tier::Anonymous);
+        assert_eq!(
+            classify(&Method::POST, "/graph/csv", false),
+            Tier::Anonymous
+        );
+        assert_eq!(
+            classify(&Method::DELETE, "/edges/5", false),
+            Tier::Anonymous
+        );
+    }
+
+    #[test]
+    fn unauthenticated_system_endpoints_still_bypass() {
+        // Unauthenticated is fine for liveness probes and discovery.
+        assert_eq!(classify(&Method::GET, "/health", false), Tier::System);
+        assert_eq!(classify(&Method::GET, "/openapi.yaml", false), Tier::System);
     }
 
     #[test]
@@ -238,10 +294,38 @@ mod tests {
             write_per_sec: 100,
             query_per_sec: 50,
             data_per_sec: 20,
+            anonymous_per_sec: 10,
         };
         let limiter = EndpointRateLimiter::from_config(&config);
         // Read tier disabled: always permits.
         for _ in 0..1000 {
+            assert!(limiter.try_acquire(Tier::Read).is_ok());
+        }
+    }
+
+    #[test]
+    fn anonymous_bucket_independent_of_authenticated_tiers() {
+        // The whole reason the Anonymous tier exists: draining it must
+        // not affect the per-tier (read/write/query/data) budgets.
+        let config = RateLimitConfig {
+            read_per_sec: 100,
+            write_per_sec: 100,
+            query_per_sec: 100,
+            data_per_sec: 100,
+            anonymous_per_sec: 5,
+        };
+        let limiter = EndpointRateLimiter::from_config(&config);
+        // Burn the entire Anonymous budget.
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(Tier::Anonymous).is_ok());
+        }
+        assert!(
+            limiter.try_acquire(Tier::Anonymous).is_err(),
+            "anonymous tier should be exhausted after 5 hits"
+        );
+        // Authenticated tiers must still have their full budget intact.
+        for _ in 0..100 {
+            assert!(limiter.try_acquire(Tier::Query).is_ok());
             assert!(limiter.try_acquire(Tier::Read).is_ok());
         }
     }
@@ -269,6 +353,7 @@ mod tests {
             write_per_sec: 1,
             query_per_sec: 1,
             data_per_sec: 1,
+            anonymous_per_sec: 1,
         };
         let limiter = EndpointRateLimiter::from_config(&config);
         for _ in 0..1000 {

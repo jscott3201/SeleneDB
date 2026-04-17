@@ -908,7 +908,7 @@ pub async fn bootstrap(
         lag: None,
     };
 
-    Ok(ServerState {
+    let state = ServerState {
         graph: shared_graph,
         hot_tier,
         auth_engine,
@@ -927,7 +927,52 @@ pub async fn bootstrap(
         csr_cache,
         projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
         clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
-    })
+    };
+
+    // Sweep any orphaned snapshot temp files left from previous runs.
+    // The snapshot_export handler creates `*.snap.tmp` files and schedules
+    // a delayed cleanup; if the server crashed before that cleanup ran,
+    // the file would linger forever. Doing this on every boot keeps the
+    // data dir tidy without needing to track per-export task handles.
+    sweep_orphan_snapshot_temps(&state.config.data_dir);
+
+    Ok(state)
+}
+
+/// Remove `*.snap.tmp` files from the data directory.
+///
+/// Called once at startup. The snapshot_export handler creates these as
+/// temporary download files and removes them after a delay; on a crash
+/// or hard-kill the cleanup task is dropped and the file lingers. This
+/// best-effort sweep covers the recovery case. Errors are logged but
+/// never block startup — losing a few KB to a missed cleanup is far
+/// preferable to refusing to start.
+fn sweep_orphan_snapshot_temps(data_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_tmp_snapshot = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.starts_with("export-") && name.ends_with(".snap.tmp"));
+        if !is_tmp_snapshot {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to remove orphan snapshot temp file at startup"
+            ),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "swept orphan snapshot temp files from data_dir");
+    }
 }
 
 impl ServerState {
@@ -1033,5 +1078,55 @@ impl ServerState {
             projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
             clock_counters: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sweep_orphan_snapshot_temps;
+    use std::fs::File;
+
+    #[test]
+    fn sweep_removes_export_temp_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+
+        // Files we want gone after the sweep:
+        File::create(p.join("export-1234-abcd.snap.tmp")).unwrap();
+        File::create(p.join("export-5678-ef01.snap.tmp")).unwrap();
+
+        // Files we want to survive:
+        File::create(p.join("snapshot.snap")).unwrap(); // real snapshot
+        File::create(p.join("wal.bin")).unwrap();
+        File::create(p.join("export-1234.snap")).unwrap(); // not .tmp
+        File::create(p.join("random.tmp")).unwrap(); // not export- prefix
+
+        sweep_orphan_snapshot_temps(p);
+
+        assert!(!p.join("export-1234-abcd.snap.tmp").exists());
+        assert!(!p.join("export-5678-ef01.snap.tmp").exists());
+        assert!(p.join("snapshot.snap").exists());
+        assert!(p.join("wal.bin").exists());
+        assert!(p.join("export-1234.snap").exists());
+        assert!(p.join("random.tmp").exists());
+    }
+
+    #[test]
+    fn sweep_is_a_noop_on_missing_dir() {
+        // Bootstrap should never fail just because the data dir does not
+        // exist yet (it is created earlier in `bootstrap`); the sweep itself
+        // must tolerate that.
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent = dir.path().join("does-not-exist");
+        sweep_orphan_snapshot_temps(&nonexistent);
+        // No assertion — the test is that this returns without panicking.
+    }
+
+    #[test]
+    fn sweep_handles_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        sweep_orphan_snapshot_temps(dir.path());
+        // Empty dir before, empty dir after.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }
