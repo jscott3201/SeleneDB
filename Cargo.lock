@@ -5515,6 +5515,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "criterion",
+ "geo-types",
  "imbl",
  "parking_lot",
  "pest",
