@@ -41,6 +41,15 @@ pub struct HttpConfig {
     /// Per-endpoint rate limiting configuration.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Maximum number of concurrent WebSocket subscriber connections.
+    /// Each long-lived subscription holds a broadcast receiver and a tokio
+    /// task; the cap protects the server from runaway fan-out. Default: 100.
+    #[serde(default = "default_max_ws_subscriptions")]
+    pub max_ws_subscriptions: usize,
+}
+
+fn default_max_ws_subscriptions() -> usize {
+    100
 }
 
 /// Per-endpoint rate limiting (token bucket, requests per second).
@@ -102,6 +111,7 @@ impl std::fmt::Debug for HttpConfig {
             )
             .field("allow_plaintext", &self.allow_plaintext)
             .field("rate_limit", &self.rate_limit)
+            .field("max_ws_subscriptions", &self.max_ws_subscriptions)
             .finish()
     }
 }
@@ -115,6 +125,7 @@ impl Default for HttpConfig {
             metrics_token: None,
             allow_plaintext: false,
             rate_limit: RateLimitConfig::default(),
+            max_ws_subscriptions: default_max_ws_subscriptions(),
         }
     }
 }

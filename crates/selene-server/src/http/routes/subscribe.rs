@@ -14,6 +14,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use selene_core::changeset::Change;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::bootstrap::ServerState;
 use crate::http::auth::HttpAuth;
@@ -66,44 +67,61 @@ pub(in crate::http) async fn subscribe(
         .event("subscription_ack")
         .data(serde_json::to_string(&ack_data).unwrap_or_default()));
 
+    // Surface broadcast lag instead of silently dropping events. Without
+    // this branch a slow subscriber would just stop receiving with no
+    // signal that anything was missed; that breaks any consumer that
+    // relies on changelog continuity for incremental sync.
     let change_stream = BroadcastStream::new(rx).filter_map(move |msg| {
-        let Ok(_seq) = msg else {
-            return None;
-        };
+        match msg {
+            Ok(_seq) => {
+                let entries = state
+                    .persistence
+                    .changelog
+                    .lock()
+                    .since(last_seq)
+                    .unwrap_or_default();
 
-        let entries = state
-            .persistence
-            .changelog
-            .lock()
-            .since(last_seq)
-            .unwrap_or_default();
-
-        if let Some(last) = entries.last() {
-            last_seq = last.sequence;
-        }
-
-        let mut events = Vec::new();
-        for entry in &entries {
-            for change in &entry.changes {
-                if !matches_filter(
-                    change,
-                    &label_filter,
-                    &change_filter,
-                    property_filter.as_ref(),
-                    &state,
-                ) {
-                    continue;
+                if let Some(last) = entries.last() {
+                    last_seq = last.sequence;
                 }
-                events.push(change_to_json(change, entry.timestamp_nanos));
+
+                let mut events = Vec::new();
+                for entry in &entries {
+                    for change in &entry.changes {
+                        if !matches_filter(
+                            change,
+                            &label_filter,
+                            &change_filter,
+                            property_filter.as_ref(),
+                            &state,
+                        ) {
+                            continue;
+                        }
+                        events.push(change_to_json(change, entry.timestamp_nanos));
+                    }
+                }
+
+                if events.is_empty() {
+                    return None;
+                }
+
+                let data = serde_json::to_string(&events).unwrap_or_default();
+                Some(Ok(Event::default().data(data)))
+            }
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                // Broadcast queue overflowed — repositioned to the latest
+                // message. Emit a typed event so the client can decide
+                // whether to refetch state or carry on. The stream itself
+                // continues; subsequent ticks will deliver the latest
+                // changes from `last_seq` forward.
+                tracing::warn!(
+                    lagged = n,
+                    "SSE subscriber lagged; emitting subscriber_lagged event"
+                );
+                let data = serde_json::to_string(&lagged_payload(n)).unwrap_or_default();
+                Some(Ok(Event::default().event("subscriber_lagged").data(data)))
             }
         }
-
-        if events.is_empty() {
-            return None;
-        }
-
-        let data = serde_json::to_string(&events).unwrap_or_default();
-        Some(Ok(Event::default().data(data)))
     });
 
     let stream = futures::StreamExt::chain(
@@ -251,5 +269,42 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "key": key.as_str(),
             "timestamp_ms": ts_ms,
         }),
+    }
+}
+
+/// JSON body of the `subscriber_lagged` SSE event. Pulled out so the wire
+/// shape is unit-testable independent of the full streaming pipeline.
+fn lagged_payload(dropped_count: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "subscriber_lagged",
+        "dropped_count": dropped_count,
+        "hint": "the changelog queue overflowed; fetch a fresh snapshot if you require strict continuity",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lagged_payload;
+
+    #[test]
+    fn lagged_payload_carries_typed_kind_and_count() {
+        // Clients dispatch on the `type` discriminator and report
+        // `dropped_count` to the user; both must be present and stable.
+        let p = lagged_payload(7);
+        assert_eq!(p["type"], "subscriber_lagged");
+        assert_eq!(p["dropped_count"], 7);
+        assert!(
+            p["hint"].as_str().unwrap().contains("snapshot"),
+            "hint should suggest snapshot recovery"
+        );
+    }
+
+    #[test]
+    fn lagged_payload_handles_zero_drop_count() {
+        // Edge case: BroadcastStreamRecvError::Lagged(0) is technically
+        // possible if the channel underflows; payload should still be
+        // well-formed.
+        let p = lagged_payload(0);
+        assert_eq!(p["dropped_count"], 0);
     }
 }

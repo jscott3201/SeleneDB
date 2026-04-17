@@ -21,10 +21,10 @@ use super::auth::HttpAuth;
 /// Global connection counter for enforcing max subscriptions.
 static WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
-/// Maximum concurrent WebSocket subscriptions.
-const MAX_WS_SUBSCRIPTIONS: usize = 100;
-
-/// How often to refresh the auth scope (seconds).
+/// How often to refresh the auth scope (seconds). Long-lived WebSocket
+/// connections poll `refresh_scope_if_stale` at this cadence; the call is
+/// a no-op unless the graph's containment generation has changed, so this
+/// only bounds the worst-case staleness for a sustained subscriber.
 const SCOPE_REFRESH_INTERVAL_SECS: u64 = 60;
 
 /// Maximum number of label or edge-type entries in a subscription filter.
@@ -86,8 +86,15 @@ pub async fn ws_subscribe(
     auth: HttpAuth,
     State(state): State<Arc<ServerState>>,
 ) -> impl IntoResponse {
+    let limit = state.config.http.max_ws_subscriptions;
     let current = WS_CONNECTIONS.load(Ordering::Relaxed);
-    if current >= MAX_WS_SUBSCRIPTIONS {
+    if current >= limit {
+        tracing::warn!(
+            current,
+            limit,
+            principal = auth.0.principal_node_id.0,
+            "WebSocket subscription rejected: at max_ws_subscriptions limit"
+        );
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
@@ -172,7 +179,29 @@ async fn handle_ws(mut socket: WebSocket, auth: AuthContext, state: Arc<ServerSt
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(lagged = n, "WebSocket subscriber lagged, skipping events");
+                        // Tell the client *before* we drop the connection. Otherwise
+                        // they only see a silent socket close and have no way to know
+                        // that events were dropped or to fall back to a snapshot reload.
+                        tracing::warn!(
+                            lagged = n,
+                            principal = auth.principal_node_id.0,
+                            "WebSocket subscriber lagged; sending notice and closing"
+                        );
+                        // Same JSON shape as the SSE `subscriber_lagged` event in
+                        // routes/subscribe.rs::lagged_payload — clients should be
+                        // able to dispatch on the same discriminator regardless
+                        // of transport.
+                        let notice = lagged_payload(n);
+                        if let Ok(json) = serde_json::to_string(&notice) {
+                            let _ = socket.send(Message::Text(json.into())).await;
+                        }
+                        let _ = socket
+                            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                code: 1011, // Internal Error / server is terminating
+                                reason: "subscriber lagged".into(),
+                            })))
+                            .await;
+                        break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break; // Server shutting down
@@ -342,4 +371,32 @@ fn filter_changes(
     }
 
     result
+}
+
+/// JSON body of the `subscriber_lagged` notification. Mirrors the SSE
+/// version in routes/subscribe.rs so clients see one wire contract
+/// across both transports.
+fn lagged_payload(dropped_count: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "subscriber_lagged",
+        "dropped_count": dropped_count,
+        "hint": "the changelog queue overflowed; fetch a fresh snapshot if you require strict continuity",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lagged_payload;
+
+    #[test]
+    fn lagged_payload_matches_sse_contract() {
+        // WS and SSE must agree on this shape. The corresponding SSE test
+        // lives in routes/subscribe.rs; both should keep checking the same
+        // discriminator + count fields so a client can dispatch on `type`
+        // regardless of transport.
+        let p = lagged_payload(42);
+        assert_eq!(p["type"], "subscriber_lagged");
+        assert_eq!(p["dropped_count"], 42);
+        assert!(p["hint"].is_string());
+    }
 }
