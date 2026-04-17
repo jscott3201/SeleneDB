@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use smol_str::SmolStr;
 
+use crate::geometry::GeometryValue;
 use crate::interner::IStr;
 
 /// A property value. Every variant maps cleanly to an Arrow data type.
@@ -35,6 +36,10 @@ pub enum Value {
     /// Uses IStr for zero-cost comparison and deduplication of repeated
     /// string property values longer than 22 bytes (SmolStr inlines shorter ones).
     InternedStr(IStr),
+    /// Spatial geometry (point, polygon, line, multi-variants, collection).
+    /// Wrapped in `Arc` so polygons with large coordinate rings clone cheaply
+    /// through the mutation batcher and plan cache.
+    Geometry(Arc<GeometryValue>),
 }
 
 impl PartialEq for Value {
@@ -52,6 +57,7 @@ impl PartialEq for Value {
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (Self::List(a), Self::List(b)) => a == b,
             (Self::Vector(a), Self::Vector(b)) => a == b,
+            (Self::Geometry(a), Self::Geometry(b)) => **a == **b,
 
             // Cross-variant string equality: String and InternedStr represent
             // the same logical type. Dictionary encoding promotes String to
@@ -84,6 +90,7 @@ impl Value {
             Self::Duration(_) => "duration",
             Self::Vector(_) => "vector",
             Self::InternedStr(_) => "string",
+            Self::Geometry(_) => "geometry",
         }
     }
 
@@ -108,6 +115,11 @@ impl Value {
     /// Convenience constructor for vector values.
     pub fn vector(data: Vec<f32>) -> Self {
         Self::Vector(Arc::from(data))
+    }
+
+    /// Convenience constructor for geometry values.
+    pub fn geometry(g: GeometryValue) -> Self {
+        Self::Geometry(Arc::new(g))
     }
 }
 
@@ -164,6 +176,7 @@ impl std::fmt::Display for Value {
             }
             Self::Vector(v) => write!(f, "vector[{}]", v.len()),
             Self::InternedStr(s) => write!(f, "{s}"),
+            Self::Geometry(g) => write!(f, "{}[{}]", g.geometry_type(), g.coord_count()),
         }
     }
 }
@@ -261,6 +274,28 @@ mod tests {
         let v = Value::vector(vec![0.1, 0.2, 0.3]);
         assert_eq!(v.type_name(), "vector");
         assert_eq!(format!("{v}"), "vector[3]");
+    }
+
+    #[test]
+    fn geometry_value() {
+        let g = Value::geometry(crate::GeometryValue::point_wgs84(-74.0, 40.7));
+        assert_eq!(g.type_name(), "geometry");
+        assert_eq!(format!("{g}"), "Point[1]");
+    }
+
+    #[test]
+    fn geometry_value_round_trips_postcard() {
+        let original = Value::geometry(crate::GeometryValue::point_wgs84(-74.0, 40.7));
+        let bytes = postcard::to_allocvec(&original).expect("serialize");
+        let decoded: Value = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn geometry_equality_ignores_arc_identity() {
+        let a = Value::geometry(crate::GeometryValue::point_wgs84(1.0, 2.0));
+        let b = Value::geometry(crate::GeometryValue::point_wgs84(1.0, 2.0));
+        assert_eq!(a, b);
     }
 
     #[test]

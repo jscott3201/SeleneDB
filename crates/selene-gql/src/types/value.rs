@@ -37,6 +37,8 @@ pub enum GqlType {
     Null,
     /// Dense float vector (embeddings).
     Vector,
+    /// Spatial geometry (Point, Polygon, LineString, Multi* variants).
+    Geometry,
     /// Record (ordered named fields). ISO GQL RECORD type.
     Record,
     /// Empty list element type, subtype of all types.
@@ -79,6 +81,7 @@ impl std::fmt::Display for GqlType {
             Self::Duration => f.write_str("DURATION"),
             Self::Bytes => f.write_str("BYTES"),
             Self::Vector => f.write_str("VECTOR"),
+            Self::Geometry => f.write_str("GEOMETRY"),
             Self::List(inner) => write!(f, "LIST<{inner}>"),
             Self::Path => f.write_str("PATH"),
             Self::Node => f.write_str("NODE"),
@@ -353,6 +356,9 @@ pub enum GqlValue {
     Bytes(Arc<[u8]>),
     /// Dense float vector (embeddings, feature vectors).
     Vector(Arc<[f32]>),
+    /// Spatial geometry (point, polygon, line, ...). Scalar spatial functions
+    /// (ST_Distance, ST_Contains, ...) operate on this variant.
+    Geometry(Arc<selene_core::GeometryValue>),
 
     // === Constructed ===
     List(GqlList),
@@ -388,6 +394,7 @@ impl GqlValue {
             Self::Duration(_) => GqlType::Duration,
             Self::Bytes(_) => GqlType::Bytes,
             Self::Vector(_) => GqlType::Vector,
+            Self::Geometry(_) => GqlType::Geometry,
             Self::Record(_) => GqlType::Record,
             Self::List(l) => GqlType::List(Box::new(l.element_type.clone())),
             Self::Node(_) => GqlType::Node,
@@ -517,6 +524,7 @@ impl std::fmt::Display for GqlValue {
             Self::Duration(d) => write!(f, "{d}"),
             Self::Bytes(b) => write!(f, "bytes[{}]", b.len()),
             Self::Vector(v) => write!(f, "vector[{}]", v.len()),
+            Self::Geometry(g) => write!(f, "{}[{}]", g.geometry_type(), g.coord_count()),
             Self::Record(r) => write!(f, "{r}"),
             Self::List(l) => {
                 write!(f, "[")?;
@@ -547,6 +555,7 @@ impl From<&Value> for GqlValue {
             Value::Float(f) => GqlValue::Float(*f),
             Value::String(s) => GqlValue::String(s.clone()),
             Value::InternedStr(s) => GqlValue::String(smol_str::SmolStr::new(s.as_str())),
+            Value::Geometry(g) => GqlValue::Geometry(Arc::clone(g)),
             Value::Timestamp(t) => GqlValue::ZonedDateTime(ZonedDateTime::from_nanos_utc(*t)),
             Value::Bytes(b) => GqlValue::Bytes(Arc::clone(b)),
             Value::Vector(v) => GqlValue::Vector(Arc::clone(v)),
@@ -579,6 +588,7 @@ impl TryFrom<&GqlValue> for Value {
             GqlValue::ZonedDateTime(zdt) => Ok(Value::Timestamp(zdt.nanos)),
             GqlValue::Bytes(b) => Ok(Value::Bytes(Arc::clone(b))),
             GqlValue::Vector(v) => Ok(Value::Vector(Arc::clone(v))),
+            GqlValue::Geometry(g) => Ok(Value::Geometry(Arc::clone(g))),
             GqlValue::Date(d) => Ok(Value::Date(d.days)),
             GqlValue::LocalDateTime(dt) => Ok(Value::LocalDateTime(dt.nanos)),
             GqlValue::Duration(d) => Ok(Value::Duration(d.nanos)),

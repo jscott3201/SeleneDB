@@ -261,6 +261,7 @@ impl ScalarFunction for ValueTypeFunction {
             Some(GqlValue::Duration(_)) => "DURATION",
             Some(GqlValue::Bytes(_)) => "BYTES",
             Some(GqlValue::Vector(_)) => "VECTOR",
+            Some(GqlValue::Geometry(_)) => "GEOMETRY",
             Some(GqlValue::Record(_)) => "RECORD",
         };
         Ok(GqlValue::String(SmolStr::new(name)))

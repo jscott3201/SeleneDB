@@ -667,6 +667,7 @@ impl PropDiscovery {
             Value::Vector(_) => "Vector",
             Value::InternedStr(_) => "String",
             Value::Null => "Null",
+            Value::Geometry(_) => "Geometry",
         };
         *self.type_counts.entry(type_name.to_string()).or_insert(0) += 1;
     }

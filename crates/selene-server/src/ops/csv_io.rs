@@ -636,6 +636,7 @@ fn value_to_csv_string(v: &Value) -> String {
             json.to_string()
         }
         Value::Vector(v) => format!("vector[{}]", v.len()),
+        Value::Geometry(g) => g.to_geojson(),
     }
 }
 

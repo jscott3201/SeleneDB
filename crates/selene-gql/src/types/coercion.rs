@@ -253,6 +253,11 @@ impl GqlValue {
                     elem.to_bits().hash(&mut hasher);
                 }
             }
+            GqlValue::Geometry(g) => {
+                std::mem::discriminant(self).hash(&mut hasher);
+                // GeoJSON serialization is stable for equal geometries.
+                g.to_geojson().hash(&mut hasher);
+            }
             GqlValue::Record(r) => {
                 std::mem::discriminant(self).hash(&mut hasher);
                 r.fields.len().hash(&mut hasher);

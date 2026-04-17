@@ -3,6 +3,7 @@
 
 pub mod changeset;
 pub mod entity;
+pub mod geometry;
 pub mod interner;
 pub mod io;
 pub mod label_set;
@@ -13,6 +14,7 @@ pub mod trigger;
 pub mod value;
 
 pub use entity::{Edge, EdgeId, Node, NodeId, now_nanos};
+pub use geometry::{GeometryError, GeometryValue};
 pub use interner::{IStr, try_intern};
 pub use label_set::LabelSet;
 pub use origin::Origin;
