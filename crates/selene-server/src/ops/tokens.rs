@@ -68,29 +68,17 @@ pub fn revoke_token(
     require_admin(state, auth)?;
     let oauth = oauth_service(state)?;
 
-    // The service's revoke_token both decodes (allowing expired) and inserts.
-    // To return the decoded metadata we re-fetch the entry from the deny-list
-    // afterwards. For a typical deny-list this is O(n) but n is expected to
-    // stay small between prune cycles.
-    oauth
+    // The service decodes the token (allowing expired), inserts into the
+    // deny-list, and hands back the jti + original expiry. Passing those
+    // through keeps the response deterministic — even for an already-expired
+    // token that `list_revoked` would have filtered out, and even when other
+    // entries with later expiries already live on the deny-list.
+    let (jti, expires_at) = oauth
         .token_service
         .revoke_token(token)
         .map_err(|e| OpError::InvalidRequest(format!("revoke failed: {e}")))?;
 
-    // Look up the newly-inserted entry by decoding the same JWT for its jti.
-    // We intentionally do this via `validate_standalone` with a relaxed
-    // validation — but the service already exposes list_revoked which is
-    // simpler and avoids duplicating JWT parsing here.
-    let listed = oauth.token_service.list_revoked();
-    let latest = listed
-        .into_iter()
-        .max_by_key(|(_jti, exp)| *exp)
-        .ok_or_else(|| OpError::Internal("revoke succeeded but entry missing".into()))?;
-
-    Ok(RevokeTokenResult {
-        jti: latest.0,
-        expires_at: latest.1,
-    })
+    Ok(RevokeTokenResult { jti, expires_at })
 }
 
 /// List current deny-list entries. Expired entries are filtered out.

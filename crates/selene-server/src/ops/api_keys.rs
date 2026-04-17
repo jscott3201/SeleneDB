@@ -187,16 +187,25 @@ pub fn create_api_key(
 
     // Generate prefix. Retry on the astronomically unlikely collision rather
     // than proceeding with a duplicate (would break the prefix→row lookup).
-    let mut prefix = random_alphanumeric(PREFIX_LEN);
-    for _ in 0..4 {
+    // If every attempt clashes, bail rather than persisting an ambiguous key.
+    const PREFIX_ATTEMPTS: usize = 5;
+    let mut prefix = String::new();
+    let mut found_unique = false;
+    for _ in 0..PREFIX_ATTEMPTS {
+        prefix = random_alphanumeric(PREFIX_LEN);
         let clash = vs
             .handle
             .graph
             .read(|g| find_by_prefix(g, &prefix).is_some());
         if !clash {
+            found_unique = true;
             break;
         }
-        prefix = random_alphanumeric(PREFIX_LEN);
+    }
+    if !found_unique {
+        return Err(OpError::Internal(
+            "could not generate a unique api key prefix".into(),
+        ));
     }
 
     let secret = random_alphanumeric(SECRET_LEN);

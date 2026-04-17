@@ -214,16 +214,29 @@ impl OAuthTokenService {
         ) {
             return Err(err);
         }
+        // If a retired key matches the signature, preserve its decode error
+        // (notably `ExpiredSignature`) so the caller surfaces the correct
+        // `TokenExpired` outcome instead of the active key's generic
+        // `InvalidSignature`.
         let now = now_secs();
+        let mut retired_err: Option<jsonwebtoken::errors::Error> = None;
         for (retired_key, exp) in &ring.retired {
             if *exp <= now {
                 continue;
             }
-            if let Ok(td) = decode::<McpTokenClaims>(token, retired_key, validation) {
-                return Ok(td);
+            match decode::<McpTokenClaims>(token, retired_key, validation) {
+                Ok(td) => return Ok(td),
+                Err(e) if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::InvalidSignature) => {
+                    // Wrong key — keep trying.
+                }
+                Err(e) => {
+                    if retired_err.is_none() {
+                        retired_err = Some(e);
+                    }
+                }
             }
         }
-        Err(err)
+        Err(retired_err.unwrap_or(err))
     }
 
     // -- Issue ---------------------------------------------------------------
@@ -428,15 +441,17 @@ impl OAuthTokenService {
     /// that has already expired to ensure it stays denied after a restart
     /// when deny list is persisted). Extracts the `jti` and `exp` claims
     /// and adds them to the deny list.
-    pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+    pub fn revoke_token(&self, token: &str) -> Result<(String, u64), OAuthError> {
         // Decode allowing expired tokens (we still want to revoke them)
         let mut relaxed = self.validation.clone();
         relaxed.validate_exp = false;
         let token_data = self
             .decode_with_ring(token, &relaxed)
             .map_err(|e| OAuthError::InvalidToken(e.to_string()))?;
-        self.revoke(&token_data.claims.jti, token_data.claims.exp);
-        Ok(())
+        let jti = token_data.claims.jti;
+        let exp = token_data.claims.exp;
+        self.revoke(&jti, exp);
+        Ok((jti, exp))
     }
 
     /// Add a token ID to the deny-list. The `original_exp` timestamp allows
@@ -502,6 +517,10 @@ impl OAuthTokenService {
         {
             let mut deny = self.deny_list.write();
             deny.retain(|_, &mut exp| exp >= now);
+        }
+        {
+            let mut ring = self.key_ring.write();
+            ring.retired.retain(|(_, exp)| *exp > now);
         }
         // Clear principal cache; entries repopulate on next validate().
         self.principal_cache.write().clear();
@@ -854,5 +873,67 @@ mod tests {
         let svc = test_service();
         let result = svc.revoke_token("not-a-valid-jwt");
         assert!(matches!(result, Err(OAuthError::InvalidToken(_))));
+    }
+
+    #[test]
+    fn expired_token_under_retired_key_reports_expiry_not_signature() {
+        // The jsonwebtoken validator has a 60s default leeway, so
+        // `issue` + immediate validate always passes regardless of TTL.
+        // Encode a JWT directly with an `exp` well in the past under the
+        // initial secret, then rotate so that secret ends up in the retired
+        // ring.
+        let initial_secret: &[u8] = b"test-secret-key-at-least-32-bytes!";
+        let svc = test_service();
+        let now = now_secs();
+        let claims = McpTokenClaims {
+            sub: "alice".into(),
+            role: "reader".into(),
+            jti: uuid_v4(),
+            exp: now.saturating_sub(3600),
+            iat: now.saturating_sub(7200),
+        };
+        let jwt = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(initial_secret),
+        )
+        .unwrap();
+
+        // Rotate with a long grace window so the prior key lives in the
+        // retired ring for the duration of the test.
+        svc.rotate_signing_key(b"rotated-secret-key-at-least-32!!", now + 3600);
+
+        // Before the fix, decode_with_ring returned the active key's
+        // `InvalidSignature` (mapping to `InvalidToken`); after the fix, the
+        // retired key's `ExpiredSignature` takes precedence and surfaces as
+        // `TokenExpired`.
+        let res = svc.validate_standalone(&jwt);
+        assert!(
+            matches!(res, Err(OAuthError::TokenExpired)),
+            "expected TokenExpired, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn prune_expired_drops_stale_retired_keys() {
+        let svc = test_service();
+        // Rotate with a grace window in the future so the retired entry
+        // actually lands on the ring (`rotate_signing_key` prunes any
+        // already-expired entries inline).
+        svc.rotate_signing_key(b"rotated-secret-key-at-least-32!!", now_secs() + 3600);
+        assert_eq!(svc.key_ring.read().retired.len(), 1);
+
+        // Simulate the passage of time by backdating the retired entry's
+        // expiry — this is cheaper than sleeping past a real grace window.
+        {
+            let mut ring = svc.key_ring.write();
+            ring.retired[0].1 = now_secs().saturating_sub(1);
+        }
+
+        svc.prune_expired();
+        assert!(
+            svc.key_ring.read().retired.is_empty(),
+            "prune_expired should drop retired keys past their grace window"
+        );
     }
 }
