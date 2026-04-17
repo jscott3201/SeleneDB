@@ -880,16 +880,16 @@ fn apply_post_mutation_pipeline(
         let c = chunk.take().unwrap_or_else(DataChunk::unit);
 
         // RETURN immediately followed by TopK fuses into a single lazy-projection pass.
-        if let Some(advance) =
-            try_apply_return_topk_fusion(post_mutation_pipeline, op_idx, op, c, chunk, ctx)?
-        {
-            op_idx += advance;
-            continue;
-        }
-        // Note: when the fusion shortcut returns None we lost ownership of
-        // `c`. Recover it from `chunk` (the helper restores the input there
-        // on the bail-out path) before dispatching to the per-op handlers.
-        let c = chunk.take().unwrap_or_else(DataChunk::unit);
+        // The helper consumes `c` and either returns the fused result or hands `c` back
+        // unchanged, avoiding any Option round-trip on the no-fuse path.
+        let c = match try_apply_return_topk_fusion(post_mutation_pipeline, op_idx, op, c, ctx)? {
+            FusionOutcome::Fused { result, advance } => {
+                *chunk = Some(result);
+                op_idx += advance;
+                continue;
+            }
+            FusionOutcome::NotFused(c) => c,
+        };
 
         match op {
             PipelineOp::Call { procedure: call } => {
@@ -940,18 +940,17 @@ fn apply_post_mutation_pipeline(
 /// followed by a TopK can be evaluated in a single lazy-projection pass that
 /// avoids materializing the full intermediate result.
 ///
-/// Returns `Some(advance)` when fused (`advance` ops were consumed and
-/// `chunk` has been written), or `None` when the shape didn't match. On
-/// `None`, ownership of `c` is restored to `chunk` so the caller can pick
-/// it back up.
+/// The helper takes ownership of the input `DataChunk` and either returns
+/// the fused result (with the number of pipeline ops consumed) or hands the
+/// input back unchanged. This avoids any `Option<DataChunk>` round-trip on
+/// the no-fuse path, which dominates the hot loop.
 fn try_apply_return_topk_fusion(
     pipeline: &[&PipelineOp],
     op_idx: usize,
     op: &PipelineOp,
     c: DataChunk,
-    chunk: &mut Option<DataChunk>,
     ctx: &EvalContext,
-) -> Result<Option<usize>, GqlError> {
+) -> Result<FusionOutcome, GqlError> {
     let PipelineOp::Return {
         projections,
         group_by,
@@ -960,25 +959,32 @@ fn try_apply_return_topk_fusion(
         all,
     } = op
     else {
-        *chunk = Some(c);
-        return Ok(None);
+        return Ok(FusionOutcome::NotFused(c));
     };
     let next_is_topk =
         op_idx + 1 < pipeline.len() && matches!(pipeline[op_idx + 1], PipelineOp::TopK { .. });
     let fusable = !*distinct && !*all && group_by.is_empty() && having.is_none() && next_is_topk;
     if !fusable {
-        *chunk = Some(c);
-        return Ok(None);
+        return Ok(FusionOutcome::NotFused(c));
     }
     let PipelineOp::TopK { terms, limit } = &pipeline[op_idx + 1] else {
-        *chunk = Some(c);
-        return Ok(None);
+        return Ok(FusionOutcome::NotFused(c));
     };
     let k = limit.resolve(ctx.parameters)?;
     let bindings = c.to_bindings();
     let result = stages::execute_return_topk(bindings, projections, terms, k, ctx)?;
-    *chunk = Some(join::bindings_to_chunk_generic(&result));
-    Ok(Some(2))
+    Ok(FusionOutcome::Fused {
+        result: join::bindings_to_chunk_generic(&result),
+        advance: 2,
+    })
+}
+
+/// Result of attempting RETURN+TopK fusion. `Fused` means the fused pass
+/// succeeded; `NotFused` returns the original input chunk so the caller can
+/// dispatch normally without an `Option` round-trip.
+enum FusionOutcome {
+    Fused { result: DataChunk, advance: usize },
+    NotFused(DataChunk),
 }
 
 /// CALL needs the procedure registry, hot tier, and scope.
