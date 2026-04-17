@@ -6,7 +6,7 @@ SeleneDB ships a [Model Context Protocol](https://modelcontextprotocol.io/) serv
 
 Where a typical agentic workflow orchestrates three separate databases (graph for relationships, vector for similarity, time-series for telemetry), SeleneDB provides all three through a single MCP connection. Agents get graph queries, semantic search, GraphRAG retrieval, time-series analytics, and persistent memory in one place.
 
-MCP is served over Streamable HTTP at the `/mcp` endpoint (rmcp 1.3, JSON-RPC 2.0). Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Copilot, custom agents) can connect without a dedicated SDK.
+MCP is served over Streamable HTTP at the `/mcp` endpoint (JSON-RPC 2.0). Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Copilot, custom agents) can connect without a dedicated SDK.
 
 SeleneDB declares three MCP capabilities:
 - **Tools**: query, mutate, search, import/export, agent memory, admin, and AI operations

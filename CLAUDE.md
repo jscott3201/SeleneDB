@@ -94,7 +94,7 @@ Optimizer rule tests: construct `ExecutionPlan` manually, call `rule.rewrite(pla
 | Compression | zstd | selene-wire, selene-persist, selene-ts |
 | QUIC | quinn 0.11 | selene-server, selene-client |
 | HTTP | axum 0.8 | selene-server |
-| MCP | rmcp 1.3 | selene-server |
+| MCP | rmcp 1.4 | selene-server |
 | Auth | cedar-policy 4 | selene-server |
 | Vault | chacha20poly1305 0.10 | selene-server |
 | Async | tokio 1 | throughout |
