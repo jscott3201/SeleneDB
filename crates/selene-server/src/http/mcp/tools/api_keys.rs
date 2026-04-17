@@ -1,9 +1,9 @@
 //! MCP tool implementations for API-key management.
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 
-use super::{SeleneTools, format_json, mcp_auth, op_err};
+use super::{SeleneTools, mcp_auth, op_err, structured_result};
 use crate::http::mcp::params::{CreateApiKeyParams, ListApiKeysParams, RevokeApiKeyParams};
 use crate::ops;
 
@@ -21,9 +21,9 @@ pub(super) async fn create_api_key_impl(
         p.scopes,
     )
     .map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &result,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&result).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn list_api_keys_impl(
@@ -33,9 +33,9 @@ pub(super) async fn list_api_keys_impl(
     let auth = mcp_auth(tools)?;
     let keys =
         ops::api_keys::list_api_keys(&tools.state, &auth, p.identity.as_deref()).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &keys,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&keys).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn revoke_api_key_impl(
@@ -44,7 +44,7 @@ pub(super) async fn revoke_api_key_impl(
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     let key = ops::api_keys::revoke_api_key(&tools.state, &auth, p.key_id).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &key,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&key).unwrap_or_default(),
+    ))
 }

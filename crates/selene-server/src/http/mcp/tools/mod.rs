@@ -4,11 +4,9 @@ mod ai;
 mod api_keys;
 mod memory;
 mod principals;
-mod proposals;
 mod schemas;
 mod signing_key;
 mod tokens;
-mod traces;
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -18,7 +16,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
-use super::format::{format_json, format_value, structured_result, structured_text_result};
+use super::format::{format_json, structured_result, structured_text_result};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -207,9 +205,9 @@ impl SeleneTools {
         let node = self
             .submit_mut(move || ops::nodes::create_node(&st, &auth, labels, props, parent_id))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &node,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&node).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -264,9 +262,9 @@ impl SeleneTools {
                 )
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &node,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&node).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -408,9 +406,9 @@ impl SeleneTools {
                 ops::edges::create_edge(&st, &auth, source, target, label, props, upsert)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &edge,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&edge).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -451,9 +449,9 @@ impl SeleneTools {
                 ops::edges::modify_edge(&st, &auth, edge_id, set_props, remove_props)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &edge,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&edge).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -514,11 +512,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -562,11 +559,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -639,73 +635,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
-    }
-
-    #[tool(
-        name = "mark_fixed",
-        description = "Bulk-update node status to 'fixed' (or custom status) and optionally link to a commit SHA. Use for resolving findings, security concerns, or work items after a fix is applied.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn mark_fixed(
-        &self,
-        params: Parameters<MarkFixedParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let auth = mcp_auth(self)?;
-        reject_replica(&self.state)?;
-        let p = params.0;
-        let st = Arc::clone(&self.state);
-        let count: usize = self
-            .submit_mut(move || {
-                let mut updated = 0usize;
-                for node_id in &p.node_ids {
-                    let mut props = HashMap::new();
-                    props.insert(
-                        "status".to_string(),
-                        serde_json::Value::String(p.status.clone()),
-                    );
-                    if let Some(sha) = &p.commit_sha {
-                        props.insert(
-                            "fixed_by_commit".to_string(),
-                            serde_json::Value::String(sha.clone()),
-                        );
-                    }
-                    if let Some(note) = &p.note {
-                        props.insert(
-                            "resolution_note".to_string(),
-                            serde_json::Value::String(note.clone()),
-                        );
-                    }
-                    let set_props: Vec<(selene_core::IStr, selene_core::Value)> = props
-                        .into_iter()
-                        .map(|(k, v)| (selene_core::IStr::new(&k), json_to_value(v)))
-                        .collect();
-                    ops::nodes::modify_node(
-                        &st,
-                        &auth,
-                        *node_id,
-                        set_props,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    )?;
-                    updated += 1;
-                }
-                Ok(updated)
-            })
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"updated\":{count}}}",
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -770,9 +703,10 @@ impl SeleneTools {
         let count = self
             .submit_mut(move || ops::ts::ts_write(&st, &auth, samples))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Wrote {count} samples"
-        ))]))
+        Ok(structured_text_result(
+            format!("Wrote {count} samples"),
+            serde_json::json!({ "written": count }),
+        ))
     }
 
     #[tool(
@@ -825,9 +759,9 @@ impl SeleneTools {
                 Some(p.limit.unwrap_or(1000) as usize),
             )
             .map_err(op_err)?;
-            return Ok(CallToolResult::success(vec![Content::text(format_json(
-                &samples,
-            ))]));
+            return Ok(structured_result(
+                serde_json::to_value(&samples).unwrap_or_default(),
+            ));
         }
 
         // Route to ts.window via GQL for aggregated results
@@ -853,11 +787,20 @@ impl SeleneTools {
         .map_err(op_err)?;
 
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
         let text = format!(
             "ts_query aggregation ({}): {} buckets\n{data}",
             agg_mode, result.row_count
         );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "agg_mode": agg_mode,
+                "agg_fn": agg_fn,
+                "row_count": result.row_count,
+                "buckets": parsed,
+            }),
+        ))
     }
 
     // ── Graph Slice ──────────────────────────────────────────────────
@@ -930,9 +873,7 @@ impl SeleneTools {
             );
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &resp,
-        ))]))
+        Ok(structured_result(resp))
     }
 
     // ── Health ────────────────────────────────────────────────────────
@@ -949,9 +890,9 @@ impl SeleneTools {
     )]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         let resp = ops::health::health(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &resp,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&resp).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -966,9 +907,9 @@ impl SeleneTools {
     )]
     async fn info(&self) -> Result<CallToolResult, McpError> {
         let info = crate::ops::info::server_info(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &info,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&info).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -1018,9 +959,9 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let graph = ops::reactflow::export_reactflow(&self.state, &auth, params.0.label.as_deref());
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &graph,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&graph).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -1044,10 +985,17 @@ impl SeleneTools {
         let result = self
             .submit_mut(move || ops::reactflow::import_reactflow(&st, &auth, graph))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Imported {} nodes, {} edges. ID mapping: {:?}",
-            result.nodes_created, result.edges_created, result.id_map
-        ))]))
+        Ok(structured_text_result(
+            format!(
+                "Imported {} nodes, {} edges. ID mapping: {:?}",
+                result.nodes_created, result.edges_created, result.id_map
+            ),
+            serde_json::json!({
+                "nodes_created": result.nodes_created,
+                "edges_created": result.edges_created,
+                "id_map": result.id_map,
+            }),
+        ))
     }
 
     // ── Schema Management (delegated to schemas module) ──────────────
@@ -1267,7 +1215,15 @@ impl SeleneTools {
         if !result.errors.is_empty() {
             let _ = write!(text, "\nErrors: {}", result.errors.join("; "));
         }
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "nodes_created": result.nodes_created,
+                "edges_created": result.edges_created,
+                "rows_skipped": result.rows_skipped,
+                "errors": result.errors,
+            }),
+        ))
     }
 
     #[tool(
@@ -1365,15 +1321,24 @@ impl SeleneTools {
         let include_props = p.include_properties.unwrap_or(false);
 
         if !include_props && !summary {
+            let rendered = format_json(&rows);
             let text = format!(
                 "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
                 p.query_text,
                 total,
                 rows.len(),
                 offset,
-                format_json(&rows)
+                rendered
             );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(structured_text_result(
+                text,
+                serde_json::json!({
+                    "query": p.query_text,
+                    "total": total,
+                    "offset": offset,
+                    "results": rows,
+                }),
+            ));
         }
 
         // Enrich results — summary_mode returns lightweight data,
@@ -1588,11 +1553,18 @@ impl SeleneTools {
                  with hnsw_quantize = true under [vector].",
             )]))
         } else {
+            let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
             let text = format!(
                 "Quantization stats ({} index(es)):\n{data}",
                 result.row_count
             );
-            Ok(CallToolResult::success(vec![Content::text(text)]))
+            Ok(structured_text_result(
+                text,
+                serde_json::json!({
+                    "index_count": result.row_count,
+                    "indexes": parsed,
+                }),
+            ))
         }
     }
 
@@ -1628,7 +1600,7 @@ impl SeleneTools {
             if include_path && let Some(path) = self.containment_path(&auth, node.id) {
                 val["containment_path"] = serde_json::Value::String(path);
             }
-            CallToolResult::success(vec![Content::text(format_json(&val))])
+            structured_result(val)
         };
 
         // Strategy 1: Parse as numeric ID
@@ -1733,21 +1705,17 @@ impl SeleneTools {
             .collect();
 
         if !suggestions.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format_value(
-                serde_json::json!({
-                    "error": "no_exact_match",
-                    "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
-                    "suggestions": suggestions,
-                }),
-            ))]));
+            return Ok(structured_result(serde_json::json!({
+                "error": "no_exact_match",
+                "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
+                "suggestions": suggestions,
+            })));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "error": "not_found",
-                "message": format!("Could not resolve '{}'", p.identifier),
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "error": "not_found",
+            "message": format!("Could not resolve '{}'", p.identifier),
+        })))
     }
 
     #[tool(
@@ -1783,14 +1751,12 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "node": node,
-                "outgoing": edge_result.outgoing,
-                "incoming": edge_result.incoming,
-                "total_edges": edge_result.total,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "node": node,
+            "outgoing": edge_result.outgoing,
+            "incoming": edge_result.incoming,
+            "total_edges": edge_result.total,
+        })))
     }
 
     // ── RDF/SPARQL ────────────────────────────────────────────────────
@@ -1819,7 +1785,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     #[tool(
@@ -1851,7 +1818,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     // ── Text2GQL Toolkit ─────────────────────────────────────────────
@@ -1898,7 +1866,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     #[tool(
@@ -1917,15 +1886,10 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let query = &params.0.query;
         match selene_gql::parse_statement(query) {
-            Ok(_) => {
-                let result = serde_json::json!({
-                    "valid": true,
-                    "query": query,
-                });
-                Ok(CallToolResult::success(vec![Content::text(format_json(
-                    &result,
-                ))]))
-            }
+            Ok(_) => Ok(structured_result(serde_json::json!({
+                "valid": true,
+                "query": query,
+            }))),
             Err(e) => {
                 let message = e.to_string();
                 let suggestion = parse_error_suggestion(&message);
@@ -1949,9 +1913,7 @@ impl SeleneTools {
                     result["repairs"] = serde_json::json!(repairs);
                 }
 
-                Ok(CallToolResult::success(vec![Content::text(format_json(
-                    &result,
-                ))]))
+                Ok(structured_result(result))
             }
         }
     }
@@ -2068,180 +2030,6 @@ impl SeleneTools {
         params: Parameters<ConfigureMemoryParams>,
     ) -> Result<CallToolResult, McpError> {
         memory::configure_memory_impl(self, params.0).await
-    }
-
-    // ── Training Data ───────────────────────────────────────────────
-
-    #[tool(
-        name = "log_trace",
-        description = "Log a tool interaction trace for training data collection. \
-        Called by the agent orchestrator after each tool call, not by the agent itself. \
-        Stores as a __Trace node for later export via export_traces. \
-        Optional fields: thinking (reasoning chain), user_query (prompt that triggered \
-        the call), about_node_ids (entity node IDs to link via :about edges).",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn log_trace(
-        &self,
-        params: Parameters<LogTraceParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_trace_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "export_traces",
-        description = "Export interaction traces as JSONL for fine-tuning. \
-        Filter by session, tool name, feedback type, model, or date range. \
-        Output format compatible with TRL, Axolotl, and Unsloth pipelines.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn export_traces(
-        &self,
-        params: Parameters<ExportTracesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::export_traces_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "log_session",
-        description = "Log session-level metadata for training data context. \
-        Called once per session before log_trace calls. Creates or updates a \
-        __TraceSession node with building, operator, weather, and system prompt \
-        context. Idempotent: calling again for the same session_id updates the metadata.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn log_session(
-        &self,
-        params: Parameters<LogSessionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_session_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "log_outcome",
-        description = "Record whether a trace session achieved its desired outcome. \
-        Called after the session completes. Creates or updates a __TraceOutcome node. \
-        Enables quality scoring: traces from successful sessions are high-confidence \
-        training examples. Idempotent per session_id.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn log_outcome(
-        &self,
-        params: Parameters<LogOutcomeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_outcome_impl(self, params.0).await
-    }
-
-    // ── Action Proposals ────────────────────────────────────────────
-
-    #[tool(
-        name = "propose_action",
-        description = "Propose an action for human review. Creates a __Proposal node with \
-        pending status. The proposal includes a GQL query to execute if approved. \
-        Proposals auto-expire after 24 hours.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn propose_action(
-        &self,
-        params: Parameters<ProposeActionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::propose_action_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "list_proposals",
-        description = "List action proposals, optionally filtered by status \
-        (pending, approved, executed, rejected, expired).",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn list_proposals(
-        &self,
-        params: Parameters<ListProposalsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::list_proposals_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "approve_proposal",
-        description = "Approve a pending proposal. Only non-agent principals can approve. \
-        Changes status from pending to approved.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn approve_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::approve_proposal_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "reject_proposal",
-        description = "Reject a pending proposal with an optional reason.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn reject_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::reject_proposal_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "execute_proposal",
-        description = "Execute an approved proposal. Runs the stored GQL query and \
-        changes status to executed.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn execute_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::execute_proposal_impl(self, params.0).await
     }
 
     // ── Principal Management ────────────────────────────────────────
