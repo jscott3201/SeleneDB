@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use selene_core::geometry::GeometryValue;
 use selene_core::schema::{NodeSchema, PropertyDef, ValueType};
 use selene_core::{IStr, LabelSet, NodeId, PropertyMap, Value};
 use selene_graph::{SeleneGraph, SharedGraph};
@@ -1258,6 +1259,167 @@ fn bench_dictionary(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Spatial ───────────────────────────────────────────────────────
+
+/// Build a fixture of N sensor points scattered across a 0.5°×0.5° WGS84
+/// box around NYC, plus `polygon_count` square zone polygons tiling the
+/// same region. Deterministic for reproducibility.
+fn build_spatial_graph(n_points: u64, polygon_count: usize) -> SeleneGraph {
+    let mut g = SeleneGraph::new();
+    let mut m = g.mutate();
+
+    // Anchor point: lower-Manhattan-ish.
+    let lng0 = -74.05_f64;
+    let lat0 = 40.60_f64;
+    let span = 0.5_f64;
+
+    // Reference building (anchored to one corner).
+    m.create_node(
+        LabelSet::from_strs(&["building"]),
+        PropertyMap::from_pairs(vec![
+            ("name".into(), Value::str("HQ")),
+            (
+                "location".into(),
+                Value::geometry(GeometryValue::point_wgs84(lng0 + 0.25, lat0 + 0.25)),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    // Sensor points scattered deterministically.
+    for i in 0..n_points {
+        let fx = (i as f64 * 0.618_034).fract();
+        let fy = ((i as f64) * 0.414_214).fract();
+        let lng = lng0 + fx * span;
+        let lat = lat0 + fy * span;
+        m.create_node(
+            LabelSet::from_strs(&["sensor"]),
+            PropertyMap::from_pairs(vec![
+                ("name".into(), Value::String(format!("s-{i}").into())),
+                (
+                    "location".into(),
+                    Value::geometry(GeometryValue::point_wgs84(lng, lat)),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+
+    // Square zone polygons tiling the region. Integer grid to avoid
+    // floating boundary ambiguity.
+    let side = ((polygon_count as f64).sqrt().ceil() as usize).max(1);
+    let cell = span / side as f64;
+    let mut placed = 0;
+    'outer: for iy in 0..side {
+        for ix in 0..side {
+            if placed >= polygon_count {
+                break 'outer;
+            }
+            let x0 = lng0 + ix as f64 * cell;
+            let y0 = lat0 + iy as f64 * cell;
+            let x1 = x0 + cell;
+            let y1 = y0 + cell;
+            let poly = GeometryValue::from_geojson(&format!(
+                r#"{{"type":"Polygon","coordinates":[[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}],[{x0},{y0}]]]}}"#
+            ))
+            .unwrap();
+            m.create_node(
+                LabelSet::from_strs(&["zone"]),
+                PropertyMap::from_pairs(vec![
+                    ("name".into(), Value::String(format!("z-{placed}").into())),
+                    ("boundary".into(), Value::geometry(poly)),
+                ]),
+            )
+            .unwrap();
+            placed += 1;
+        }
+    }
+
+    m.commit(0).unwrap();
+    g
+}
+
+fn bench_spatial(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gql_spatial");
+
+    for &n in &profile_scales() {
+        // Keep polygon count bounded — point-in-polygon is O(points × polygons)
+        // without an index, so we'd rather show per-point cost grow linearly
+        // than inflate the cartesian cost quadratically.
+        let polygon_count = 20;
+        let g = build_spatial_graph(n, polygon_count);
+        group.throughput(Throughput::Elements(n));
+
+        // Distance sort — pure measurement, single building binding on the
+        // left and every sensor on the right.
+        group.bench_with_input(BenchmarkId::new("distance_sort", n), &g, |b, g| {
+            b.iter(|| {
+                QueryBuilder::new(
+                    "MATCH (b:building), (s:sensor) \
+                     RETURN s.name AS name, ST_Distance(b.location, s.location) AS d \
+                     ORDER BY d ASC LIMIT 10",
+                    g,
+                )
+                .execute()
+                .unwrap()
+            });
+        });
+
+        // Radius filter — the common "sensors within N meters of HQ" shape.
+        group.bench_with_input(BenchmarkId::new("dwithin_5km", n), &g, |b, g| {
+            b.iter(|| {
+                QueryBuilder::new(
+                    "MATCH (b:building), (s:sensor) \
+                     WHERE ST_DWithin(b.location, s.location, 5000.0) \
+                     RETURN count(*) AS n",
+                    g,
+                )
+                .execute()
+                .unwrap()
+            });
+        });
+
+        // Point-in-polygon over every (zone, sensor) pair.
+        group.bench_with_input(BenchmarkId::new("contains_pairs", n), &g, |b, g| {
+            b.iter(|| {
+                QueryBuilder::new(
+                    "MATCH (z:zone), (s:sensor) \
+                     WHERE ST_Contains(z.boundary, s.location) \
+                     RETURN count(*) AS n",
+                    g,
+                )
+                .execute()
+                .unwrap()
+            });
+        });
+
+        // Polygon–polygon intersection across zones (bbox pre-filter path).
+        group.bench_with_input(BenchmarkId::new("intersects_zones", n), &g, |b, g| {
+            b.iter(|| {
+                QueryBuilder::new(
+                    "MATCH (a:zone), (b:zone) \
+                     WHERE id(a) < id(b) AND ST_Intersects(a.boundary, b.boundary) \
+                     RETURN count(*) AS n",
+                    g,
+                )
+                .execute()
+                .unwrap()
+            });
+        });
+
+        // Envelope — cheap per-geometry measurement over all zones.
+        group.bench_with_input(BenchmarkId::new("envelope_zones", n), &g, |b, g| {
+            b.iter(|| {
+                QueryBuilder::new("MATCH (z:zone) RETURN ST_Envelope(z.boundary) AS bb", g)
+                    .execute()
+                    .unwrap()
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Registration
 // ═══════════════════════════════════════════════════════════════════
@@ -1544,6 +1706,12 @@ criterion_group! {
     targets = bench_factorized
 }
 
+criterion_group! {
+    name = spatial;
+    config = profile_criterion();
+    targets = bench_spatial
+}
+
 criterion_main!(
     parsing,
     pattern_matching,
@@ -1562,5 +1730,6 @@ criterion_main!(
     distinct_offset,
     dictionary,
     optimizer_validation,
-    factorized
+    factorized,
+    spatial
 );
