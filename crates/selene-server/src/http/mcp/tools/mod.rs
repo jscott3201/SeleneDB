@@ -1491,15 +1491,19 @@ impl SeleneTools {
             };
             match node.property(&p.property) {
                 None => Err(ops::OpError::InvalidRequest(format!(
-                    "node {} has no property '{}' — embed it first via the embedding service or remember tool",
-                    p.node_id, p.property
+                    "node {} has no property '{}' — populate it with an embedding first \
+                     (e.g. SET n.{} = embed($text) for arbitrary nodes, or enrich_communities \
+                     for __CommunitySummary nodes)",
+                    p.node_id, p.property, p.property
                 ))),
                 Some(selene_core::Value::Vector(_)) => Ok(()),
                 Some(other) => Err(ops::OpError::InvalidRequest(format!(
-                    "property '{}' on node {} is {:?}, not a vector — call build_communities or embed before similarity search",
+                    "property '{}' on node {} is {}, not a vector — overwrite it with an \
+                     embedding via SET n.{} = embed($text) before similarity search",
                     p.property,
                     p.node_id,
-                    other.type_name()
+                    other.type_name(),
+                    p.property,
                 ))),
             }
         });
