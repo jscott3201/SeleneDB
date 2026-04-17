@@ -399,7 +399,7 @@ impl OAuthTokenService {
 
     /// Exchange a refresh token for a new pair without graph lookup.
     ///
-    /// Like [`refresh`] but skips principal re-validation against the graph.
+    /// Like [`Self::refresh`] but skips principal re-validation against the graph.
     /// Use this when the graph is not accessible (e.g., Aether server
     /// operating independently of SeleneDB's internal graph).
     pub fn refresh_standalone(&self, refresh_token: &str) -> Result<(String, String), OAuthError> {
