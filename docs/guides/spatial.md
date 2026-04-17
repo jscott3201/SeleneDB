@@ -243,7 +243,7 @@ ORDER BY zone, sensor
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Spatial index (R-tree, H3) | Deferred | O(n) scan in v1.1; add when needed |
-| WKT parser | Deferred | Use GeoJSON; WKT parser is ~100 LOC when the demand shows up |
+| Full WKT parser | Partial | v1.1 emits WKT on export and parses the `POINT (x y)` shape on reimport (enough for round-tripping points via RDF `geo:wktLiteral`). Non-Point WKT input falls back to string. Use GeoJSON for non-point input; the full parser is ~100 LOC when the demand shows up. |
 | CRS reprojection | Not planned | Requires `proj4` (C deps); upstream in your pipeline |
 | 3D geometries (M/Z) | Not planned | 2D only — matches GeoJSON core spec |
 | Raster overlays | Not planned | Out of scope for the graph runtime |

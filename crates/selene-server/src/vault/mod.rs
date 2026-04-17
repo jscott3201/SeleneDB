@@ -226,47 +226,52 @@ impl VaultHandle {
         rand::rng().fill(&mut key[..]);
         let b64 = encode_base64(&key);
 
-        // Collect every matching node up front: a corrupted vault may hold
-        // duplicates, and leaving stragglers would make lookup nondeterministic.
-        let existing: Vec<selene_core::NodeId> = self.graph.read(|g| {
-            g.nodes_by_label("vault_config")
-                .filter(|&nid| {
-                    g.get_node(nid).is_some_and(|n| {
-                        n.property("key")
-                            .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
-                    })
-                })
-                .collect()
-        });
-
-        self.graph
+        // Collect and reconcile existing nodes inside the write transaction
+        // so the read-then-write sequence is atomic. Doing the scan under a
+        // separate read lock leaves a window in which a concurrent rotation
+        // could insert or delete a duplicate between the scan and the update,
+        // leaving stragglers that `resolve_signing_key` would hit later.
+        let duplicate_count = self
+            .graph
             .write(|m| {
+                let existing: Vec<selene_core::NodeId> = m
+                    .graph()
+                    .nodes_by_label("vault_config")
+                    .filter(|&nid| {
+                        m.graph().get_node(nid).is_some_and(|n| {
+                            n.property("key")
+                                .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
+                        })
+                    })
+                    .collect();
                 match existing.split_first() {
                     // No existing node — create one.
-                    None => m
-                        .create_node(
+                    None => {
+                        m.create_node(
                             LabelSet::from_strs(&["vault_config"]),
                             PropertyMap::from_pairs(vec![
                                 (IStr::new("key"), Value::str("oauth_signing_key")),
                                 (IStr::new("value"), Value::str(&b64)),
                             ]),
-                        )
-                        .map(|_| ()),
+                        )?;
+                        Ok(0)
+                    }
                     // One or more — update the first, delete any duplicates.
                     Some((&keeper, duplicates)) => {
                         m.set_property(keeper, IStr::new("value"), Value::str(&b64))?;
                         for &dup in duplicates {
                             m.delete_node(dup)?;
                         }
-                        Ok(())
+                        Ok(duplicates.len())
                     }
                 }
             })
+            .map(|(dup_count, _changes)| dup_count)
             .map_err(|e| VaultError::InvalidFormat(format!("signing key rotate failed: {e}")))?;
 
-        if existing.len() > 1 {
+        if duplicate_count > 0 {
             tracing::warn!(
-                duplicates = existing.len() - 1,
+                duplicates = duplicate_count,
                 "found multiple oauth_signing_key vault nodes during rotation; removed duplicates"
             );
         }
@@ -285,31 +290,35 @@ impl VaultHandle {
         master: &MasterKey,
         entries: &[(String, u64)],
     ) -> Result<(), VaultError> {
-        // Remove all existing revoked_token nodes
-        let existing_ids: Vec<selene_core::NodeId> = self
+        // Scan and replace under a single write lock — a separate read-then-write
+        // race could miss nodes added concurrently or double-delete ones already
+        // removed by another deny-list writer.
+        let wrote = self
             .graph
-            .read(|g| g.nodes_by_label("revoked_token").collect());
+            .write(|m| {
+                let existing_ids: Vec<selene_core::NodeId> =
+                    m.graph().nodes_by_label("revoked_token").collect();
+                if existing_ids.is_empty() && entries.is_empty() {
+                    return Ok(false);
+                }
+                for nid in &existing_ids {
+                    m.delete_node(*nid)?;
+                }
+                for (jti, exp) in entries {
+                    m.create_node(
+                        LabelSet::from_strs(&["revoked_token"]),
+                        PropertyMap::from_pairs(vec![
+                            (IStr::new("jti"), Value::str(jti)),
+                            (IStr::new("expires_at"), Value::UInt(*exp)),
+                        ]),
+                    )?;
+                }
+                Ok(true)
+            })
+            .map(|(wrote, _changes)| wrote)
+            .map_err(|e| VaultError::InvalidFormat(format!("vault deny list write failed: {e}")))?;
 
-        if !existing_ids.is_empty() || !entries.is_empty() {
-            self.graph
-                .write(|m| {
-                    for nid in &existing_ids {
-                        m.delete_node(*nid)?;
-                    }
-                    for (jti, exp) in entries {
-                        m.create_node(
-                            LabelSet::from_strs(&["revoked_token"]),
-                            PropertyMap::from_pairs(vec![
-                                (IStr::new("jti"), Value::str(jti)),
-                                (IStr::new("expires_at"), Value::UInt(*exp)),
-                            ]),
-                        )?;
-                    }
-                    Ok(())
-                })
-                .map_err(|e| {
-                    VaultError::InvalidFormat(format!("vault deny list write failed: {e}"))
-                })?;
+        if wrote {
             self.flush(master)?;
         }
 

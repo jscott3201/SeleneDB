@@ -103,6 +103,15 @@ impl GeometryValue {
         gj.to_string()
     }
 
+    /// Serialize as a `serde_json::Value` in GeoJSON shape without a string
+    /// round-trip. Preferred over `serde_json::from_str(&self.to_geojson())`
+    /// on hot paths like HTTP/MCP response serialization, where the
+    /// text-then-parse path wastes an allocation per geometry.
+    pub fn to_geojson_value(&self) -> serde_json::Value {
+        let gj: geojson::Geometry = geojson::Geometry::from(&self.geom);
+        serde_json::to_value(gj).unwrap_or(serde_json::Value::Null)
+    }
+
     /// Serialize as Well-Known Text (WKT) 2D.
     ///
     /// Output is uppercase keyword + coordinates separated by single spaces
@@ -551,5 +560,22 @@ mod tests {
         let input = r#"{"type":"MultiPoint","coordinates":[]}"#;
         let g = GeometryValue::from_geojson(input).unwrap();
         assert_eq!(g.to_wkt(), "MULTIPOINT EMPTY");
+    }
+
+    #[test]
+    fn to_geojson_value_matches_to_geojson() {
+        // Both paths must produce the same logical GeoJSON; the _value form
+        // just skips the intermediate string allocation.
+        let g = GeometryValue::point_wgs84(-74.006, 40.7128);
+        let via_string: serde_json::Value = serde_json::from_str(&g.to_geojson()).unwrap();
+        assert_eq!(g.to_geojson_value(), via_string);
+    }
+
+    #[test]
+    fn to_geojson_value_is_an_object() {
+        let g = GeometryValue::point_wgs84(1.0, 2.0);
+        let v = g.to_geojson_value();
+        assert!(v.is_object());
+        assert_eq!(v.get("type"), Some(&serde_json::json!("Point")));
     }
 }
