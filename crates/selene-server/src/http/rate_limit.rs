@@ -133,13 +133,14 @@ impl EndpointRateLimiter {
 /// budgets; callers that fail go to [`Tier::Anonymous`].
 fn looks_like_bearer(value: &str) -> bool {
     let trimmed = value.trim();
-    let Some(rest) = trimmed
-        .strip_prefix("Bearer ")
-        .or_else(|| trimmed.strip_prefix("bearer "))
+    // RFC 9110 §11.1: auth-scheme is case-insensitive, so accept any casing
+    // (`Bearer`, `bearer`, `BEARER`) rather than gating on exact prefix.
+    let Some((scheme_end, _)) = trimmed.char_indices().find(|(_, c)| c.is_ascii_whitespace())
     else {
         return false;
     };
-    !rest.trim().is_empty()
+    let (scheme, rest) = trimmed.split_at(scheme_end);
+    scheme.eq_ignore_ascii_case("bearer") && !rest.trim().is_empty()
 }
 
 /// Classify a request into a rate limit tier by path, method, and whether
@@ -304,6 +305,8 @@ mod tests {
         // Accept: well-formed Bearer values
         assert!(super::looks_like_bearer("Bearer xyz123"));
         assert!(super::looks_like_bearer("bearer xyz123")); // case-insensitive scheme
+        assert!(super::looks_like_bearer("BEARER xyz123")); // uppercase scheme
+        assert!(super::looks_like_bearer("BeArEr xyz123")); // mixed case scheme
         assert!(super::looks_like_bearer("  Bearer abc  ")); // leading/trailing space ok
         assert!(super::looks_like_bearer("Bearer principal:secret")); // colon-separated form Selene uses
 

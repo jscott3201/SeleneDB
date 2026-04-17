@@ -23,7 +23,7 @@ scaffolding are removed. The README is rewritten capability-first.
 - **First-class `GEOMETRY` property type** (`Value::Geometry`, `selene_core::geometry::GeometryValue`). Wraps `geo_types::Geometry<f64>` with an optional CRS hint; supports Point, LineString, Polygon (with holes), MultiPoint, MultiLineString, MultiPolygon, and GeometryCollection. Round-trips through GeoJSON (RFC 7946) and postcard. Includes a hand-rolled WKT serializer with no additional crate dependencies.
 - **18 `ST_*` scalar functions** in GQL (`crates/selene-gql/src/runtime/functions/spatial.rs`): constructors (`ST_Point`, `ST_GeomFromGeoJSON`, `ST_MakePolygon`), accessors (`ST_X`, `ST_Y`, `ST_GeometryType`, `ST_IsValid`, `ST_AsGeoJSON`), predicates (`ST_Contains`, `ST_Within`, `ST_Intersects`, `ST_Equals`, `ST_DWithin`), measurements (`ST_Distance`, `ST_DistanceSphere`, `ST_Area`, `ST_Length`), and `ST_Envelope`. `ST_Distance` dispatches to haversine for two WGS84 Points and euclidean otherwise.
 - **Spatial query guide** (`docs/guides/spatial.md`) covering geometry types, ingest paths, query patterns, the full function reference, CRS semantics, the FILTER-vs-WHERE scoping gotcha, performance notes, and a zone-based sensor monitoring example.
-- **GeoSPARQL interop** in `selene-rdf`: geometry values export as `geo:wktLiteral` with the OGC CRS84 IRI for WGS84-tagged points, which gives the broadest engine support (Jena, RDF4J, Stardog, GraphDB). The importer accepts both `wktLiteral` and `geoJSONLiteral`, and normalizes CRS84 and EPSG:4326 IRIs back to Selene's short `EPSG:4326` tag.
+- **GeoSPARQL interop** in `selene-rdf`: Point values export as `geo:wktLiteral` (with the OGC CRS84 IRI for WGS84 points, giving the broadest engine support across Jena, RDF4J, Stardog, and GraphDB); other geometries export as `geo:geoJSONLiteral` so Selene → RDF → Selene round-trips stay lossless until the WKT parser grows beyond the Point shape. The importer accepts both `wktLiteral` and `geoJSONLiteral`, and normalizes CRS84 and EPSG:4326 IRIs back to Selene's short `EPSG:4326` tag.
 - **Spatial benchmark suite** — five workloads (distance sort, radius filter, point-in-polygon, polygon intersection, envelope) wired into `cargo bench -p selene-gql` with per-bench throughput reflecting actual work shape.
 
 #### GQL Engine
@@ -59,6 +59,8 @@ scaffolding are removed. The README is rewritten capability-first.
 ### Fixed
 
 - **Auth**: preserve the originally-granted role on `refresh_standalone` instead of falling back to the default role.
+- **Rate limiting**: `Authorization: BEARER …` and other mixed-case scheme forms are now recognized per RFC 9110 §11.1 instead of being misclassified as anonymous traffic.
+- **WebSocket close codes** use axum's named `close_code::POLICY` / `close_code::ERROR` constants rather than magic numbers.
 - **GQL HTTP embedding provider** hardened with timeouts, input length limits, source tracking, and URL validation.
 - **README GPU claim** corrected — CUDA and Metal both require building from source with the right feature.
 - **Config**: TOML example aligned with the actual `ConfigFile` schema.

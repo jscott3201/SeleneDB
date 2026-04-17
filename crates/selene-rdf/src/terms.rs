@@ -46,6 +46,11 @@ fn wkt_literal_datatype() -> NamedNode {
     NamedNode::new_unchecked(WKT_LITERAL_DATATYPE)
 }
 
+/// Return a `NamedNode` for the GeoSPARQL geoJSONLiteral datatype.
+fn geojson_literal_datatype() -> NamedNode {
+    NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE)
+}
+
 /// Build the GeoSPARQL wktLiteral lexical form: an optional `<crs-uri>`
 /// prefix followed by the WKT text.
 ///
@@ -126,10 +131,25 @@ pub fn value_to_literal(value: &Value) -> Option<Literal> {
             });
             Some(Literal::new_typed_literal(csv, selene_vector_datatype()))
         }
-        Value::Geometry(g) => Some(Literal::new_typed_literal(
-            format_wkt_literal(g),
-            wkt_literal_datatype(),
-        )),
+        Value::Geometry(g) => {
+            // Points export as geo:wktLiteral (broadest engine support). Other
+            // geometries export as geo:geoJSONLiteral for now, because our WKT
+            // import path only parses POINT — round-tripping a polygon through
+            // wktLiteral would silently lose data on reimport. When the WKT
+            // parser grows to cover the full 2D set, switch this branch so
+            // every geometry emits wktLiteral uniformly.
+            if g.geometry_type() == "Point" {
+                Some(Literal::new_typed_literal(
+                    format_wkt_literal(g),
+                    wkt_literal_datatype(),
+                ))
+            } else {
+                Some(Literal::new_typed_literal(
+                    g.to_geojson(),
+                    geojson_literal_datatype(),
+                ))
+            }
+        }
         Value::List(_) => None,
     }
 }
@@ -1383,6 +1403,28 @@ mod tests {
         );
         let val = literal_to_value(&lit);
         assert!(matches!(val, Value::Geometry(_)));
+    }
+
+    #[test]
+    fn polygon_exports_as_geojson_literal_for_lossless_round_trip() {
+        // Until the WKT import parser covers the full 2D set, non-Point
+        // geometries export as geoJSONLiteral so round-trips don't lose
+        // shape. Points use wktLiteral; this test pins the split.
+        let g = selene_core::geometry::GeometryValue::from_geojson(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}"#,
+        )
+        .unwrap();
+        let lit = value_to_literal(&Value::geometry(g.clone())).unwrap();
+        assert_eq!(lit.datatype().as_str(), GEOJSON_LITERAL_DATATYPE);
+
+        let back = literal_to_value(&lit);
+        match back {
+            Value::Geometry(rt) => {
+                assert_eq!(rt.geometry_type(), "Polygon");
+                assert_eq!(rt.coord_count(), g.coord_count());
+            }
+            other => panic!("expected Geometry, got {other:?}"),
+        }
     }
 
     #[test]

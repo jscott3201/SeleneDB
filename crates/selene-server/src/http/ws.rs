@@ -118,7 +118,7 @@ async fn handle_ws(mut socket: WebSocket, auth: AuthContext, state: Arc<ServerSt
     if let Err(msg) = filter.validate() {
         let _ = socket
             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                code: 1008, // Policy Violation
+                code: axum::extract::ws::close_code::POLICY,
                 reason: msg.into(),
             })))
             .await;
@@ -198,13 +198,14 @@ async fn handle_ws(mut socket: WebSocket, auth: AuthContext, state: Arc<ServerSt
                         }
                         let _ = socket
                             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                // RFC 6455 §7.4: 1011 is the closest match for
-                                // "the server is unable to fulfill the request"
-                                // when the cause is internal backpressure rather
-                                // than a protocol violation. The server itself
-                                // is healthy; only this subscription is being
-                                // dropped due to changelog overflow.
-                                code: 1011,
+                                // RFC 6455 §7.4: 1011 (ERROR) is the closest
+                                // match for "the server is unable to fulfill
+                                // the request" when the cause is internal
+                                // backpressure rather than a protocol violation.
+                                // The server itself is healthy; only this
+                                // subscription is being dropped due to
+                                // changelog overflow.
+                                code: axum::extract::ws::close_code::ERROR,
                                 reason: "subscriber lagged".into(),
                             })))
                             .await;
