@@ -270,7 +270,8 @@ Initial release candidate.
 - GitHub Actions CI (lint, test, feature-gated test, doc audit)
 - Release pipeline to GHCR with semver tagging
 
-[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jscott3201/SeleneDB/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jscott3201/SeleneDB/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jscott3201/SeleneDB/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jscott3201/SeleneDB/releases/tag/v0.1.0
