@@ -58,7 +58,7 @@ SeleneDB's embedding engine runs on NVIDIA GPUs (CUDA) and Apple Silicon (Metal)
 | Apple M1/M2/M3 | Metal | 5-20x faster than CPU |
 | Any CPU | CPU (candle) | Baseline |
 
-For CUDA deployments, build with the `cuda` feature and use `Dockerfile.gpu`:
+For CUDA deployments, build from source with the `cuda` feature. SeleneDB no longer ships a prebuilt CUDA image — the nvcc toolchain and driver pinning are environment-specific, so downstream operators build locally against their own CUDA version:
 
 ```bash
 cargo build -p selene-server --release --features cuda,dev-tls

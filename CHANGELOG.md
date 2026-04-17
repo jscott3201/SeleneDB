@@ -66,6 +66,7 @@ scaffolding are removed. The README is rewritten capability-first.
 - **Config**: TOML example aligned with the actual `ConfigFile` schema.
 - **MCP**: `rmcp` upgraded to 1.4.0 and `prompt_handler` visibility fixed.
 - **CI**: rustfmt drift, `cargo audit` handling, and Copilot README suggestions addressed.
+- **Release workflow**: removed the orphaned `build-cuda` job; `Dockerfile.gpu` had been deleted with the other GCP infrastructure files but the release pipeline still referenced it, blocking tag-triggered releases. CUDA is now a build-from-source feature (`cargo build --features cuda`) per the README.
 
 ## [1.0.0] - 2026-04-12
 
