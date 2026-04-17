@@ -18,18 +18,41 @@ use selene_core::{EdgeId, NodeId};
 /// Custom Selene vector datatype URI for dense float vectors.
 const SELENE_VECTOR_DATATYPE: &str = "urn:selene:vector";
 
-/// GeoSPARQL geoJSONLiteral datatype URI. Phase 3 will also emit `geo:wktLiteral`
-/// for broader engine compatibility; this is the stable interim mapping.
+/// GeoSPARQL wktLiteral datatype URI — primary geometry encoding on export.
+/// Broadest SPARQL-engine support (Jena, RDF4J, Stardog, GraphDB).
+const WKT_LITERAL_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
+
+/// GeoSPARQL geoJSONLiteral datatype URI. Accepted on import for
+/// round-tripping and interop with web-native producers.
 const GEOJSON_LITERAL_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
+
+/// GeoSPARQL CRS URI prefix. `EPSG:4326` → `<http://www.opengis.net/def/crs/EPSG/0/4326>`.
+const GEO_CRS_URI_PREFIX: &str = "http://www.opengis.net/def/crs/EPSG/0/";
 
 /// Return a `NamedNode` for the custom `selene:vector` datatype.
 fn selene_vector_datatype() -> NamedNode {
     NamedNode::new_unchecked(SELENE_VECTOR_DATATYPE)
 }
 
-/// Return a `NamedNode` for the GeoSPARQL geoJSONLiteral datatype.
-fn geojson_literal_datatype() -> NamedNode {
-    NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE)
+/// Return a `NamedNode` for the GeoSPARQL wktLiteral datatype.
+fn wkt_literal_datatype() -> NamedNode {
+    NamedNode::new_unchecked(WKT_LITERAL_DATATYPE)
+}
+
+/// Build the GeoSPARQL wktLiteral lexical form: an optional `<crs-uri>`
+/// prefix followed by the WKT text. Omits the prefix when the CRS is
+/// unset or not an `EPSG:` code, matching the spec's default of CRS84.
+fn format_wkt_literal(geom: &selene_core::geometry::GeometryValue) -> String {
+    let wkt = geom.to_wkt();
+    if let Some(code) = geom
+        .crs
+        .as_ref()
+        .and_then(|c| c.as_str().strip_prefix("EPSG:"))
+    {
+        format!("<{GEO_CRS_URI_PREFIX}{code}> {wkt}")
+    } else {
+        wkt
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -91,15 +114,10 @@ pub fn value_to_literal(value: &Value) -> Option<Literal> {
             });
             Some(Literal::new_typed_literal(csv, selene_vector_datatype()))
         }
-        Value::Geometry(g) => {
-            // Interim mapping: serialize as GeoJSON text with the GeoSPARQL
-            // geo:geoJSONLiteral datatype. Phase 3 will add proper WKT output
-            // for broader SPARQL-engine compatibility (PostGIS, Jena).
-            Some(Literal::new_typed_literal(
-                g.to_geojson(),
-                geojson_literal_datatype(),
-            ))
-        }
+        Value::Geometry(g) => Some(Literal::new_typed_literal(
+            format_wkt_literal(g),
+            wkt_literal_datatype(),
+        )),
         Value::List(_) => None,
     }
 }
@@ -184,8 +202,62 @@ pub fn literal_to_value(literal: &Literal) -> Value {
         return parse_vector(lex).map_or_else(|| Value::str(lex), Value::Vector);
     }
 
+    // GeoSPARQL literals: WKT is the primary encoding on export, but accept
+    // geoJSONLiteral too for round-trips and interop with web-native producers.
+    if dt.as_str() == WKT_LITERAL_DATATYPE {
+        return parse_wkt_literal(lex).map_or_else(|| Value::str(lex), Value::geometry);
+    }
+    if dt.as_str() == GEOJSON_LITERAL_DATATYPE {
+        return selene_core::geometry::GeometryValue::from_geojson(lex)
+            .map_or_else(|_| Value::str(lex), Value::geometry);
+    }
+
     // Unknown datatype: preserve lexical form as string.
     Value::str(lex)
+}
+
+/// Parse the wktLiteral lexical form: an optional `<crs-uri>` prefix followed
+/// by the WKT text. We don't parse arbitrary WKT — instead, normalize by
+/// routing the geometry body through GeoJSON. That keeps the importer
+/// permissive (any producer that speaks a superset still round-trips via
+/// our exporter) while deferring a full WKT parser.
+///
+/// In practice this means: if the lex starts with `<...>`, we extract the CRS
+/// code; then we require the body to be one we can reconstruct. For now,
+/// callers that hand us WKT we didn't produce will fall back to `Value::str`.
+fn parse_wkt_literal(lex: &str) -> Option<selene_core::geometry::GeometryValue> {
+    let (crs_code, _body) = if let Some(rest) = lex.strip_prefix('<') {
+        let end = rest.find('>')?;
+        let uri = &rest[..end];
+        let body = rest[end + 1..].trim_start();
+        let code = uri.strip_prefix(GEO_CRS_URI_PREFIX)?;
+        (Some(code.to_string()), body)
+    } else {
+        (None, lex.trim_start())
+    };
+
+    // A full WKT parser is deferred — we can recover the common `POINT (x y)`
+    // shape produced by our own exporter, which is enough to round-trip
+    // Selene → RDF → Selene. Anything richer (LINESTRING, POLYGON) currently
+    // falls through to a string preservation on reimport, pending a parser.
+    // When added, this is where it hooks in.
+    let (x, y) = parse_wkt_point(_body)?;
+    let mut g = selene_core::geometry::GeometryValue::point_planar(x, y);
+    g.crs = crs_code.map(|c| selene_core::interner::IStr::new(&format!("EPSG:{c}")));
+    Some(g)
+}
+
+/// Parse `POINT (x y)` — exporter's shape. Whitespace-tolerant.
+fn parse_wkt_point(s: &str) -> Option<(f64, f64)> {
+    let rest = s.trim().strip_prefix("POINT")?.trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let mut parts = inner.split_ascii_whitespace();
+    let x: f64 = parts.next()?.parse().ok()?;
+    let y: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, y))
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,6 +1287,76 @@ mod tests {
         let lit = Literal::new_typed_literal("!!!invalid!!!", xsd::BASE_64_BINARY);
         let val = literal_to_value(&lit);
         assert!(matches!(val, Value::String(_)));
+    }
+
+    // --- GeoSPARQL geometry literals ---
+
+    #[test]
+    fn geometry_wgs84_point_exports_as_wkt_with_crs() {
+        let g = selene_core::geometry::GeometryValue::point_wgs84(-74.006, 40.7128);
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(lit.datatype().as_str(), WKT_LITERAL_DATATYPE);
+        assert_eq!(
+            lit.value(),
+            "<http://www.opengis.net/def/crs/EPSG/0/4326> POINT (-74.006 40.7128)"
+        );
+    }
+
+    #[test]
+    fn geometry_planar_point_exports_without_crs_prefix() {
+        let g = selene_core::geometry::GeometryValue::point_planar(3.0, 4.0);
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(lit.datatype().as_str(), WKT_LITERAL_DATATYPE);
+        assert_eq!(lit.value(), "POINT (3 4)");
+    }
+
+    #[test]
+    fn wkt_point_round_trips_through_rdf() {
+        let orig = Value::geometry(selene_core::geometry::GeometryValue::point_wgs84(
+            -74.006, 40.7128,
+        ));
+        let lit = value_to_literal(&orig).unwrap();
+        let back = literal_to_value(&lit);
+        match back {
+            Value::Geometry(g) => {
+                assert_eq!(g.geometry_type(), "Point");
+                assert_eq!(g.crs.as_ref().map(|c| c.as_str()), Some("EPSG:4326"));
+            }
+            other => panic!("expected Geometry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn geojson_literal_still_accepted_on_import() {
+        // Producers that only speak geoJSONLiteral should round-trip.
+        let lit = Literal::new_typed_literal(
+            r#"{"type":"Point","coordinates":[1.0,2.0]}"#,
+            NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE),
+        );
+        let val = literal_to_value(&lit);
+        assert!(matches!(val, Value::Geometry(_)));
+    }
+
+    #[test]
+    fn malformed_wkt_literal_falls_back_to_string() {
+        let lit = Literal::new_typed_literal(
+            "POINT (not a number)",
+            NamedNode::new_unchecked(WKT_LITERAL_DATATYPE),
+        );
+        let val = literal_to_value(&lit);
+        assert!(matches!(val, Value::String(_)));
+    }
+
+    #[test]
+    fn wkt_literal_without_crs_parses_as_planar() {
+        let lit = Literal::new_typed_literal(
+            "POINT (10 20)",
+            NamedNode::new_unchecked(WKT_LITERAL_DATATYPE),
+        );
+        match literal_to_value(&lit) {
+            Value::Geometry(g) => assert!(g.crs.is_none()),
+            other => panic!("expected Geometry, got {other:?}"),
+        }
     }
 
     // --- parse_xsd_duration_to_nanos (full ISO 8601) ---

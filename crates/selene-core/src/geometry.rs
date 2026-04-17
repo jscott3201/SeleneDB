@@ -103,6 +103,19 @@ impl GeometryValue {
         gj.to_string()
     }
 
+    /// Serialize as Well-Known Text (WKT) 2D.
+    ///
+    /// Output is uppercase keyword + coordinates separated by single spaces
+    /// (e.g. `POINT (-74.006 40.7128)`). Matches the OGC Simple Features
+    /// textual encoding that GeoSPARQL and PostGIS consume. `Rect` and
+    /// `Triangle` are expanded to their `POLYGON` equivalent since WKT has
+    /// no direct keyword for them.
+    pub fn to_wkt(&self) -> String {
+        let mut out = String::new();
+        write_wkt(&mut out, &self.geom);
+        out
+    }
+
     /// Human-readable geometry type name matching OGC conventions.
     pub fn geometry_type(&self) -> &'static str {
         match &self.geom {
@@ -158,6 +171,150 @@ fn count_coords(geom: &geo_types::Geometry<f64>) -> usize {
 
 fn count_polygon_coords(p: &geo_types::Polygon<f64>) -> usize {
     p.exterior().0.len() + p.interiors().iter().map(|r| r.0.len()).sum::<usize>()
+}
+
+// ---------------------------------------------------------------------------
+// WKT serializer (OGC Simple Features 2D)
+// ---------------------------------------------------------------------------
+
+fn write_wkt(out: &mut String, geom: &geo_types::Geometry<f64>) {
+    use std::fmt::Write;
+    match geom {
+        geo_types::Geometry::Point(p) => {
+            let _ = write!(out, "POINT ({} {})", p.x(), p.y());
+        }
+        geo_types::Geometry::Line(l) => {
+            let _ = write!(
+                out,
+                "LINESTRING ({} {}, {} {})",
+                l.start.x, l.start.y, l.end.x, l.end.y,
+            );
+        }
+        geo_types::Geometry::LineString(ls) => {
+            out.push_str("LINESTRING ");
+            write_coord_seq(out, ls.0.iter().map(|c| (c.x, c.y)));
+        }
+        geo_types::Geometry::Polygon(p) => {
+            out.push_str("POLYGON ");
+            write_polygon_rings(out, p);
+        }
+        geo_types::Geometry::MultiPoint(mp) => {
+            out.push_str("MULTIPOINT ");
+            if mp.0.is_empty() {
+                out.push_str("EMPTY");
+            } else {
+                out.push('(');
+                for (i, p) in mp.0.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "({} {})", p.x(), p.y());
+                }
+                out.push(')');
+            }
+        }
+        geo_types::Geometry::MultiLineString(mls) => {
+            out.push_str("MULTILINESTRING ");
+            if mls.0.is_empty() {
+                out.push_str("EMPTY");
+            } else {
+                out.push('(');
+                for (i, ls) in mls.0.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_coord_seq(out, ls.0.iter().map(|c| (c.x, c.y)));
+                }
+                out.push(')');
+            }
+        }
+        geo_types::Geometry::MultiPolygon(mp) => {
+            out.push_str("MULTIPOLYGON ");
+            if mp.0.is_empty() {
+                out.push_str("EMPTY");
+            } else {
+                out.push('(');
+                for (i, p) in mp.0.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_polygon_rings(out, p);
+                }
+                out.push(')');
+            }
+        }
+        geo_types::Geometry::GeometryCollection(gc) => {
+            out.push_str("GEOMETRYCOLLECTION ");
+            if gc.0.is_empty() {
+                out.push_str("EMPTY");
+            } else {
+                out.push('(');
+                for (i, g) in gc.0.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_wkt(out, g);
+                }
+                out.push(')');
+            }
+        }
+        geo_types::Geometry::Rect(r) => {
+            let min = r.min();
+            let max = r.max();
+            let _ = write!(
+                out,
+                "POLYGON (({x0} {y0}, {x1} {y0}, {x1} {y1}, {x0} {y1}, {x0} {y0}))",
+                x0 = min.x,
+                y0 = min.y,
+                x1 = max.x,
+                y1 = max.y,
+            );
+        }
+        geo_types::Geometry::Triangle(t) => {
+            let a = t.v1();
+            let b = t.v2();
+            let c = t.v3();
+            let _ = write!(
+                out,
+                "POLYGON (({ax} {ay}, {bx} {by}, {cx} {cy}, {ax} {ay}))",
+                ax = a.x,
+                ay = a.y,
+                bx = b.x,
+                by = b.y,
+                cx = c.x,
+                cy = c.y,
+            );
+        }
+    }
+}
+
+fn write_coord_seq(out: &mut String, mut coords: impl Iterator<Item = (f64, f64)>) {
+    use std::fmt::Write;
+    let Some((x0, y0)) = coords.next() else {
+        out.push_str("EMPTY");
+        return;
+    };
+    out.push('(');
+    let _ = write!(out, "{x0} {y0}");
+    for (x, y) in coords {
+        let _ = write!(out, ", {x} {y}");
+    }
+    out.push(')');
+}
+
+fn write_polygon_rings(out: &mut String, p: &geo_types::Polygon<f64>) {
+    let ext = p.exterior();
+    if ext.0.is_empty() {
+        out.push_str("EMPTY");
+        return;
+    }
+    out.push('(');
+    write_coord_seq(out, ext.0.iter().map(|c| (c.x, c.y)));
+    for ring in p.interiors() {
+        out.push_str(", ");
+        write_coord_seq(out, ring.0.iter().map(|c| (c.x, c.y)));
+    }
+    out.push(')');
 }
 
 impl PartialEq for GeometryValue {
@@ -319,5 +476,80 @@ mod tests {
         let bytes = postcard::to_allocvec(&original).expect("serialize");
         let decoded: GeometryValue = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(original, decoded);
+    }
+
+    // --- WKT serialization ---
+
+    #[test]
+    fn wkt_point() {
+        let p = GeometryValue::point_wgs84(-74.006, 40.7128);
+        assert_eq!(p.to_wkt(), "POINT (-74.006 40.7128)");
+    }
+
+    #[test]
+    fn wkt_linestring() {
+        let input = r#"{"type":"LineString","coordinates":[[0,0],[1,1],[2,3]]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(g.to_wkt(), "LINESTRING (0 0, 1 1, 2 3)");
+    }
+
+    #[test]
+    fn wkt_polygon_no_hole() {
+        let input = r#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(g.to_wkt(), "POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))");
+    }
+
+    #[test]
+    fn wkt_polygon_with_hole() {
+        let input = r#"{"type":"Polygon","coordinates":[
+            [[0,0],[10,0],[10,10],[0,10],[0,0]],
+            [[2,2],[4,2],[4,4],[2,4],[2,2]]
+        ]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(
+            g.to_wkt(),
+            "POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (2 2, 4 2, 4 4, 2 4, 2 2))"
+        );
+    }
+
+    #[test]
+    fn wkt_multipoint() {
+        let input = r#"{"type":"MultiPoint","coordinates":[[1,2],[3,4]]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(g.to_wkt(), "MULTIPOINT ((1 2), (3 4))");
+    }
+
+    #[test]
+    fn wkt_multipolygon() {
+        let input = r#"{"type":"MultiPolygon","coordinates":[
+            [[[0,0],[1,0],[1,1],[0,0]]],
+            [[[2,2],[3,2],[3,3],[2,2]]]
+        ]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(
+            g.to_wkt(),
+            "MULTIPOLYGON (((0 0, 1 0, 1 1, 0 0)), ((2 2, 3 2, 3 3, 2 2)))"
+        );
+    }
+
+    #[test]
+    fn wkt_geometry_collection() {
+        let input = r#"{"type":"GeometryCollection","geometries":[
+            {"type":"Point","coordinates":[1,2]},
+            {"type":"LineString","coordinates":[[0,0],[5,5]]}
+        ]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(
+            g.to_wkt(),
+            "GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (0 0, 5 5))"
+        );
+    }
+
+    #[test]
+    fn wkt_empty_multipoint() {
+        let input = r#"{"type":"MultiPoint","coordinates":[]}"#;
+        let g = GeometryValue::from_geojson(input).unwrap();
+        assert_eq!(g.to_wkt(), "MULTIPOINT EMPTY");
     }
 }
