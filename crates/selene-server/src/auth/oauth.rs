@@ -85,13 +85,53 @@ pub(crate) struct RefreshRecord {
 // Token service
 // ---------------------------------------------------------------------------
 
+/// A rotating signing-key ring.
+///
+/// Holds the currently active encoding + decoding key, plus a list of
+/// recently-retired decoding keys that remain valid until their grace-period
+/// expiry. `validate` tries the active key first, then falls back to retired
+/// keys whose `expires_at` is still in the future. Retired keys are dropped
+/// when `prune_expired` runs or when the ring is rotated again.
+///
+/// Retired keys are *not* persisted across restart. A restart invalidates
+/// in-flight access tokens issued under a prior key; clients recover by
+/// exchanging their (still valid) refresh token.
+pub(crate) struct SigningKeyRing {
+    active_encoding: EncodingKey,
+    active_decoding: DecodingKey,
+    /// (decoding_key, expires_at_unix_secs)
+    retired: Vec<(DecodingKey, u64)>,
+}
+
+impl SigningKeyRing {
+    fn new(secret: &[u8]) -> Self {
+        Self {
+            active_encoding: EncodingKey::from_secret(secret),
+            active_decoding: DecodingKey::from_secret(secret),
+            retired: Vec::new(),
+        }
+    }
+
+    /// Replace the active key with a new one and move the previous active
+    /// decoding key into the retired ring until `retire_until` (unix secs).
+    fn rotate(&mut self, new_secret: &[u8], retire_until: u64) {
+        let new_enc = EncodingKey::from_secret(new_secret);
+        let new_dec = DecodingKey::from_secret(new_secret);
+        let old_dec = std::mem::replace(&mut self.active_decoding, new_dec);
+        self.active_encoding = new_enc;
+        self.retired.push((old_dec, retire_until));
+    }
+
+    fn prune(&mut self, now: u64) {
+        self.retired.retain(|(_, exp)| *exp > now);
+    }
+}
+
 /// Stateful service for issuing, validating, refreshing, and revoking
 /// MCP OAuth 2.1 access tokens.
 pub struct OAuthTokenService {
-    /// Pre-computed HMAC-SHA256 encoding key.
-    encoding_key: EncodingKey,
-    /// Pre-computed HMAC-SHA256 decoding key.
-    decoding_key: DecodingKey,
+    /// Rotating signing key ring (active + retired decoding keys).
+    key_ring: RwLock<SigningKeyRing>,
     /// Pre-built JWT validation rules (avoids per-request allocation).
     validation: Validation,
     /// Lifetime of an access token.
@@ -126,8 +166,7 @@ impl OAuthTokenService {
         validation.algorithms = vec![Algorithm::HS256];
 
         Self {
-            encoding_key: EncodingKey::from_secret(signing_secret),
-            decoding_key: DecodingKey::from_secret(signing_secret),
+            key_ring: RwLock::new(SigningKeyRing::new(signing_secret)),
             validation,
             access_ttl,
             refresh_ttl,
@@ -136,6 +175,68 @@ impl OAuthTokenService {
             deny_dirty: AtomicBool::new(false),
             principal_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Rotate the signing key. Existing access tokens signed with the prior
+    /// key remain validatable until `retire_until_secs` (unix seconds).
+    ///
+    /// New tokens are signed with `new_secret`. Refresh tokens are unaffected
+    /// because they are opaque and stored server-side, not signed.
+    pub fn rotate_signing_key(&self, new_secret: &[u8], retire_until_secs: u64) {
+        let mut ring = self.key_ring.write();
+        ring.rotate(new_secret, retire_until_secs);
+        ring.prune(now_secs());
+    }
+
+    /// Try to decode a JWT against the active key, falling back to retired
+    /// keys whose grace period has not expired.
+    ///
+    /// Returns whichever error the *active* key produced unless a retired
+    /// key succeeded, so expiry/malformed errors are not masked.
+    fn decode_with_ring(
+        &self,
+        token: &str,
+        validation: &Validation,
+    ) -> jsonwebtoken::errors::Result<jsonwebtoken::TokenData<McpTokenClaims>> {
+        let ring = self.key_ring.read();
+        let active_result = decode::<McpTokenClaims>(token, &ring.active_decoding, validation);
+        if active_result.is_ok() {
+            return active_result;
+        }
+        // Fall back to retired keys only on signature failure — expiry or
+        // malformed-structure errors are key-agnostic and should be returned
+        // as-is so the caller sees TokenExpired, not TokenRevoked-looking
+        // InvalidSignature noise.
+        let err = active_result.err().unwrap();
+        if !matches!(
+            err.kind(),
+            jsonwebtoken::errors::ErrorKind::InvalidSignature
+        ) {
+            return Err(err);
+        }
+        // If a retired key matches the signature, preserve its decode error
+        // (notably `ExpiredSignature`) so the caller surfaces the correct
+        // `TokenExpired` outcome instead of the active key's generic
+        // `InvalidSignature`.
+        let now = now_secs();
+        let mut retired_err: Option<jsonwebtoken::errors::Error> = None;
+        for (retired_key, exp) in &ring.retired {
+            if *exp <= now {
+                continue;
+            }
+            match decode::<McpTokenClaims>(token, retired_key, validation) {
+                Ok(td) => return Ok(td),
+                Err(e) if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::InvalidSignature) => {
+                    // Wrong key — keep trying.
+                }
+                Err(e) => {
+                    if retired_err.is_none() {
+                        retired_err = Some(e);
+                    }
+                }
+            }
+        }
+        Err(retired_err.unwrap_or(err))
     }
 
     // -- Issue ---------------------------------------------------------------
@@ -156,8 +257,11 @@ impl OAuthTokenService {
             iat: now,
         };
 
-        let jwt = encode(&Header::default(), &claims, &self.encoding_key)
-            .map_err(|e| OAuthError::InvalidToken(format!("JWT encode error: {e}")))?;
+        let jwt = {
+            let ring = self.key_ring.read();
+            encode(&Header::default(), &claims, &ring.active_encoding)
+                .map_err(|e| OAuthError::InvalidToken(format!("JWT encode error: {e}")))?
+        };
 
         // Generate an opaque refresh token and atomically check capacity +
         // insert under a single write lock to avoid a TOCTOU race.
@@ -188,7 +292,9 @@ impl OAuthTokenService {
     /// deny-list lookup, principal graph lookup, and scope resolution.
     pub fn validate(&self, token: &str, graph: &SharedGraph) -> Result<AuthContext, OAuthError> {
         // 1+2. Decode and verify HMAC signature + expiry (pre-built Validation).
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &self.validation)
+        // Tries the active key first, then retired keys still within grace period.
+        let token_data = self
+            .decode_with_ring(token, &self.validation)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
                 _ => OAuthError::InvalidToken(e.to_string()),
@@ -243,7 +349,8 @@ impl OAuthTokenService {
     /// decoded claims. Use this when the graph is not accessible (e.g.,
     /// Aether server validating tokens independently of SeleneDB).
     pub fn validate_standalone(&self, token: &str) -> Result<McpTokenClaims, OAuthError> {
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &self.validation)
+        let token_data = self
+            .decode_with_ring(token, &self.validation)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
                 _ => OAuthError::InvalidToken(e.to_string()),
@@ -305,7 +412,7 @@ impl OAuthTokenService {
 
     /// Exchange a refresh token for a new pair without graph lookup.
     ///
-    /// Like [`refresh`] but skips principal re-validation against the graph.
+    /// Like [`Self::refresh`] but skips principal re-validation against the graph.
     /// Use this when the graph is not accessible (e.g., Aether server
     /// operating independently of SeleneDB's internal graph).
     pub fn refresh_standalone(&self, refresh_token: &str) -> Result<(String, String), OAuthError> {
@@ -334,14 +441,17 @@ impl OAuthTokenService {
     /// that has already expired to ensure it stays denied after a restart
     /// when deny list is persisted). Extracts the `jti` and `exp` claims
     /// and adds them to the deny list.
-    pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+    pub fn revoke_token(&self, token: &str) -> Result<(String, u64), OAuthError> {
         // Decode allowing expired tokens (we still want to revoke them)
         let mut relaxed = self.validation.clone();
         relaxed.validate_exp = false;
-        let token_data = decode::<McpTokenClaims>(token, &self.decoding_key, &relaxed)
+        let token_data = self
+            .decode_with_ring(token, &relaxed)
             .map_err(|e| OAuthError::InvalidToken(e.to_string()))?;
-        self.revoke(&token_data.claims.jti, token_data.claims.exp);
-        Ok(())
+        let jti = token_data.claims.jti;
+        let exp = token_data.claims.exp;
+        self.revoke(&jti, exp);
+        Ok((jti, exp))
     }
 
     /// Add a token ID to the deny-list. The `original_exp` timestamp allows
@@ -363,6 +473,37 @@ impl OAuthTokenService {
         self.deny_dirty.store(true, Ordering::Release);
     }
 
+    /// Remove a `jti` from the deny-list, reinstating tokens with that id.
+    ///
+    /// Returns `true` if the entry existed and was removed, `false` if the
+    /// `jti` was not on the deny-list (already unrevoked, never revoked,
+    /// or pruned after expiry).
+    pub fn unrevoke(&self, jti: &str) -> bool {
+        let mut deny = self.deny_list.write();
+        let removed = deny.remove(jti).is_some();
+        if removed {
+            self.deny_dirty.store(true, Ordering::Release);
+        }
+        removed
+    }
+
+    /// Snapshot the current deny-list as `(jti, expires_at)` pairs. Entries
+    /// whose expiry has passed are filtered out — they are safe to drop.
+    pub fn list_revoked(&self) -> Vec<(String, u64)> {
+        let now = now_secs();
+        self.deny_list
+            .read()
+            .iter()
+            .filter_map(|(jti, &exp)| {
+                if exp >= now {
+                    Some((jti.clone(), exp))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Remove expired refresh tokens and deny-list entries whose original
     /// expiry has passed. Also clears the principal cache so stale entries
     /// repopulate on the next validation.
@@ -376,6 +517,10 @@ impl OAuthTokenService {
         {
             let mut deny = self.deny_list.write();
             deny.retain(|_, &mut exp| exp >= now);
+        }
+        {
+            let mut ring = self.key_ring.write();
+            ring.retired.retain(|(_, exp)| *exp > now);
         }
         // Clear principal cache; entries repopulate on next validate().
         self.principal_cache.write().clear();
@@ -728,5 +873,67 @@ mod tests {
         let svc = test_service();
         let result = svc.revoke_token("not-a-valid-jwt");
         assert!(matches!(result, Err(OAuthError::InvalidToken(_))));
+    }
+
+    #[test]
+    fn expired_token_under_retired_key_reports_expiry_not_signature() {
+        // The jsonwebtoken validator has a 60s default leeway, so
+        // `issue` + immediate validate always passes regardless of TTL.
+        // Encode a JWT directly with an `exp` well in the past under the
+        // initial secret, then rotate so that secret ends up in the retired
+        // ring.
+        let initial_secret: &[u8] = b"test-secret-key-at-least-32-bytes!";
+        let svc = test_service();
+        let now = now_secs();
+        let claims = McpTokenClaims {
+            sub: "alice".into(),
+            role: "reader".into(),
+            jti: uuid_v4(),
+            exp: now.saturating_sub(3600),
+            iat: now.saturating_sub(7200),
+        };
+        let jwt = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(initial_secret),
+        )
+        .unwrap();
+
+        // Rotate with a long grace window so the prior key lives in the
+        // retired ring for the duration of the test.
+        svc.rotate_signing_key(b"rotated-secret-key-at-least-32!!", now + 3600);
+
+        // Before the fix, decode_with_ring returned the active key's
+        // `InvalidSignature` (mapping to `InvalidToken`); after the fix, the
+        // retired key's `ExpiredSignature` takes precedence and surfaces as
+        // `TokenExpired`.
+        let res = svc.validate_standalone(&jwt);
+        assert!(
+            matches!(res, Err(OAuthError::TokenExpired)),
+            "expected TokenExpired, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn prune_expired_drops_stale_retired_keys() {
+        let svc = test_service();
+        // Rotate with a grace window in the future so the retired entry
+        // actually lands on the ring (`rotate_signing_key` prunes any
+        // already-expired entries inline).
+        svc.rotate_signing_key(b"rotated-secret-key-at-least-32!!", now_secs() + 3600);
+        assert_eq!(svc.key_ring.read().retired.len(), 1);
+
+        // Simulate the passage of time by backdating the retired entry's
+        // expiry — this is cheaper than sleeping past a real grace window.
+        {
+            let mut ring = svc.key_ring.write();
+            ring.retired[0].1 = now_secs().saturating_sub(1);
+        }
+
+        svc.prune_expired();
+        assert!(
+            svc.key_ring.read().retired.is_empty(),
+            "prune_expired should drop retired keys past their grace window"
+        );
     }
 }

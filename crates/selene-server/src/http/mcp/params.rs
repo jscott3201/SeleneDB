@@ -904,6 +904,55 @@ pub(crate) struct RotateCredentialParams {
     pub(crate) new_password: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreateApiKeyParams {
+    /// Human-readable name for this key (for example, "ci-runner" or "mobile-app").
+    pub(crate) name: String,
+    /// Identity of the principal this key authenticates as.
+    pub(crate) identity: String,
+    /// Optional TTL in days. Omit for a non-expiring key.
+    #[serde(default)]
+    pub(crate) ttl_days: Option<u32>,
+    /// Optional scope tags recorded on the key for downstream enforcement.
+    #[serde(default)]
+    pub(crate) scopes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ListApiKeysParams {
+    /// Filter to keys issued to this identity. Omit to list all.
+    #[serde(default)]
+    pub(crate) identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeApiKeyParams {
+    /// Node ID of the api_key to revoke.
+    #[serde(deserialize_with = "deserialize_u64_or_string")]
+    pub(crate) key_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RotateSigningKeyParams {
+    /// Seconds to keep the previous signing key valid for decoding existing
+    /// access tokens. Defaults to 86400 (24 hours) when omitted. Set to 0 to
+    /// invalidate all outstanding access tokens immediately.
+    #[serde(default)]
+    pub(crate) retire_for_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeTokenParams {
+    /// The full JWT access token string to revoke.
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UnrevokeTokenParams {
+    /// The `jti` claim of the token to remove from the deny-list.
+    pub(crate) jti: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,10 +1,13 @@
 //! MCP tool implementations for graph, time-series, schema, and data operations.
 
 mod ai;
+mod api_keys;
 mod memory;
 mod principals;
 mod proposals;
 mod schemas;
+mod signing_key;
+mod tokens;
 mod traces;
 
 use std::collections::HashMap;
@@ -2274,6 +2277,141 @@ impl SeleneTools {
         params: Parameters<RotateCredentialParams>,
     ) -> Result<CallToolResult, McpError> {
         principals::rotate_credential_impl(self, params.0).await
+    }
+
+    // ── API-key Management ─────────────────────────────────────────────
+
+    #[tool(
+        name = "create_api_key",
+        description = "Issue a new bearer API key for a principal. \
+        Returns the key metadata plus a one-time plaintext token (format: selk_<prefix>.<secret>). \
+        The token is never recoverable afterwards — only its argon2id hash is persisted. \
+        Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_api_key(
+        &self,
+        params: Parameters<CreateApiKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::create_api_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_api_keys",
+        description = "List issued API keys with metadata (id, name, identity, prefix, \
+        created_at, expires_at, scopes, enabled). Hashes are never returned. \
+        Optionally filter by identity. Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_api_keys(
+        &self,
+        params: Parameters<ListApiKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::list_api_keys_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "revoke_api_key",
+        description = "Disable an API key by node ID. The key row is preserved for audit, \
+        but verify_api_key will reject it. Idempotent. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn revoke_api_key(
+        &self,
+        params: Parameters<RevokeApiKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::revoke_api_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "rotate_signing_key",
+        description = "Rotate the OAuth access-token signing key. Generates a new 32-byte \
+        HMAC-SHA256 secret, persists it in the encrypted vault, and installs it on the \
+        running token service. The previous key is retained in an in-memory retired ring \
+        for `retire_for_secs` (default 86400) so access tokens signed under it remain \
+        valid during the grace period. Refresh tokens are unaffected. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rotate_signing_key(
+        &self,
+        params: Parameters<RotateSigningKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        signing_key::rotate_signing_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "revoke_token",
+        description = "Revoke an OAuth access token by its raw JWT string. Adds the token's \
+        `jti` to the in-memory deny-list until its original expiry, after which the entry is \
+        pruned since the token would be invalid anyway. Use to force-logout a principal or \
+        invalidate a leaked token. Refresh tokens are unaffected — pair with \
+        `rotate_signing_key` if you also need to cut in-flight refresh flows. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn revoke_token(
+        &self,
+        params: Parameters<RevokeTokenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tokens::revoke_token_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_revoked_tokens",
+        description = "List current OAuth access-token deny-list entries (jti + original \
+        expiry). Expired entries are filtered out. Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_revoked_tokens(&self) -> Result<CallToolResult, McpError> {
+        tokens::list_revoked_tokens_impl(self).await
+    }
+
+    #[tool(
+        name = "unrevoke_token",
+        description = "Remove a jti from the access-token deny-list, reinstating any \
+        still-unexpired token that carried it. Idempotent — returns `removed=false` if the \
+        jti was not on the list. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn unrevoke_token(
+        &self,
+        params: Parameters<UnrevokeTokenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tokens::unrevoke_token_impl(self, params.0).await
     }
 }
 
