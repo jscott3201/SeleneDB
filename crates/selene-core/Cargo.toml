@@ -13,7 +13,7 @@ thiserror.workspace = true
 lasso = { version = "0.7", features = ["multi-threaded"] }
 smallvec.workspace = true
 smol_str.workspace = true
-geo-types = { version = "0.7", features = ["serde"] }
+geo-types = { version = "0.7", default-features = false, features = ["serde", "std"] }
 geojson = { version = "1.0", default-features = false, features = ["geo-types"] }
 
 [dev-dependencies]

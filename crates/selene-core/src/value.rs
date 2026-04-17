@@ -176,7 +176,15 @@ impl std::fmt::Display for Value {
             }
             Self::Vector(v) => write!(f, "vector[{}]", v.len()),
             Self::InternedStr(s) => write!(f, "{s}"),
-            Self::Geometry(g) => write!(f, "{}[{}]", g.geometry_type(), g.coord_count()),
+            // Lossless — the GeoJSON string is stable for equal geometries and
+            // is used by identity-sensitive callers (composite index keys in
+            // selene-graph::typed_index). CRS is appended when set so that two
+            // geometries with the same shape but different CRS produce
+            // distinct string representations.
+            Self::Geometry(g) => match &g.crs {
+                Some(crs) => write!(f, "{}@{}", g.to_geojson(), crs.as_str()),
+                None => write!(f, "{}", g.to_geojson()),
+            },
         }
     }
 }
@@ -280,7 +288,19 @@ mod tests {
     fn geometry_value() {
         let g = Value::geometry(crate::GeometryValue::point_wgs84(-74.0, 40.7));
         assert_eq!(g.type_name(), "geometry");
-        assert_eq!(format!("{g}"), "Point[1]");
+        // Display is lossless: GeoJSON + CRS hint so identity-sensitive
+        // callers (composite index keys) can't collide two distinct geometries.
+        let s = format!("{g}");
+        assert!(s.contains("\"Point\""));
+        assert!(s.contains("-74"));
+        assert!(s.contains("@EPSG:4326"));
+    }
+
+    #[test]
+    fn geometry_display_distinguishes_crs() {
+        let a = Value::geometry(crate::GeometryValue::point_wgs84(1.0, 2.0));
+        let b = Value::geometry(crate::GeometryValue::point_planar(1.0, 2.0));
+        assert_ne!(format!("{a}"), format!("{b}"));
     }
 
     #[test]

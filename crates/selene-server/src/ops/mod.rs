@@ -367,7 +367,9 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Vector(v) => {
             serde_json::Value::Array(v.iter().map(|f| serde_json::json!(f)).collect())
         }
-        Value::Geometry(g) => serde_json::from_str(&g.to_geojson())
-            .unwrap_or_else(|_| serde_json::Value::String(g.to_geojson())),
+        Value::Geometry(g) => {
+            let geojson = g.to_geojson();
+            serde_json::from_str(&geojson).unwrap_or(serde_json::Value::String(geojson))
+        }
     }
 }

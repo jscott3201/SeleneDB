@@ -68,6 +68,17 @@ impl GeometryValue {
         }
     }
 
+    /// Construct a point without specifying a CRS (treated as planar).
+    ///
+    /// Useful for local coordinate systems, unit-test fixtures, or when the
+    /// surrounding application tracks CRS externally.
+    pub fn point_planar(x: f64, y: f64) -> Self {
+        Self {
+            geom: geo_types::Geometry::Point(geo_types::Point::new(x, y)),
+            crs: None,
+        }
+    }
+
     /// Construct from any `geo_types::Geometry`, leaving the CRS unspecified.
     pub fn from_geo(geom: geo_types::Geometry<f64>) -> Self {
         Self { geom, crs: None }
