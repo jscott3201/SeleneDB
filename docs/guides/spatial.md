@@ -30,7 +30,7 @@ Geometries carry an optional CRS hint (`EPSG:4326` for geographic, `None` for pl
 
 ## Ingest
 
-Three ways to put a geometry into a property:
+Four ways to put a geometry into a property:
 
 ### As a literal via `ST_Point`
 

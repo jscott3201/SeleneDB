@@ -1346,12 +1346,17 @@ fn bench_spatial(c: &mut Criterion) {
         // Keep polygon count bounded — point-in-polygon is O(points × polygons)
         // without an index, so we'd rather show per-point cost grow linearly
         // than inflate the cartesian cost quadratically.
-        let polygon_count = 20;
-        let g = build_spatial_graph(n, polygon_count);
-        group.throughput(Throughput::Elements(n));
+        let polygon_count: u64 = 20;
+        let g = build_spatial_graph(n, polygon_count as usize);
 
-        // Distance sort — pure measurement, single building binding on the
-        // left and every sensor on the right.
+        // Per-bench throughput reflects actual work, not just `n` points.
+        // `contains_pairs` evaluates n × polygon_count pairs; `intersects_zones`
+        // is polygon-pair shaped (C(polygon_count, 2)); `envelope_zones` runs
+        // once per polygon. Setting throughput at the group level would make
+        // Criterion's elements/sec misleading across these workloads.
+
+        // Distance sort — pure measurement over every sensor.
+        group.throughput(Throughput::Elements(n));
         group.bench_with_input(BenchmarkId::new("distance_sort", n), &g, |b, g| {
             b.iter(|| {
                 QueryBuilder::new(
@@ -1366,6 +1371,7 @@ fn bench_spatial(c: &mut Criterion) {
         });
 
         // Radius filter — the common "sensors within N meters of HQ" shape.
+        group.throughput(Throughput::Elements(n));
         group.bench_with_input(BenchmarkId::new("dwithin_5km", n), &g, |b, g| {
             b.iter(|| {
                 QueryBuilder::new(
@@ -1379,7 +1385,8 @@ fn bench_spatial(c: &mut Criterion) {
             });
         });
 
-        // Point-in-polygon over every (zone, sensor) pair.
+        // Point-in-polygon: n × polygon_count candidate pairs.
+        group.throughput(Throughput::Elements(n * polygon_count));
         group.bench_with_input(BenchmarkId::new("contains_pairs", n), &g, |b, g| {
             b.iter(|| {
                 QueryBuilder::new(
@@ -1393,7 +1400,9 @@ fn bench_spatial(c: &mut Criterion) {
             });
         });
 
-        // Polygon–polygon intersection across zones (bbox pre-filter path).
+        // Polygon-polygon intersection, C(polygon_count, 2) candidate pairs.
+        let zone_pairs = polygon_count * polygon_count.saturating_sub(1) / 2;
+        group.throughput(Throughput::Elements(zone_pairs));
         group.bench_with_input(BenchmarkId::new("intersects_zones", n), &g, |b, g| {
             b.iter(|| {
                 QueryBuilder::new(
@@ -1407,7 +1416,8 @@ fn bench_spatial(c: &mut Criterion) {
             });
         });
 
-        // Envelope — cheap per-geometry measurement over all zones.
+        // Envelope — one measurement per zone polygon.
+        group.throughput(Throughput::Elements(polygon_count));
         group.bench_with_input(BenchmarkId::new("envelope_zones", n), &g, |b, g| {
             b.iter(|| {
                 QueryBuilder::new("MATCH (z:zone) RETURN ST_Envelope(z.boundary) AS bb", g)
