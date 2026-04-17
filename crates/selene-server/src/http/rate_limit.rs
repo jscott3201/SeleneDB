@@ -135,7 +135,9 @@ fn looks_like_bearer(value: &str) -> bool {
     let trimmed = value.trim();
     // RFC 9110 §11.1: auth-scheme is case-insensitive, so accept any casing
     // (`Bearer`, `bearer`, `BEARER`) rather than gating on exact prefix.
-    let Some((scheme_end, _)) = trimmed.char_indices().find(|(_, c)| c.is_ascii_whitespace())
+    let Some((scheme_end, _)) = trimmed
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_whitespace())
     else {
         return false;
     };
