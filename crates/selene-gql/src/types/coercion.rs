@@ -33,6 +33,7 @@ impl GqlValue {
             (GqlValue::String(a), GqlValue::String(b)) => Trilean::from(**a == **b),
             (GqlValue::Bytes(a), GqlValue::Bytes(b)) => Trilean::from(*a == *b),
             (GqlValue::Vector(a), GqlValue::Vector(b)) => Trilean::from(*a == *b),
+            (GqlValue::Geometry(a), GqlValue::Geometry(b)) => Trilean::from(**a == **b),
             (GqlValue::Node(a), GqlValue::Node(b)) => Trilean::from(a == b),
             (GqlValue::Edge(a), GqlValue::Edge(b)) => Trilean::from(a == b),
             (GqlValue::ZonedDateTime(a), GqlValue::ZonedDateTime(b)) => {
@@ -253,6 +254,17 @@ impl GqlValue {
                     elem.to_bits().hash(&mut hasher);
                 }
             }
+            GqlValue::Geometry(g) => {
+                std::mem::discriminant(self).hash(&mut hasher);
+                // GeoJSON serialization is stable for equal geometries; CRS is
+                // hashed separately so distinctness stays consistent with the
+                // `GeometryValue` equality impl (which compares both fields).
+                g.to_geojson().hash(&mut hasher);
+                match &g.crs {
+                    Some(c) => c.as_str().hash(&mut hasher),
+                    None => 0u8.hash(&mut hasher),
+                }
+            }
             GqlValue::Record(r) => {
                 std::mem::discriminant(self).hash(&mut hasher);
                 r.fields.len().hash(&mut hasher);
@@ -444,6 +456,35 @@ mod tests {
         let c = GqlValue::String(SmolStr::new("world"));
         assert_eq!(a.gql_eq(&b), Trilean::True);
         assert_eq!(a.gql_eq(&c), Trilean::False);
+    }
+
+    #[test]
+    fn eq_geometry() {
+        use std::sync::Arc;
+        let a = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(1.0, 2.0)));
+        let b = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(1.0, 2.0)));
+        let c = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(3.0, 4.0)));
+        assert_eq!(a.gql_eq(&b), Trilean::True);
+        assert_eq!(a.gql_eq(&c), Trilean::False);
+    }
+
+    #[test]
+    fn eq_geometry_distinct_on_crs() {
+        use std::sync::Arc;
+        // Same shape, different CRS → distinct values.
+        let a = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(1.0, 2.0)));
+        let b = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_planar(1.0, 2.0)));
+        assert_eq!(a.gql_eq(&b), Trilean::False);
+    }
+
+    #[test]
+    fn distinctness_key_matches_eq_for_geometry() {
+        use std::sync::Arc;
+        let a = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(1.0, 2.0)));
+        let b = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(1.0, 2.0)));
+        let c = GqlValue::Geometry(Arc::new(selene_core::GeometryValue::point_wgs84(3.0, 4.0)));
+        assert_eq!(a.distinctness_key(), b.distinctness_key());
+        assert_ne!(a.distinctness_key(), c.distinctness_key());
     }
 
     #[test]

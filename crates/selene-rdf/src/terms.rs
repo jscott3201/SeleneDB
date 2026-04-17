@@ -18,9 +18,18 @@ use selene_core::{EdgeId, NodeId};
 /// Custom Selene vector datatype URI for dense float vectors.
 const SELENE_VECTOR_DATATYPE: &str = "urn:selene:vector";
 
+/// GeoSPARQL geoJSONLiteral datatype URI. Phase 3 will also emit `geo:wktLiteral`
+/// for broader engine compatibility; this is the stable interim mapping.
+const GEOJSON_LITERAL_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
+
 /// Return a `NamedNode` for the custom `selene:vector` datatype.
 fn selene_vector_datatype() -> NamedNode {
     NamedNode::new_unchecked(SELENE_VECTOR_DATATYPE)
+}
+
+/// Return a `NamedNode` for the GeoSPARQL geoJSONLiteral datatype.
+fn geojson_literal_datatype() -> NamedNode {
+    NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE)
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +90,15 @@ pub fn value_to_literal(value: &Value) -> Option<Literal> {
                 acc
             });
             Some(Literal::new_typed_literal(csv, selene_vector_datatype()))
+        }
+        Value::Geometry(g) => {
+            // Interim mapping: serialize as GeoJSON text with the GeoSPARQL
+            // geo:geoJSONLiteral datatype. Phase 3 will add proper WKT output
+            // for broader SPARQL-engine compatibility (PostGIS, Jena).
+            Some(Literal::new_typed_literal(
+                g.to_geojson(),
+                geojson_literal_datatype(),
+            ))
         }
         Value::List(_) => None,
     }
@@ -745,6 +763,10 @@ fn value_hash<H: std::hash::Hasher>(v: &Value, state: &mut H) {
             for f in v.iter() {
                 f.to_bits().hash(state);
             }
+        }
+        Value::Geometry(g) => {
+            // GeoJSON serialization is stable for equal geometries.
+            g.to_geojson().hash(state);
         }
         Value::List(l) => {
             l.len().hash(state);

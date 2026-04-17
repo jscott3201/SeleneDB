@@ -585,6 +585,7 @@ impl CompositeTypedIndex {
                 Value::LocalDateTime(_) => "D",
                 Value::Duration(_) => "r",
                 Value::Vector(_) => "v",
+                Value::Geometry(_) => "g",
             };
             key.push_str(tag);
             key.push(':');
