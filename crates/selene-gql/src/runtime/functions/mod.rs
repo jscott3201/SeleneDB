@@ -7,6 +7,7 @@ mod functions_core;
 mod functions_math;
 mod functions_string;
 mod functions_temporal;
+mod spatial;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,14 +42,20 @@ use functions_string::{
     ListPrependFunction, ListReverseFunction, ListSliceFunction, ListSortFunction, LtrimFunction,
     NormalizeFunction, NullIfFunction, RangeFunction, ReplaceFunction, ReverseFunction,
     RightFunction, RtrimFunction, StartsWithFunction, SubstringFunction, TailFunction,
-    ToFloatFunction, ToIntegerFunction, ToStringCypherFunction, ToStringFunction,
-    ValueTypeFunction,
+    ToBooleanFunction, ToFloatFunction, ToIntegerFunction, ToStringCypherFunction,
+    ToStringFunction, ValueTypeFunction,
 };
 use functions_temporal::{
     CosineSimilarityFunction, CurrentDateFunction, CurrentTimeFunction, DateAddFunction,
     DateConstructorFunction, DateSubFunction, DurationBetweenFunction, EuclideanDistanceFunction,
     ExtractFunction, LocalDatetimeFunction, LocalTimeFunction, NowFunction, TextMatchFunction,
     TimeConstructorFunction, TimestampToStringFunction, ZonedTimeConstructorFunction,
+};
+use spatial::{
+    StAreaFunction, StAsGeoJsonFunction, StContainsFunction, StDWithinFunction, StDistanceFunction,
+    StDistanceSphereFunction, StEnvelopeFunction, StEqualsFunction, StGeomFromGeoJsonFunction,
+    StGeometryTypeFunction, StIntersectsFunction, StIsValidFunction, StLengthFunction,
+    StMakePolygonFunction, StPointFunction, StWithinFunction, StXFunction, StYFunction,
 };
 
 /// Function signature: argument types and return type for plan-time validation.
@@ -195,6 +202,7 @@ impl FunctionRegistry {
         reg.register(Arc::new(ToStringCypherFunction));
         reg.register(Arc::new(ToIntegerFunction));
         reg.register(Arc::new(ToFloatFunction));
+        reg.register(Arc::new(ToBooleanFunction));
 
         // Spec-aligned aliases (register same impl under spec name)
         let char_length_fn = reg.get(&IStr::new("char_length")).cloned();
@@ -255,6 +263,26 @@ impl FunctionRegistry {
 
         // Embedding function (feature-gated)
         reg.register(Arc::new(crate::runtime::embed::EmbedFunction));
+
+        // Spatial ST_* family (OGC-aligned names; stored lowercased per registry)
+        reg.register(Arc::new(StPointFunction));
+        reg.register(Arc::new(StGeomFromGeoJsonFunction));
+        reg.register(Arc::new(StMakePolygonFunction));
+        reg.register(Arc::new(StXFunction));
+        reg.register(Arc::new(StYFunction));
+        reg.register(Arc::new(StGeometryTypeFunction));
+        reg.register(Arc::new(StIsValidFunction));
+        reg.register(Arc::new(StAsGeoJsonFunction));
+        reg.register(Arc::new(StContainsFunction));
+        reg.register(Arc::new(StWithinFunction));
+        reg.register(Arc::new(StIntersectsFunction));
+        reg.register(Arc::new(StEqualsFunction));
+        reg.register(Arc::new(StDWithinFunction));
+        reg.register(Arc::new(StDistanceFunction));
+        reg.register(Arc::new(StDistanceSphereFunction));
+        reg.register(Arc::new(StAreaFunction));
+        reg.register(Arc::new(StLengthFunction));
+        reg.register(Arc::new(StEnvelopeFunction));
 
         reg
     }

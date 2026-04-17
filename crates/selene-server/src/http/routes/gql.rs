@@ -78,7 +78,7 @@ pub(in crate::http) async fn gql_query(
     let use_arrow = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("application/vnd.apache.arrow.stream"));
+        .is_some_and(accepts_arrow_ipc);
     let format = if use_arrow {
         ops::gql::ResultFormat::ArrowIpc
     } else {
@@ -128,6 +128,7 @@ pub(in crate::http) async fn gql_query(
                     "message": e.to_string(),
                     "data": [],
                     "row_count": 0,
+                    "error": true,
                 });
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(resp)).into_response();
             }
@@ -152,19 +153,23 @@ pub(in crate::http) async fn gql_query(
             if let Some(arrow_bytes) = r.data_arrow {
                 return (
                     StatusCode::OK,
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "application/vnd.apache.arrow.stream",
-                    )],
+                    [(axum::http::header::CONTENT_TYPE, ARROW_IPC_MEDIA_TYPE)],
                     arrow_bytes,
                 )
                     .into_response();
             }
 
+            // The HTTP status stays 200 even on a GQL-level error so that
+            // clients which want to inspect the GQLSTATUS / data envelope
+            // never have to read the body for non-2xx responses. To make
+            // that decision unambiguous, surface an explicit `error: bool`
+            // flag at the envelope root keyed off the GQLSTATUS class so
+            // callers do not have to know the SQLSTATE class table.
             let mut resp = serde_json::json!({
                 "status": r.status_code,
                 "message": r.message,
                 "row_count": r.row_count,
+                "error": is_gql_error_status(&r.status_code),
             });
 
             if let Some(json_data) = &r.data_json {
@@ -197,10 +202,28 @@ pub(in crate::http) async fn gql_query(
                 "message": e.to_string(),
                 "data": [],
                 "row_count": 0,
+                "error": true,
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(resp)).into_response()
         }
     }
+}
+
+/// Classify a GQLSTATUS / SQLSTATE-style code as an error.
+///
+/// Following SQL precedent, the `00` class is "successful completion" and
+/// `02` is "no data" (still success — just nothing to return). Any other
+/// class is an error: `22` data exception, `40` transaction rollback,
+/// `42` syntax error, etc.
+///
+/// Returned at the JSON envelope root so HTTP clients have a stable boolean
+/// to dispatch on instead of replicating the SQLSTATE class table.
+fn is_gql_error_status(code: &str) -> bool {
+    if code.len() < 2 {
+        return true; // malformed status — treat conservatively as error
+    }
+    let class = &code[..2];
+    !(class == "00" || class == "02")
 }
 
 // ── Graph Slice ─────────────────────────────────────────────────────
@@ -325,13 +348,15 @@ async fn execute_batch(
                         "statement": i,
                         "status": "XX000",
                         "message": e.to_string(),
+                        "error": true,
                     }));
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
                             "batch": true,
                             "total": statements.len(),
-                            "completed": i,
+                            "completed": results.len(),
+                            "error": true,
                             "results": results,
                         })),
                     )
@@ -344,21 +369,29 @@ async fn execute_batch(
 
         match result {
             Ok(r) => {
+                let stmt_error = is_gql_error_status(&r.status_code);
                 results.push(serde_json::json!({
                     "statement": i,
                     "status": r.status_code,
                     "message": r.message,
                     "row_count": r.row_count,
                     "data": r.data_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).unwrap_or(serde_json::Value::Array(vec![])),
+                    "error": stmt_error,
                 }));
-                // Abort on error status
-                if !r.status_code.starts_with("00") && !r.status_code.starts_with("0A") {
+                // Abort on error status. The `0A` (feature-not-supported)
+                // class is continuable for legacy reasons; everything else
+                // the shared classifier flags as an error stops the batch.
+                // (Without this alignment, `02xxx` "no data" — which the
+                // classifier correctly treats as success — would otherwise
+                // abort, contradicting the new contract.)
+                if stmt_error && !r.status_code.starts_with("0A") {
                     return (
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "batch": true,
                             "total": statements.len(),
-                            "completed": i,
+                            "completed": results.len(),
+                            "error": true,
                             "results": results,
                         })),
                     )
@@ -370,13 +403,15 @@ async fn execute_batch(
                     "statement": i,
                     "status": "XX000",
                     "message": e.to_string(),
+                    "error": true,
                 }));
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "batch": true,
                         "total": statements.len(),
-                        "completed": i,
+                        "completed": results.len(),
+                        "error": true,
                         "results": results,
                     })),
                 )
@@ -385,14 +420,132 @@ async fn execute_batch(
         }
     }
 
+    // All statements ran without aborting. The batch as a whole is an
+    // error if any individual statement failed (the abort branches above
+    // already cover the early-exit cases, but defense-in-depth doesn't hurt).
+    let any_error = results.iter().any(|r| {
+        r.get("error")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "batch": true,
             "total": statements.len(),
             "completed": statements.len(),
+            "error": any_error,
             "results": results,
         })),
     )
         .into_response()
+}
+
+/// Stable media type advertised by the Arrow IPC encoder.
+const ARROW_IPC_MEDIA_TYPE: &str = "application/vnd.apache.arrow.stream";
+
+/// Parse an `Accept` header value and report whether the client wants the
+/// Arrow IPC stream format.
+///
+/// The previous implementation used `accept.contains(ARROW_IPC_MEDIA_TYPE)`,
+/// which is unsafe in two ways:
+///
+/// 1. Substrings of malformed types — `text/application/vnd.apache.arrow.stream`
+///    — would match.
+/// 2. The token could appear inside a parameter value (`text/plain;
+///    charset=application/vnd.apache.arrow.stream`) and falsely advertise
+///    the format.
+///
+/// This implementation walks comma-separated entries, drops parameters
+/// (everything after the first `;`), trims, and compares for case-insensitive
+/// equality against the canonical media type. We intentionally do not honor
+/// q-values: if the type is listed at all, we treat it as wanted. Real
+/// clients that need q-weighting should request a stricter Accept anyway.
+fn accepts_arrow_ipc(accept: &str) -> bool {
+    accept.split(',').any(|entry| {
+        let media = entry.split(';').next().unwrap_or("").trim();
+        media.eq_ignore_ascii_case(ARROW_IPC_MEDIA_TYPE)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accepts_arrow_ipc, is_gql_error_status};
+
+    #[test]
+    fn success_classes_are_not_errors() {
+        // Class 00 is "successful completion". Class 02 is "no data" —
+        // still a success (just nothing to return).
+        assert!(!is_gql_error_status("00000"));
+        assert!(!is_gql_error_status("02000"));
+    }
+
+    #[test]
+    fn data_and_syntax_errors_are_errors() {
+        // 22xxx data exception, 42xxx syntax/access, 40xxx transaction —
+        // all error classes per SQLSTATE precedent.
+        assert!(is_gql_error_status("22001"));
+        assert!(is_gql_error_status("42601"));
+        assert!(is_gql_error_status("40001"));
+        // The infrastructure-level fallback we use on Err paths.
+        assert!(is_gql_error_status("XX000"));
+    }
+
+    #[test]
+    fn malformed_status_treated_as_error() {
+        // Defensive default: a missing or truncated status string must
+        // not be silently classified as success.
+        assert!(is_gql_error_status(""));
+        assert!(is_gql_error_status("0"));
+    }
+
+    #[test]
+    fn exact_match_is_accepted() {
+        assert!(accepts_arrow_ipc("application/vnd.apache.arrow.stream"));
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        assert!(accepts_arrow_ipc("APPLICATION/VND.APACHE.ARROW.STREAM"));
+    }
+
+    #[test]
+    fn one_of_many_listed() {
+        assert!(accepts_arrow_ipc(
+            "text/html, application/vnd.apache.arrow.stream, */*"
+        ));
+    }
+
+    #[test]
+    fn entry_with_q_value_still_matches() {
+        // We don't honor q-values for accept/reject decisions, but a q
+        // parameter must not break the type lookup.
+        assert!(accepts_arrow_ipc(
+            "application/vnd.apache.arrow.stream;q=0.9"
+        ));
+    }
+
+    #[test]
+    fn substring_in_invalid_type_is_rejected() {
+        // The previous substring check would have matched this. Don't.
+        assert!(!accepts_arrow_ipc(
+            "text/application/vnd.apache.arrow.stream"
+        ));
+    }
+
+    #[test]
+    fn substring_inside_parameter_is_rejected() {
+        // Same hazard, but hidden in a parameter rather than the type.
+        assert!(!accepts_arrow_ipc(
+            "text/plain; charset=application/vnd.apache.arrow.stream"
+        ));
+    }
+
+    #[test]
+    fn unrelated_types_are_rejected() {
+        assert!(!accepts_arrow_ipc("application/json"));
+        assert!(!accepts_arrow_ipc("text/html, image/png"));
+        assert!(!accepts_arrow_ipc(""));
+        assert!(!accepts_arrow_ipc("*/*"));
+    }
 }

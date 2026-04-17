@@ -1,12 +1,12 @@
 //! MCP tool implementations for graph, time-series, schema, and data operations.
 
 mod ai;
-mod bridge;
+mod api_keys;
 mod memory;
 mod principals;
-mod proposals;
 mod schemas;
-mod traces;
+mod signing_key;
+mod tokens;
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -16,7 +16,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
-use super::format::{format_json, format_value, structured_result};
+use super::format::{format_json, structured_result, structured_text_result};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -82,7 +82,7 @@ impl SeleneTools {
             )
             .map_err(op_err)?
         };
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let data_text = result.data_json.clone().unwrap_or_else(|| "[]".to_string());
         let mut text = format!("Status: {} — {}\n", result.status_code, result.message);
         if let Some(m) = &result.mutations {
             let _ = writeln!(
@@ -96,8 +96,33 @@ impl SeleneTools {
                 m.properties_removed,
             );
         }
-        let _ = write!(text, "{data}\n({} rows)", result.row_count);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let _ = write!(text, "{data_text}\n({} rows)", result.row_count);
+
+        // Programmatic clients should not have to parse the human summary
+        // above. Hand them a structured envelope mirroring the HTTP /gql
+        // response: status, message, row_count, data, and (optionally)
+        // mutations counts. This is finding #1 of the MCP DX hardening pass.
+        let mut structured = serde_json::json!({
+            "status": result.status_code,
+            "message": result.message,
+            "row_count": result.row_count,
+        });
+        if let Some(json_str) = result.data_json.as_deref()
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            structured["data"] = parsed;
+        }
+        if let Some(m) = &result.mutations {
+            structured["mutations"] = serde_json::json!({
+                "nodes_created": m.nodes_created,
+                "nodes_deleted": m.nodes_deleted,
+                "edges_created": m.edges_created,
+                "edges_deleted": m.edges_deleted,
+                "properties_set": m.properties_set,
+                "properties_removed": m.properties_removed,
+            });
+        }
+        Ok(structured_text_result(text, structured))
     }
 
     #[tool(
@@ -180,9 +205,9 @@ impl SeleneTools {
         let node = self
             .submit_mut(move || ops::nodes::create_node(&st, &auth, labels, props, parent_id))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &node,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&node).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -237,9 +262,9 @@ impl SeleneTools {
                 )
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &node,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&node).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -381,9 +406,9 @@ impl SeleneTools {
                 ops::edges::create_edge(&st, &auth, source, target, label, props, upsert)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &edge,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&edge).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -424,9 +449,9 @@ impl SeleneTools {
                 ops::edges::modify_edge(&st, &auth, edge_id, set_props, remove_props)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &edge,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&edge).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -487,11 +512,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -535,11 +559,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -612,73 +635,10 @@ impl SeleneTools {
                 Ok(created_ids)
             })
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"created\":{},\"ids\":{:?}}}",
-            ids.len(),
-            ids
-        ))]))
-    }
-
-    #[tool(
-        name = "mark_fixed",
-        description = "Bulk-update node status to 'fixed' (or custom status) and optionally link to a commit SHA. Use for resolving findings, security concerns, or work items after a fix is applied.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn mark_fixed(
-        &self,
-        params: Parameters<MarkFixedParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let auth = mcp_auth(self)?;
-        reject_replica(&self.state)?;
-        let p = params.0;
-        let st = Arc::clone(&self.state);
-        let count: usize = self
-            .submit_mut(move || {
-                let mut updated = 0usize;
-                for node_id in &p.node_ids {
-                    let mut props = HashMap::new();
-                    props.insert(
-                        "status".to_string(),
-                        serde_json::Value::String(p.status.clone()),
-                    );
-                    if let Some(sha) = &p.commit_sha {
-                        props.insert(
-                            "fixed_by_commit".to_string(),
-                            serde_json::Value::String(sha.clone()),
-                        );
-                    }
-                    if let Some(note) = &p.note {
-                        props.insert(
-                            "resolution_note".to_string(),
-                            serde_json::Value::String(note.clone()),
-                        );
-                    }
-                    let set_props: Vec<(selene_core::IStr, selene_core::Value)> = props
-                        .into_iter()
-                        .map(|(k, v)| (selene_core::IStr::new(&k), json_to_value(v)))
-                        .collect();
-                    ops::nodes::modify_node(
-                        &st,
-                        &auth,
-                        *node_id,
-                        set_props,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    )?;
-                    updated += 1;
-                }
-                Ok(updated)
-            })
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{{\"updated\":{count}}}",
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "created": ids.len(),
+            "ids": ids,
+        })))
     }
 
     #[tool(
@@ -743,9 +703,10 @@ impl SeleneTools {
         let count = self
             .submit_mut(move || ops::ts::ts_write(&st, &auth, samples))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Wrote {count} samples"
-        ))]))
+        Ok(structured_text_result(
+            format!("Wrote {count} samples"),
+            serde_json::json!({ "written": count }),
+        ))
     }
 
     #[tool(
@@ -798,9 +759,9 @@ impl SeleneTools {
                 Some(p.limit.unwrap_or(1000) as usize),
             )
             .map_err(op_err)?;
-            return Ok(CallToolResult::success(vec![Content::text(format_json(
-                &samples,
-            ))]));
+            return Ok(structured_result(
+                serde_json::to_value(&samples).unwrap_or_default(),
+            ));
         }
 
         // Route to ts.window via GQL for aggregated results
@@ -826,11 +787,20 @@ impl SeleneTools {
         .map_err(op_err)?;
 
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
         let text = format!(
             "ts_query aggregation ({}): {} buckets\n{data}",
             agg_mode, result.row_count
         );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "agg_mode": agg_mode,
+                "agg_fn": agg_fn,
+                "row_count": result.row_count,
+                "buckets": parsed,
+            }),
+        ))
     }
 
     // ── Graph Slice ──────────────────────────────────────────────────
@@ -903,9 +873,7 @@ impl SeleneTools {
             );
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &resp,
-        ))]))
+        Ok(structured_result(resp))
     }
 
     // ── Health ────────────────────────────────────────────────────────
@@ -922,9 +890,9 @@ impl SeleneTools {
     )]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         let resp = ops::health::health(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &resp,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&resp).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -939,9 +907,9 @@ impl SeleneTools {
     )]
     async fn info(&self) -> Result<CallToolResult, McpError> {
         let info = crate::ops::info::server_info(&self.state);
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &info,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&info).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -991,9 +959,9 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let graph = ops::reactflow::export_reactflow(&self.state, &auth, params.0.label.as_deref());
-        Ok(CallToolResult::success(vec![Content::text(format_json(
-            &graph,
-        ))]))
+        Ok(structured_result(
+            serde_json::to_value(&graph).unwrap_or_default(),
+        ))
     }
 
     #[tool(
@@ -1017,10 +985,17 @@ impl SeleneTools {
         let result = self
             .submit_mut(move || ops::reactflow::import_reactflow(&st, &auth, graph))
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Imported {} nodes, {} edges. ID mapping: {:?}",
-            result.nodes_created, result.edges_created, result.id_map
-        ))]))
+        Ok(structured_text_result(
+            format!(
+                "Imported {} nodes, {} edges. ID mapping: {:?}",
+                result.nodes_created, result.edges_created, result.id_map
+            ),
+            serde_json::json!({
+                "nodes_created": result.nodes_created,
+                "edges_created": result.edges_created,
+                "id_map": result.id_map,
+            }),
+        ))
     }
 
     // ── Schema Management (delegated to schemas module) ──────────────
@@ -1240,7 +1215,15 @@ impl SeleneTools {
         if !result.errors.is_empty() {
             let _ = write!(text, "\nErrors: {}", result.errors.join("; "));
         }
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "nodes_created": result.nodes_created,
+                "edges_created": result.edges_created,
+                "rows_skipped": result.rows_skipped,
+                "errors": result.errors,
+            }),
+        ))
     }
 
     #[tool(
@@ -1338,15 +1321,24 @@ impl SeleneTools {
         let include_props = p.include_properties.unwrap_or(false);
 
         if !include_props && !summary {
+            let rendered = format_json(&rows);
             let text = format!(
                 "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
                 p.query_text,
                 total,
                 rows.len(),
                 offset,
-                format_json(&rows)
+                rendered
             );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(structured_text_result(
+                text,
+                serde_json::json!({
+                    "query": p.query_text,
+                    "total": total,
+                    "offset": offset,
+                    "results": rows,
+                }),
+            ));
         }
 
         // Enrich results — summary_mode returns lightweight data,
@@ -1391,16 +1383,19 @@ impl SeleneTools {
             })
             .collect();
 
+        let returned = enriched.len();
         let mut text = format!(
             "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
             p.query_text,
             total,
-            enriched.len(),
+            returned,
             offset,
             format_json(&enriched)
         );
 
-        // Response size guard (char-boundary safe)
+        // Response size guard (char-boundary safe). Note: this only truncates
+        // the human text; the structured payload below is unbounded and lets
+        // programmatic clients see all results without the truncation hint.
         const MAX_RESPONSE_BYTES: usize = 50_000;
         if text.len() > MAX_RESPONSE_BYTES {
             let truncate_at = text
@@ -1413,7 +1408,16 @@ impl SeleneTools {
             text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
         }
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "query": p.query_text,
+                "total": total,
+                "offset": offset,
+                "returned": returned,
+                "results": enriched,
+            }),
+        ))
     }
 
     #[tool(
@@ -1434,12 +1438,41 @@ impl SeleneTools {
         let p = &params.0;
 
         if p.k <= 0 {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: "k must be a positive integer".into(),
-                data: None,
-            });
+            return Err(op_err(ops::OpError::InvalidRequest(
+                "k must be a positive integer".into(),
+            )));
         }
+
+        // Pre-flight: confirm the node exists and the named property is a Vector.
+        // Without this check the underlying CALL silently returns zero results
+        // for any non-vector property, leaving the caller guessing.
+        let node_id = selene_core::entity::NodeId(p.node_id);
+        let prop_check = self.state.graph.read(|g| {
+            let Some(node) = g.get_node(node_id) else {
+                return Err(ops::OpError::NotFound {
+                    entity: "node",
+                    id: p.node_id,
+                });
+            };
+            match node.property(&p.property) {
+                None => Err(ops::OpError::InvalidRequest(format!(
+                    "node {} has no property '{}' — populate it with an embedding first \
+                     (e.g. SET n.{} = embed($text) for arbitrary nodes, or enrich_communities \
+                     for __CommunitySummary nodes)",
+                    p.node_id, p.property, p.property
+                ))),
+                Some(selene_core::Value::Vector(_)) => Ok(()),
+                Some(other) => Err(ops::OpError::InvalidRequest(format!(
+                    "property '{}' on node {} is {}, not a vector — overwrite it with an \
+                     embedding via SET n.{} = embed($text) before similarity search",
+                    p.property,
+                    p.node_id,
+                    other.type_name(),
+                    p.property,
+                ))),
+            }
+        });
+        prop_check.map_err(op_err)?;
 
         let query = "CALL graph.similarNodes($nodeId, $prop, $k) \
                      YIELD node_id, score RETURN node_id, score";
@@ -1460,12 +1493,25 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+        let data_text = result.data_json.clone().unwrap_or_else(|| "[]".to_string());
         let text = format!(
-            "Similar to node {}: {} results\n{data}",
+            "Similar to node {}: {} results\n{data_text}",
             p.node_id, result.row_count
         );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let parsed: serde_json::Value = result
+            .data_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!([]));
+        Ok(structured_text_result(
+            text,
+            serde_json::json!({
+                "node_id": p.node_id,
+                "property": p.property,
+                "row_count": result.row_count,
+                "results": parsed,
+            }),
+        ))
     }
 
     // ── Vector Quantization Stats ────────────────────────────────────
@@ -1507,11 +1553,18 @@ impl SeleneTools {
                  with hnsw_quantize = true under [vector].",
             )]))
         } else {
+            let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
             let text = format!(
                 "Quantization stats ({} index(es)):\n{data}",
                 result.row_count
             );
-            Ok(CallToolResult::success(vec![Content::text(text)]))
+            Ok(structured_text_result(
+                text,
+                serde_json::json!({
+                    "index_count": result.row_count,
+                    "indexes": parsed,
+                }),
+            ))
         }
     }
 
@@ -1547,7 +1600,7 @@ impl SeleneTools {
             if include_path && let Some(path) = self.containment_path(&auth, node.id) {
                 val["containment_path"] = serde_json::Value::String(path);
             }
-            CallToolResult::success(vec![Content::text(format_json(&val))])
+            structured_result(val)
         };
 
         // Strategy 1: Parse as numeric ID
@@ -1652,21 +1705,17 @@ impl SeleneTools {
             .collect();
 
         if !suggestions.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format_value(
-                serde_json::json!({
-                    "error": "no_exact_match",
-                    "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
-                    "suggestions": suggestions,
-                }),
-            ))]));
+            return Ok(structured_result(serde_json::json!({
+                "error": "no_exact_match",
+                "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
+                "suggestions": suggestions,
+            })));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "error": "not_found",
-                "message": format!("Could not resolve '{}'", p.identifier),
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "error": "not_found",
+            "message": format!("Could not resolve '{}'", p.identifier),
+        })))
     }
 
     #[tool(
@@ -1702,14 +1751,12 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "node": node,
-                "outgoing": edge_result.outgoing,
-                "incoming": edge_result.incoming,
-                "total_edges": edge_result.total,
-            }),
-        ))]))
+        Ok(structured_result(serde_json::json!({
+            "node": node,
+            "outgoing": edge_result.outgoing,
+            "incoming": edge_result.incoming,
+            "total_edges": edge_result.total,
+        })))
     }
 
     // ── RDF/SPARQL ────────────────────────────────────────────────────
@@ -1738,7 +1785,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     #[tool(
@@ -1770,7 +1818,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     // ── Text2GQL Toolkit ─────────────────────────────────────────────
@@ -1817,7 +1866,8 @@ impl SeleneTools {
         )
         .map_err(op_err)?;
         let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        Ok(CallToolResult::success(vec![Content::text(data)]))
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        Ok(structured_result(parsed))
     }
 
     #[tool(
@@ -1836,15 +1886,10 @@ impl SeleneTools {
     ) -> Result<CallToolResult, McpError> {
         let query = &params.0.query;
         match selene_gql::parse_statement(query) {
-            Ok(_) => {
-                let result = serde_json::json!({
-                    "valid": true,
-                    "query": query,
-                });
-                Ok(CallToolResult::success(vec![Content::text(format_json(
-                    &result,
-                ))]))
-            }
+            Ok(_) => Ok(structured_result(serde_json::json!({
+                "valid": true,
+                "query": query,
+            }))),
             Err(e) => {
                 let message = e.to_string();
                 let suggestion = parse_error_suggestion(&message);
@@ -1868,9 +1913,7 @@ impl SeleneTools {
                     result["repairs"] = serde_json::json!(repairs);
                 }
 
-                Ok(CallToolResult::success(vec![Content::text(format_json(
-                    &result,
-                ))]))
+                Ok(structured_result(result))
             }
         }
     }
@@ -1989,180 +2032,6 @@ impl SeleneTools {
         memory::configure_memory_impl(self, params.0).await
     }
 
-    // ── Training Data ───────────────────────────────────────────────
-
-    #[tool(
-        name = "log_trace",
-        description = "Log a tool interaction trace for training data collection. \
-        Called by the agent orchestrator after each tool call, not by the agent itself. \
-        Stores as a __Trace node for later export via export_traces. \
-        Optional fields: thinking (reasoning chain), user_query (prompt that triggered \
-        the call), about_node_ids (entity node IDs to link via :about edges).",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn log_trace(
-        &self,
-        params: Parameters<LogTraceParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_trace_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "export_traces",
-        description = "Export interaction traces as JSONL for fine-tuning. \
-        Filter by session, tool name, feedback type, model, or date range. \
-        Output format compatible with TRL, Axolotl, and Unsloth pipelines.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn export_traces(
-        &self,
-        params: Parameters<ExportTracesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::export_traces_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "log_session",
-        description = "Log session-level metadata for training data context. \
-        Called once per session before log_trace calls. Creates or updates a \
-        __TraceSession node with building, operator, weather, and system prompt \
-        context. Idempotent: calling again for the same session_id updates the metadata.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn log_session(
-        &self,
-        params: Parameters<LogSessionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_session_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "log_outcome",
-        description = "Record whether a trace session achieved its desired outcome. \
-        Called after the session completes. Creates or updates a __TraceOutcome node. \
-        Enables quality scoring: traces from successful sessions are high-confidence \
-        training examples. Idempotent per session_id.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn log_outcome(
-        &self,
-        params: Parameters<LogOutcomeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        traces::log_outcome_impl(self, params.0).await
-    }
-
-    // ── Action Proposals ────────────────────────────────────────────
-
-    #[tool(
-        name = "propose_action",
-        description = "Propose an action for human review. Creates a __Proposal node with \
-        pending status. The proposal includes a GQL query to execute if approved. \
-        Proposals auto-expire after 24 hours.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn propose_action(
-        &self,
-        params: Parameters<ProposeActionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::propose_action_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "list_proposals",
-        description = "List action proposals, optionally filtered by status \
-        (pending, approved, executed, rejected, expired).",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn list_proposals(
-        &self,
-        params: Parameters<ListProposalsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::list_proposals_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "approve_proposal",
-        description = "Approve a pending proposal. Only non-agent principals can approve. \
-        Changes status from pending to approved.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn approve_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::approve_proposal_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "reject_proposal",
-        description = "Reject a pending proposal with an optional reason.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn reject_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::reject_proposal_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "execute_proposal",
-        description = "Execute an approved proposal. Runs the stored GQL query and \
-        changes status to executed.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn execute_proposal(
-        &self,
-        params: Parameters<ProposalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        proposals::execute_proposal_impl(self, params.0).await
-    }
-
     // ── Principal Management ────────────────────────────────────────
 
     #[tool(
@@ -2277,45 +2146,51 @@ impl SeleneTools {
         principals::rotate_credential_impl(self, params.0).await
     }
 
-    // ── Context Bridge: multi-agent coordination ────────────────────
+    // ── API-key Management ─────────────────────────────────────────────
 
     #[tool(
-        name = "register_agent",
-        description = "Register or update an agent session for multi-agent coordination. Creates an __AgentSession node with presence info. Optionally provide structured capabilities: supported_tools, domain_expertise, model_family, context_window. Returns active Convention nodes for the project. Discover peers via list_agents or find_capable_agent.",
+        name = "create_api_key",
+        description = "Issue a new bearer API key for a principal. \
+        Returns the key metadata plus a one-time plaintext token (format: selk_<prefix>.<secret>). \
+        The token is never recoverable afterwards — only its argon2id hash is persisted. \
+        Admin-only.",
         annotations(
             read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_api_key(
+        &self,
+        params: Parameters<CreateApiKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        api_keys::create_api_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_api_keys",
+        description = "List issued API keys with metadata (id, name, identity, prefix, \
+        created_at, expires_at, scopes, enabled). Hashes are never returned. \
+        Optionally filter by identity. Admin-only.",
+        annotations(
+            read_only_hint = true,
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
         )
     )]
-    async fn register_agent(
+    async fn list_api_keys(
         &self,
-        params: Parameters<RegisterAgentParams>,
+        params: Parameters<ListApiKeysParams>,
     ) -> Result<CallToolResult, McpError> {
-        bridge::register_agent_impl(self, params.0).await
+        api_keys::list_api_keys_impl(self, params.0).await
     }
 
     #[tool(
-        name = "heartbeat",
-        description = "Update agent session liveness. Must be called periodically (recommended: every 60s) to prevent the session from being marked stale (10 min threshold). Set status to 'working_locally' during extended local work to pause stale detection (safety-reaped after 30 min). Optionally update working_on and files_touched.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn heartbeat(
-        &self,
-        params: Parameters<HeartbeatParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::heartbeat_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "deregister_agent",
-        description = "Deregister an agent session and release all its claimed intents. Call on clean shutdown. Sessions not deregistered are reaped after heartbeat timeout.",
+        name = "revoke_api_key",
+        description = "Disable an API key by node ID. The key row is preserved for audit, \
+        but verify_api_key will reject it. Idempotent. Admin-only.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2323,16 +2198,59 @@ impl SeleneTools {
             open_world_hint = false
         )
     )]
-    async fn deregister_agent(
+    async fn revoke_api_key(
         &self,
-        params: Parameters<DeregisterAgentParams>,
+        params: Parameters<RevokeApiKeyParams>,
     ) -> Result<CallToolResult, McpError> {
-        bridge::deregister_agent_impl(self, params.0).await
+        api_keys::revoke_api_key_impl(self, params.0).await
     }
 
     #[tool(
-        name = "list_agents",
-        description = "List active agent sessions. Filter by project or status. Use to discover peers before starting work and to check who is working on what.",
+        name = "rotate_signing_key",
+        description = "Rotate the OAuth access-token signing key. Generates a new 32-byte \
+        HMAC-SHA256 secret, persists it in the encrypted vault, and installs it on the \
+        running token service. The previous key is retained in an in-memory retired ring \
+        for `retire_for_secs` (default 86400) so access tokens signed under it remain \
+        valid during the grace period. Refresh tokens are unaffected. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rotate_signing_key(
+        &self,
+        params: Parameters<RotateSigningKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        signing_key::rotate_signing_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "revoke_token",
+        description = "Revoke an OAuth access token by its raw JWT string. Adds the token's \
+        `jti` to the in-memory deny-list until its original expiry, after which the entry is \
+        pruned since the token would be invalid anyway. Use to force-logout a principal or \
+        invalidate a leaked token. Refresh tokens are unaffected — pair with \
+        `rotate_signing_key` if you also need to cut in-flight refresh flows. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn revoke_token(
+        &self,
+        params: Parameters<RevokeTokenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tokens::revoke_token_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_revoked_tokens",
+        description = "List current OAuth access-token deny-list entries (jti + original \
+        expiry). Expired entries are filtered out. Admin-only.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2340,275 +2258,27 @@ impl SeleneTools {
             open_world_hint = false
         )
     )]
-    async fn list_agents(
-        &self,
-        params: Parameters<ListAgentsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::list_agents_impl(self, params.0).await
+    async fn list_revoked_tokens(&self) -> Result<CallToolResult, McpError> {
+        tokens::list_revoked_tokens_impl(self).await
     }
 
     #[tool(
-        name = "share_context",
-        description = "Publish shared context for other agents. Types: discovery (learned something), decision (made a choice), warning (potential issue), request (need help), blocker (blocked on something). Scoped to a project with optional fine-grained targets. Optionally link to graph entities via about_node_ids. Supports confidence (0.0–1.0) for epistemic annotation, response_requested + response_deadline_ms for escalation tracking, and investigation_id to thread context into an investigation session.",
+        name = "unrevoke_token",
+        description = "Remove a jti from the access-token deny-list, reinstating any \
+        still-unexpired token that carried it. Idempotent — returns `removed=false` if the \
+        jti was not on the list. Admin-only.",
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn share_context(
-        &self,
-        params: Parameters<ShareContextParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::share_context_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "get_shared_context",
-        description = "Query shared context from other agents. Filter by scope (project), context_type, recency (since_ms), target_prefix, investigation_id, or author. Returns confidence, response tracking status, and investigation links when present. By default excludes expired context; set include_expired=true to see all.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
     )]
-    async fn get_shared_context(
+    async fn unrevoke_token(
         &self,
-        params: Parameters<GetSharedContextParams>,
+        params: Parameters<UnrevokeTokenParams>,
     ) -> Result<CallToolResult, McpError> {
-        bridge::get_shared_context_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "claim_intent",
-        description = "Declare intent to modify targets (file paths, crate names, or node:<id> for graph nodes). Three levels: advisory (informational), exclusive (warns others away), locked (blocks others). Checks for conflicts before claiming. Set cascade=true with node:<id> targets to auto-claim descendant nodes via :contains edges. Linked to agent session via claims edge.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn claim_intent(
-        &self,
-        params: Parameters<ClaimIntentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::claim_intent_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "release_intent",
-        description = "Release a claimed intent. Provide intent_id to release a specific intent, or omit to release all intents for the agent. Automatically called by deregister_agent.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn release_intent(
-        &self,
-        params: Parameters<ReleaseIntentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::release_intent_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "check_conflicts",
-        description = "Check for conflicting intents on target paths before starting work. Returns any active exclusive or locked claims that overlap with the provided targets (including cascaded expanded_targets). Does not expand the caller's targets — use the same targets you would pass to claim_intent. Does not create any state — read-only check.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn check_conflicts(
-        &self,
-        params: Parameters<CheckConflictsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::check_conflicts_impl(self, params.0).await
-    }
-
-    // ── Investigation Sessions ──────────────────────────────────────
-
-    #[tool(
-        name = "start_investigation",
-        description = "Start a new investigation thread. Creates an __Investigation node that groups \
-        related shared context entries into a traceable chain. Use investigation_id in subsequent \
-        share_context calls to link findings. Returns the generated investigation_id.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn start_investigation(
-        &self,
-        params: Parameters<StartInvestigationParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::start_investigation_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "close_investigation",
-        description = "Close an open investigation with a conclusion. Sets status to 'closed' and records \
-        the conclusion and optional outcome classification (e.g., 'resolved', 'escalated', 'inconclusive'). \
-        Idempotent per investigation_id.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn close_investigation(
-        &self,
-        params: Parameters<CloseInvestigationParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::close_investigation_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "list_investigations",
-        description = "List investigation threads. Filter by scope (project), status (open/closed), or \
-        author. Returns investigation metadata including subject, status, and conclusion.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn list_investigations(
-        &self,
-        params: Parameters<ListInvestigationsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::list_investigations_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "find_capable_agent",
-        description = "Find agents matching required capabilities. Searches structured fields (supported_tools, domain_expertise) and free-text capabilities. Returns agents ranked by match score. At least one of required_tools, required_expertise, or query must be provided.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn find_capable_agent(
-        &self,
-        params: Parameters<FindCapableAgentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::find_capable_agent_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "agent_stats",
-        description = "Get performance metrics for an agent based on task history. Returns tasks_completed, tasks_failed, success_rate (percentage), avg_duration_ms, and recent_tasks (last 5). Computed from __Task nodes. Use for evaluating agent reliability before delegation.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn agent_stats(
-        &self,
-        params: Parameters<AgentStatsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::agent_stats_impl(self, params.0).await
-    }
-
-    // ── Task Delegation ───────────────────────────────────────────────
-
-    #[tool(
-        name = "propose_task",
-        description = "Propose a task for another agent to execute. Creates a __Task node in 'proposed' status with a :proposed edge from the proposer's session. Optionally target a specific agent via assignee_agent. Include required_tools for capability-based matching.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn propose_task(
-        &self,
-        params: Parameters<ProposeTaskParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::propose_task_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "accept_task",
-        description = "Accept a proposed task. Sets status to 'accepted' and creates an :assigned edge. Only tasks in 'proposed' status can be accepted.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn accept_task(
-        &self,
-        params: Parameters<AcceptTaskParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::accept_task_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "reject_task",
-        description = "Reject a proposed task with an optional reason. Only tasks in 'proposed' status can be rejected.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn reject_task(
-        &self,
-        params: Parameters<RejectTaskParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::reject_task_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "complete_task",
-        description = "Mark a task as completed or failed. Only the assigned agent can complete a task. Provide output_data for results or failure_reason when success is false.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn complete_task(
-        &self,
-        params: Parameters<CompleteTaskParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::complete_task_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "list_tasks",
-        description = "List tasks with optional filters by project, status, proposer, or assignee. Returns tasks ordered by most recently updated. Default limit: 50.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn list_tasks(
-        &self,
-        params: Parameters<ListTasksParams>,
-    ) -> Result<CallToolResult, McpError> {
-        bridge::list_tasks_impl(self, params.0).await
+        tokens::unrevoke_token_impl(self, params.0).await
     }
 }
 

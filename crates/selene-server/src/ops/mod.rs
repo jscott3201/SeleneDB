@@ -4,6 +4,7 @@
 //! Each operation takes typed Rust inputs, checks authorization, performs
 //! the graph/TS/query operation, and returns typed results.
 
+pub mod api_keys;
 pub mod csv_io;
 pub mod edges;
 pub mod gql;
@@ -17,6 +18,8 @@ pub mod nodes;
 pub mod principals;
 pub mod reactflow;
 pub mod schema;
+pub mod signing_key;
+pub mod tokens;
 pub mod ts;
 
 use std::time::Instant;
@@ -364,5 +367,6 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Vector(v) => {
             serde_json::Value::Array(v.iter().map(|f| serde_json::json!(f)).collect())
         }
+        Value::Geometry(g) => g.to_geojson_value(),
     }
 }

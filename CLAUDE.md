@@ -94,7 +94,7 @@ Optimizer rule tests: construct `ExecutionPlan` manually, call `rule.rewrite(pla
 | Compression | zstd | selene-wire, selene-persist, selene-ts |
 | QUIC | quinn 0.11 | selene-server, selene-client |
 | HTTP | axum 0.8 | selene-server |
-| MCP | rmcp 1.3 | selene-server |
+| MCP | rmcp 1.4 | selene-server |
 | Auth | cedar-policy 4 | selene-server |
 | Vault | chacha20poly1305 0.10 | selene-server |
 | Async | tokio 1 | throughout |
@@ -106,7 +106,7 @@ Optimizer rule tests: construct `ExecutionPlan` manually, call `rule.rewrite(pla
 
 ## Benchmarks
 
-7 crates, ~100 benchmarks. Run sequentially:
+8 crates, ~110 benchmarks. Run sequentially:
 
 ```bash
 cargo bench -p selene-gql
@@ -116,6 +116,7 @@ cargo bench -p selene-persist
 cargo bench -p selene-ts
 cargo bench -p selene-wire
 cargo bench -p selene-rdf --all-features
+cargo bench -p selene-server --features selene-server/dev-tls
 ```
 
 Stress profile: `SELENE_BENCH_PROFILE=stress SELENE_MAX_BINDINGS=500000 cargo bench -p selene-gql`

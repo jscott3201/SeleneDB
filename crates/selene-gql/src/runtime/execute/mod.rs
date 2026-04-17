@@ -240,6 +240,7 @@ fn execute_mut(
             properties,
             or_replace,
             if_not_exists,
+            validation_mode,
         } => ddl::create_node_type(
             shared,
             label,
@@ -247,6 +248,7 @@ fn execute_mut(
             properties,
             *or_replace,
             *if_not_exists,
+            *validation_mode,
         ),
         GqlStatement::DropNodeType { label, if_exists } => {
             ddl::drop_node_type(shared, label, *if_exists)
@@ -259,6 +261,7 @@ fn execute_mut(
             properties,
             or_replace,
             if_not_exists,
+            validation_mode,
         } => ddl::create_edge_type(
             shared,
             label,
@@ -267,6 +270,7 @@ fn execute_mut(
             properties,
             *or_replace,
             *if_not_exists,
+            *validation_mode,
         ),
         GqlStatement::DropEdgeType { label, if_exists } => {
             ddl::drop_edge_type(shared, label, *if_exists)
@@ -648,6 +652,145 @@ fn execute_plan_with_csr(
     )
 }
 
+/// Try the count-only short-circuit. Returns `Ok(Some(result))` when the plan
+/// is eligible (`plan.count_only`) and the count could be computed without
+/// materializing bindings; `Ok(None)` means fall through to normal execution.
+fn try_count_only_shortcut(
+    plan: &ExecutionPlan,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    ctx: &EvalContext<'_>,
+) -> Result<Option<GqlResult>, GqlError> {
+    if !plan.count_only {
+        return Ok(None);
+    }
+    let Some(count) = execute_count_only(plan, graph, scope, ctx)? else {
+        return Ok(None);
+    };
+    let count_alias = plan
+        .display_schema
+        .fields()
+        .first()
+        .map_or("count(*)", |f| f.name().as_str());
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new(count_alias, arrow::datatypes::DataType::Int64, false),
+    ]));
+    let array = arrow::array::Int64Array::from(vec![count as i64]);
+    let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
+        .map_err(|e| GqlError::internal(format!("Arrow batch: {e}")))?;
+    Ok(Some(GqlResult {
+        schema,
+        batches: vec![batch],
+        status: GqlStatus::success(1),
+        mutations: MutationStats::default(),
+        profile: None,
+        changes: vec![],
+    }))
+}
+
+/// Partition the pipeline around mutations: FILTER ops before RETURN apply
+/// before mutations execute (so mutations see the filtered row set); everything
+/// else applies after. When the plan has no mutations, all ops go post-mutation.
+fn partition_pipeline(plan: &ExecutionPlan) -> (Vec<&PipelineOp>, Vec<&PipelineOp>) {
+    let mut pre = Vec::new();
+    let mut post = Vec::new();
+    let mut seen_return = false;
+    for op in &plan.pipeline {
+        if matches!(op, PipelineOp::Return { .. }) {
+            seen_return = true;
+        }
+        if !plan.mutations.is_empty() && !seen_return {
+            match op {
+                PipelineOp::Filter { .. } => pre.push(op),
+                _ => post.push(op),
+            }
+        } else {
+            post.push(op);
+        }
+    }
+    (pre, post)
+}
+
+/// Apply a streaming pipeline op directly to the factorized chunk without
+/// flattening. Handles OFFSET, LIMIT, and simple FILTER (no subqueries).
+/// Returns `Ok(true)` if handled natively; `Ok(false)` if the caller must
+/// flatten and fall through to the flat-chunk path.
+fn apply_factorized_streaming_op(
+    fc: &mut crate::types::factor::FactorizedChunk,
+    op: &PipelineOp,
+    graph: &SeleneGraph,
+    ctx: &EvalContext<'_>,
+) -> Result<bool, GqlError> {
+    match op {
+        PipelineOp::Offset { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
+            let deep = fc.deepest_mut();
+            let phys_len = deep.len;
+            deep.selection.skip(n, phys_len);
+            Ok(true)
+        }
+        PipelineOp::Limit { value } => {
+            let n = value.resolve(ctx.parameters)? as usize;
+            let deep = fc.deepest_mut();
+            let phys_len = deep.len;
+            deep.selection.truncate(n, phys_len);
+            Ok(true)
+        }
+        PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
+            let flat = fc.flatten();
+            let gatherer = crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
+            let active_before: Vec<usize> = {
+                let deep = fc.deepest();
+                deep.selection.active_indices(deep.len).collect()
+            };
+            if let Ok(crate::types::chunk::Column::Bool(arr)) =
+                crate::runtime::vector::eval_vec(predicate, &flat, &gatherer, ctx)
+            {
+                use arrow::array::Array;
+                let mut new_active = Vec::with_capacity(active_before.len());
+                for (pos, &phys_idx) in active_before.iter().enumerate() {
+                    if !arr.is_null(pos) && arr.value(pos) {
+                        new_active.push(phys_idx as u32);
+                    }
+                }
+                let deep = fc.deepest_mut();
+                deep.selection = crate::types::chunk::SelectionVector::from_indices(new_active);
+            } else {
+                let mut new_active = Vec::with_capacity(active_before.len());
+                for (pos, &phys_idx) in active_before.iter().enumerate() {
+                    let row = flat.row_view(pos);
+                    let pass = crate::runtime::eval::eval_predicate_row(predicate, &row, ctx)
+                        .is_ok_and(|t| t.is_true());
+                    if pass {
+                        new_active.push(phys_idx as u32);
+                    }
+                }
+                let deep = fc.deepest_mut();
+                deep.selection = crate::types::chunk::SelectionVector::from_indices(new_active);
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Take whichever chunk representation is currently active, flattening
+/// factorized state into a flat `DataChunk` if needed. Both slots end up
+/// `None` after this call. Returns a `DataChunk::unit()` only in the
+/// theoretically-unreachable case where neither slot was populated.
+fn ensure_flat(
+    chunk: &mut Option<DataChunk>,
+    factorized: &mut Option<crate::types::factor::FactorizedChunk>,
+) -> DataChunk {
+    if let Some(c) = chunk.take() {
+        c
+    } else if let Some(fc) = factorized.take() {
+        fc.flatten()
+    } else {
+        DataChunk::unit()
+    }
+}
+
 /// Core plan execution. All variants delegate here.
 #[allow(clippy::too_many_arguments)]
 fn execute_plan_inner(
@@ -660,7 +803,6 @@ fn execute_plan_inner(
     options: &crate::GqlOptions,
     csr: Option<&selene_graph::CsrAdjacency>,
 ) -> Result<GqlResult, GqlError> {
-    // Create evaluation context with optional parameters
     let registry = FunctionRegistry::builtins();
     let mut ctx = EvalContext::new(graph, registry)
         .with_options(options.clone())
@@ -669,346 +811,404 @@ fn execute_plan_inner(
         ctx = ctx.with_parameters(params);
     }
 
-    // ── Count-only short-circuit ──
-    // Skip all binding materialization. Return a single row with the count.
-    if plan.count_only
-        && let Some(count) = execute_count_only(plan, graph, scope, &ctx)?
-    {
-        let count_alias = plan
-            .display_schema
-            .fields()
-            .first()
-            .map_or("count(*)", |f| f.name().as_str());
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new(count_alias, arrow::datatypes::DataType::Int64, false),
-        ]));
-        let array = arrow::array::Int64Array::from(vec![count as i64]);
-        let batch =
-            arrow::record_batch::RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
-                .map_err(|e| GqlError::internal(format!("Arrow batch: {e}")))?;
-        return Ok(GqlResult {
-            schema,
-            batches: vec![batch],
-            status: GqlStatus::success(1),
-            mutations: MutationStats::default(),
-            profile: None,
-            changes: vec![],
-        });
+    if let Some(result) = try_count_only_shortcut(plan, graph, scope, &ctx)? {
+        return Ok(result);
     }
-    // Fall through to normal execution if short-circuit not applicable
 
-    // Detect simple LIMIT pushdown: single LabelScan + pipeline ends with LIMIT
+    let (mut chunk, mut factorized) = execute_pattern_phase(plan, graph, scope, csr, &ctx)?;
+
+    enforce_memory_limits(chunk.as_ref(), factorized.as_ref())?;
+
+    // Pre-mutation FILTERs run before mutations execute so the mutation operates
+    // on the filtered row set; everything else runs after.
+    let (pre_mutation_pipeline, post_mutation_pipeline) = partition_pipeline(plan);
+
+    apply_pre_mutation_pipeline(&pre_mutation_pipeline, &mut chunk, &mut factorized, &ctx)?;
+
+    let mutation_stats = apply_mutation_counts(&plan.mutations, &mut chunk, &mut factorized);
+
+    apply_post_mutation_pipeline(
+        &post_mutation_pipeline,
+        &mut chunk,
+        &mut factorized,
+        graph,
+        scope,
+        hot_tier,
+        procedures,
+        &ctx,
+    )?;
+
+    let final_chunk = ensure_flat(&mut chunk, &mut factorized);
+    materialize_result(plan, final_chunk, mutation_stats)
+}
+
+/// Drive the post-mutation pipeline to completion. Each op is first offered
+/// to the factorized-native path; ops it can't handle (RETURN, Sort,
+/// GroupBy, etc.) trigger a flatten and fall through to the flat path.
+///
+/// The flat path delegates each op to a per-shape helper:
+///   * `try_apply_return_topk_fusion` — fused RETURN+TopK with lazy projection
+///   * `apply_call_op`, `apply_subquery_op`, `apply_nested_match_op`, `apply_view_scan_op` — ops that need extra context (graph, hot tier, procedures, scope)
+///   * `apply_streaming_fused_run` — Let/Filter/Offset/Limit runs collected and fused
+///   * default: `stages::execute_pipeline_op_chunk` (Sort, RETURN, With, TopK, For)
+#[allow(clippy::too_many_arguments)]
+fn apply_post_mutation_pipeline(
+    post_mutation_pipeline: &[&PipelineOp],
+    chunk: &mut Option<DataChunk>,
+    factorized: &mut Option<crate::types::factor::FactorizedChunk>,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    hot_tier: Option<&selene_ts::HotTier>,
+    procedures: Option<&ProcedureRegistry>,
+    ctx: &EvalContext,
+) -> Result<(), GqlError> {
+    let mut op_idx = 0;
+    while op_idx < post_mutation_pipeline.len() {
+        let op = post_mutation_pipeline[op_idx];
+
+        // Factorized-native path: try handling the op without flattening.
+        if let Some(fc) = factorized.as_mut() {
+            if apply_factorized_streaming_op(fc, op, graph, ctx)? {
+                op_idx += 1;
+                continue;
+            }
+            let c = ensure_flat(chunk, factorized);
+            *chunk = Some(c);
+        }
+
+        // Flat path: take the chunk (factorized was flattened above if active).
+        let c = chunk.take().unwrap_or_else(DataChunk::unit);
+
+        // RETURN immediately followed by TopK fuses into a single lazy-projection pass.
+        // The helper consumes `c` and either returns the fused result or hands `c` back
+        // unchanged, avoiding any Option round-trip on the no-fuse path.
+        let c = match try_apply_return_topk_fusion(post_mutation_pipeline, op_idx, op, c, ctx)? {
+            FusionOutcome::Fused { result, advance } => {
+                *chunk = Some(result);
+                op_idx += advance;
+                continue;
+            }
+            FusionOutcome::NotFused(c) => c,
+        };
+
+        match op {
+            PipelineOp::Call { procedure: call } => {
+                *chunk = Some(apply_call_op(
+                    c, call, graph, scope, hot_tier, procedures, ctx,
+                )?);
+            }
+            PipelineOp::Subquery { plan: sub_plan } => {
+                *chunk = Some(apply_subquery_op(
+                    c, sub_plan, graph, scope, hot_tier, procedures, ctx,
+                )?);
+            }
+            PipelineOp::NestedMatch {
+                pattern_ops: nested_ops,
+                where_filter,
+            } => {
+                *chunk = Some(apply_nested_match_op(
+                    c,
+                    nested_ops,
+                    where_filter.as_ref(),
+                    graph,
+                    scope,
+                    ctx,
+                )?);
+            }
+            PipelineOp::ViewScan { .. } => {
+                *chunk = Some(apply_view_scan_op(c, op, ctx)?);
+            }
+            PipelineOp::Let { .. }
+            | PipelineOp::Filter { .. }
+            | PipelineOp::Offset { .. }
+            | PipelineOp::Limit { .. } => {
+                let consumed =
+                    apply_streaming_fused_run(c, post_mutation_pipeline, op_idx, chunk, ctx)?;
+                op_idx += consumed;
+                continue;
+            }
+            _ => {
+                *chunk = Some(stages::execute_pipeline_op_chunk(op, c, ctx)?);
+            }
+        }
+        op_idx += 1;
+    }
+    Ok(())
+}
+
+/// Detect and apply the fused RETURN+TopK shortcut: a RETURN immediately
+/// followed by a TopK can be evaluated in a single lazy-projection pass that
+/// avoids materializing the full intermediate result.
+///
+/// The helper takes ownership of the input `DataChunk` and either returns
+/// the fused result (with the number of pipeline ops consumed) or hands the
+/// input back unchanged. This avoids any `Option<DataChunk>` round-trip on
+/// the no-fuse path, which dominates the hot loop.
+fn try_apply_return_topk_fusion(
+    pipeline: &[&PipelineOp],
+    op_idx: usize,
+    op: &PipelineOp,
+    c: DataChunk,
+    ctx: &EvalContext,
+) -> Result<FusionOutcome, GqlError> {
+    let PipelineOp::Return {
+        projections,
+        group_by,
+        distinct,
+        having,
+        all,
+    } = op
+    else {
+        return Ok(FusionOutcome::NotFused(c));
+    };
+    let next_is_topk =
+        op_idx + 1 < pipeline.len() && matches!(pipeline[op_idx + 1], PipelineOp::TopK { .. });
+    let fusable = !*distinct && !*all && group_by.is_empty() && having.is_none() && next_is_topk;
+    if !fusable {
+        return Ok(FusionOutcome::NotFused(c));
+    }
+    let PipelineOp::TopK { terms, limit } = &pipeline[op_idx + 1] else {
+        return Ok(FusionOutcome::NotFused(c));
+    };
+    let k = limit.resolve(ctx.parameters)?;
+    let bindings = c.to_bindings();
+    let result = stages::execute_return_topk(bindings, projections, terms, k, ctx)?;
+    Ok(FusionOutcome::Fused {
+        result: join::bindings_to_chunk_generic(&result),
+        advance: 2,
+    })
+}
+
+/// Result of attempting RETURN+TopK fusion. `Fused` means the fused pass
+/// succeeded; `NotFused` returns the original input chunk so the caller can
+/// dispatch normally without an `Option` round-trip.
+enum FusionOutcome {
+    Fused { result: DataChunk, advance: usize },
+    NotFused(DataChunk),
+}
+
+/// CALL needs the procedure registry, hot tier, and scope.
+#[allow(clippy::too_many_arguments)]
+fn apply_call_op(
+    c: DataChunk,
+    call: &crate::ast::expr::ProcedureCall,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    hot_tier: Option<&selene_ts::HotTier>,
+    procedures: Option<&ProcedureRegistry>,
+    ctx: &EvalContext,
+) -> Result<DataChunk, GqlError> {
+    let bindings = c.to_bindings();
+    let result = execute_call(
+        bindings,
+        call,
+        graph,
+        hot_tier,
+        procedures,
+        scope,
+        Some(ctx),
+    )?;
+    Ok(join::bindings_to_chunk_generic(&result))
+}
+
+/// Subquery executes correlated against each input binding.
+fn apply_subquery_op(
+    c: DataChunk,
+    sub_plan: &ExecutionPlan,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    hot_tier: Option<&selene_ts::HotTier>,
+    procedures: Option<&ProcedureRegistry>,
+    ctx: &EvalContext,
+) -> Result<DataChunk, GqlError> {
+    let bindings = c.to_bindings();
+    let result = execute_subquery(
+        bindings,
+        sub_plan,
+        graph,
+        scope,
+        hot_tier,
+        procedures,
+        Some(ctx),
+    )?;
+    Ok(join::bindings_to_chunk_generic(&result))
+}
+
+/// NestedMatch is a correlated MATCH after a WITH boundary: re-run the
+/// pattern ops once per input binding and union the results.
+fn apply_nested_match_op(
+    c: DataChunk,
+    nested_ops: &[crate::planner::plan::PatternOp],
+    where_filter: Option<&crate::ast::expr::Expr>,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    ctx: &EvalContext,
+) -> Result<DataChunk, GqlError> {
+    let bindings = c.to_bindings();
+    let result = execute_nested_match(bindings, nested_ops, where_filter, graph, scope, Some(ctx))?;
+    Ok(join::bindings_to_chunk_generic(&result))
+}
+
+/// ViewScan reads materialized-view state through the provider hooked into
+/// the eval context.
+fn apply_view_scan_op(
+    c: DataChunk,
+    op: &PipelineOp,
+    ctx: &EvalContext,
+) -> Result<DataChunk, GqlError> {
+    let bindings = c.to_bindings();
+    let result = stages::execute_pipeline_op(op, bindings, ctx)?;
+    Ok(join::bindings_to_chunk_generic(&result))
+}
+
+/// Collect the contiguous streaming ops (Let/Filter/Offset/Limit) starting
+/// at `op_idx` and execute them as a single fused chunk pass. Returns the
+/// number of ops consumed so the caller can advance `op_idx`.
+fn apply_streaming_fused_run(
+    c: DataChunk,
+    pipeline: &[&PipelineOp],
+    op_idx: usize,
+    chunk: &mut Option<DataChunk>,
+    ctx: &EvalContext,
+) -> Result<usize, GqlError> {
+    let stream_start = op_idx;
+    let mut end = op_idx;
+    while end < pipeline.len()
+        && matches!(
+            pipeline[end],
+            PipelineOp::Let { .. }
+                | PipelineOp::Filter { .. }
+                | PipelineOp::Offset { .. }
+                | PipelineOp::Limit { .. }
+        )
+    {
+        end += 1;
+    }
+    let stream_ops = &pipeline[stream_start..end];
+    *chunk = Some(execute_streaming_fused_chunk(c, stream_ops, ctx)?);
+    Ok(end - stream_start)
+}
+
+/// Execute the plan's pattern operations into either a flat `DataChunk` or
+/// a `FactorizedChunk`, detecting LIMIT pushdown into the scan along the
+/// way. Factorized execution is attempted first when enabled and the plan
+/// has no mutations; it stores parent linkage pointers instead of
+/// materializing the full Cartesian product for multi-hop patterns. Falls
+/// back to flat execution if the pattern is not factorizable. The
+/// factorized representation is kept through streaming pipeline ops
+/// (Filter/Offset/Limit) and only flattened when a non-streaming op
+/// (Sort/GroupBy/RETURN/CALL/Subquery/TopK) is reached.
+fn execute_pattern_phase(
+    plan: &ExecutionPlan,
+    graph: &SeleneGraph,
+    scope: Option<&RoaringBitmap>,
+    csr: Option<&selene_graph::CsrAdjacency>,
+    ctx: &EvalContext,
+) -> Result<
+    (
+        Option<DataChunk>,
+        Option<crate::types::factor::FactorizedChunk>,
+    ),
+    GqlError,
+> {
     let scan_limit = detect_scan_limit(&plan.pattern_ops, &plan.pipeline);
 
-    // Pattern matching -> DataChunk or FactorizedChunk
-    // When factorized execution is enabled, try the factorized path first.
-    // It avoids materializing the full Cartesian product for multi-hop
-    // patterns by storing parent linkage pointers instead of replicating
-    // parent columns. Falls back to flat if the pattern is not factorizable.
-    //
-    // A FactorizedChunk is kept through streaming pipeline ops (Filter,
-    // Offset, Limit) and only flattened when a non-streaming op is reached
-    // (Sort, GroupBy, RETURN, CALL, Subquery, TopK).
-    let (mut chunk, mut factorized) = if options.factorized && plan.mutations.is_empty() {
+    if ctx.options.factorized && plan.mutations.is_empty() {
         match pattern::execute_pattern_ops_as_factorized_chunk(
             &plan.pattern_ops,
             graph,
             scope,
             csr,
-            Some(&ctx),
+            Some(ctx),
         ) {
-            Some(Ok(fc)) => (None, Some(fc)),
+            Some(Ok(fc)) => return Ok((None, Some(fc))),
             Some(Err(e)) => return Err(e),
-            None => {
-                let c = execute_pattern_ops_as_chunk_with_ctx(
-                    &plan.pattern_ops,
-                    graph,
-                    scope,
-                    scan_limit,
-                    None,
-                    csr,
-                    &ctx,
-                )?;
-                (Some(c), None)
-            }
-        }
-    } else {
-        let c = execute_pattern_ops_as_chunk_with_ctx(
-            &plan.pattern_ops,
-            graph,
-            scope,
-            scan_limit,
-            None,
-            csr,
-            &ctx,
-        )?;
-        (Some(c), None)
-    };
-
-    // Helper: ensure we have a flat DataChunk (flattening factorized if needed)
-    let ensure_flat = |chunk: &mut Option<DataChunk>,
-                       factorized: &mut Option<crate::types::factor::FactorizedChunk>|
-     -> DataChunk {
-        if let Some(c) = chunk.take() {
-            c
-        } else if let Some(fc) = factorized.take() {
-            fc.flatten()
-        } else {
-            DataChunk::unit() // should not happen
-        }
-    };
-
-    // Check memory limit
-    if let Some(ref fc) = factorized {
-        // Check deepest level count as a proxy (avoid full flatten just for the check)
-        if fc.active_len() > max_bindings() {
-            return Err(GqlError::internal(format!(
-                "query exceeded maximum result size ({} rows)",
-                fc.active_len()
-            )));
+            None => {} // fall through to flat path
         }
     }
-    if let Some(ref c) = chunk {
+
+    let c = execute_pattern_ops_as_chunk_with_ctx(
+        &plan.pattern_ops,
+        graph,
+        scope,
+        scan_limit,
+        None,
+        csr,
+        ctx,
+    )?;
+    Ok((Some(c), None))
+}
+
+/// Apply the pre-mutation portion of the pipeline (currently FILTERs that
+/// must constrain the row set seen by mutations). These ops always force a
+/// flatten because mutations operate on flat bindings; the chunk is then
+/// rebound into `chunk` so the post-mutation loop sees flat state.
+fn apply_pre_mutation_pipeline(
+    pre_mutation_pipeline: &[&PipelineOp],
+    chunk: &mut Option<DataChunk>,
+    factorized: &mut Option<crate::types::factor::FactorizedChunk>,
+    ctx: &EvalContext,
+) -> Result<(), GqlError> {
+    for op in pre_mutation_pipeline {
+        let mut c = ensure_flat(chunk, factorized);
+        c = stages::execute_pipeline_op_chunk(op, c, ctx)?;
+        *chunk = Some(c);
+    }
+    Ok(())
+}
+
+/// Update mutation stats from the row count of the current chunk. Mutations
+/// are counted per-row (one mutation op produces stats proportional to the
+/// number of input rows it ran on); the chunk itself is preserved for
+/// downstream pipeline ops.
+fn apply_mutation_counts(
+    mutations: &[crate::ast::mutation::MutationOp],
+    chunk: &mut Option<DataChunk>,
+    factorized: &mut Option<crate::types::factor::FactorizedChunk>,
+) -> MutationStats {
+    let mut mutation_stats = MutationStats::default();
+    if mutations.is_empty() {
+        return mutation_stats;
+    }
+    let c = ensure_flat(chunk, factorized);
+    let row_count = c.active_len();
+    for mutation in mutations {
+        count_mutation(mutation, row_count, &mut mutation_stats);
+    }
+    *chunk = Some(c);
+    mutation_stats
+}
+
+/// Enforce the per-query row/byte budgets against whichever chunk
+/// representation is currently active. For factorized state we use the
+/// deepest level's active row count as a proxy so we don't have to flatten
+/// just to check the limit.
+fn enforce_memory_limits(
+    chunk: Option<&DataChunk>,
+    factorized: Option<&crate::types::factor::FactorizedChunk>,
+) -> Result<(), GqlError> {
+    if let Some(fc) = factorized
+        && fc.active_len() > max_bindings()
+    {
+        return Err(GqlError::internal(format!(
+            "query exceeded maximum result size ({} rows)",
+            fc.active_len()
+        )));
+    }
+    if let Some(c) = chunk {
         check_chunk_limit(c)?;
     }
+    Ok(())
+}
 
-    // Pipeline stages that come before mutations (FILTER).
-    // Mutations need filtered bindings, not all pattern matches.
-    let mut pre_mutation_pipeline = Vec::new();
-    let mut post_mutation_pipeline = Vec::new();
-    let mut seen_return = false;
-    for op in &plan.pipeline {
-        if matches!(op, PipelineOp::Return { .. }) {
-            seen_return = true;
-        }
-        if !plan.mutations.is_empty() && !seen_return {
-            // Pipeline ops before RETURN apply before mutations
-            match op {
-                PipelineOp::Filter { .. } => pre_mutation_pipeline.push(op),
-                _ => post_mutation_pipeline.push(op),
-            }
-        } else {
-            post_mutation_pipeline.push(op);
-        }
-    }
-
-    // Apply pre-mutation filters
-    for op in &pre_mutation_pipeline {
-        // Pre-mutation filters always flatten (mutations need flat bindings)
-        let mut c = ensure_flat(&mut chunk, &mut factorized);
-        c = stages::execute_pipeline_op_chunk(op, c, &ctx)?;
-        chunk = Some(c);
-    }
-
-    // Execute mutations (if any): count using chunk row count directly
-    let mut mutation_stats = MutationStats::default();
-    if !plan.mutations.is_empty() {
-        let c = ensure_flat(&mut chunk, &mut factorized);
-        let row_count = c.active_len();
-        for mutation in &plan.mutations {
-            count_mutation(mutation, row_count, &mut mutation_stats);
-        }
-        chunk = Some(c);
-    }
-
-    // Pipeline processing.
-    // When factorized state is active, Offset/Limit operate directly on
-    // the deepest level's SelectionVector. Filter flattens for eval_vec,
-    // applies the result back. All other ops trigger a flatten.
-    let mut op_idx = 0;
-    while op_idx < post_mutation_pipeline.len() {
-        let op = post_mutation_pipeline[op_idx];
-
-        // Factorized-native path for simple streaming ops
-        if factorized.is_some() {
-            match op {
-                PipelineOp::Offset { value } => {
-                    let n = value.resolve(ctx.parameters)? as usize;
-                    let fc = factorized.as_mut().unwrap();
-                    let deep = fc.deepest_mut();
-                    let phys_len = deep.len;
-                    deep.selection.skip(n, phys_len);
-                    op_idx += 1;
-                    continue;
-                }
-                PipelineOp::Limit { value } => {
-                    let n = value.resolve(ctx.parameters)? as usize;
-                    let fc = factorized.as_mut().unwrap();
-                    let deep = fc.deepest_mut();
-                    let phys_len = deep.len;
-                    deep.selection.truncate(n, phys_len);
-                    op_idx += 1;
-                    continue;
-                }
-                PipelineOp::Filter { predicate } if !contains_subquery_expr(predicate) => {
-                    // Flatten temporarily for eval_vec, apply result back.
-                    // Use the main ctx (which has parameters and scope).
-                    let fc = factorized.as_mut().unwrap();
-                    let flat = fc.flatten();
-                    let gatherer =
-                        crate::runtime::vector::gather::GraphPropertyGatherer::new(graph);
-
-                    let active_before: Vec<usize> = {
-                        let deep = fc.deepest();
-                        deep.selection.active_indices(deep.len).collect()
-                    };
-
-                    if let Ok(crate::types::chunk::Column::Bool(arr)) =
-                        crate::runtime::vector::eval_vec(predicate, &flat, &gatherer, &ctx)
-                    {
-                        use arrow::array::Array;
-                        let mut new_active = Vec::with_capacity(active_before.len());
-                        for (pos, &phys_idx) in active_before.iter().enumerate() {
-                            if !arr.is_null(pos) && arr.value(pos) {
-                                new_active.push(phys_idx as u32);
-                            }
-                        }
-                        let deep = fc.deepest_mut();
-                        deep.selection =
-                            crate::types::chunk::SelectionVector::from_indices(new_active);
-                    } else {
-                        // Per-row fallback
-                        let mut new_active = Vec::with_capacity(active_before.len());
-                        for (pos, &phys_idx) in active_before.iter().enumerate() {
-                            let row = flat.row_view(pos);
-                            let pass =
-                                crate::runtime::eval::eval_predicate_row(predicate, &row, &ctx)
-                                    .is_ok_and(|t| t.is_true());
-                            if pass {
-                                new_active.push(phys_idx as u32);
-                            }
-                        }
-                        let deep = fc.deepest_mut();
-                        deep.selection =
-                            crate::types::chunk::SelectionVector::from_indices(new_active);
-                    }
-                    op_idx += 1;
-                    continue;
-                }
-                // All other ops: flatten and fall through to flat path
-                _ => {
-                    let c = ensure_flat(&mut chunk, &mut factorized);
-                    chunk = Some(c);
-                }
-            }
-        }
-
-        // Flat path (original logic)
-        let c = chunk.take().unwrap_or_else(|| {
-            // Should not happen: factorized was flattened above
-            DataChunk::unit()
-        });
-
-        match op {
-            // Fused Return+TopK with lazy projection
-            PipelineOp::Return {
-                projections,
-                group_by,
-                distinct,
-                having,
-                all,
-            } if !*distinct
-                && !*all
-                && group_by.is_empty()
-                && having.is_none()
-                && op_idx + 1 < post_mutation_pipeline.len()
-                && matches!(post_mutation_pipeline[op_idx + 1], PipelineOp::TopK { .. }) =>
-            {
-                if let PipelineOp::TopK { terms, limit } = &post_mutation_pipeline[op_idx + 1] {
-                    let k = limit.resolve(ctx.parameters)?;
-                    let bindings = c.to_bindings();
-                    let result =
-                        stages::execute_return_topk(bindings, projections, terms, k, &ctx)?;
-                    chunk = Some(join::bindings_to_chunk_generic(&result));
-                    op_idx += 2;
-                    continue;
-                }
-                chunk = Some(stages::execute_pipeline_op_chunk(op, c, &ctx)?);
-            }
-            // CALL needs procedure registry and graph context
-            PipelineOp::Call { procedure: call } => {
-                let bindings = c.to_bindings();
-                let result = execute_call(
-                    bindings,
-                    call,
-                    graph,
-                    hot_tier,
-                    procedures,
-                    scope,
-                    Some(&ctx),
-                )?;
-                chunk = Some(join::bindings_to_chunk_generic(&result));
-            }
-            // Subquery needs correlated execution with graph context
-            PipelineOp::Subquery { plan: sub_plan } => {
-                let bindings = c.to_bindings();
-                let result = execute_subquery(
-                    bindings,
-                    sub_plan,
-                    graph,
-                    scope,
-                    hot_tier,
-                    procedures,
-                    Some(&ctx),
-                )?;
-                chunk = Some(join::bindings_to_chunk_generic(&result));
-            }
-            // NestedMatch: correlated MATCH after WITH -- run pattern ops seeded
-            // by each input binding and merge results.
-            PipelineOp::NestedMatch {
-                pattern_ops: nested_ops,
-                where_filter,
-            } => {
-                let bindings = c.to_bindings();
-                let result = execute_nested_match(
-                    bindings,
-                    nested_ops,
-                    where_filter.as_ref(),
-                    graph,
-                    scope,
-                    Some(&ctx),
-                )?;
-                chunk = Some(join::bindings_to_chunk_generic(&result));
-            }
-            // ViewScan: read materialized view state via provider
-            PipelineOp::ViewScan { .. } => {
-                let bindings = c.to_bindings();
-                let result = stages::execute_pipeline_op(op, bindings, &ctx)?;
-                chunk = Some(join::bindings_to_chunk_generic(&result));
-            }
-            // Streaming ops: collect consecutive and apply as chunk ops
-            PipelineOp::Let { .. }
-            | PipelineOp::Filter { .. }
-            | PipelineOp::Offset { .. }
-            | PipelineOp::Limit { .. } => {
-                let stream_start = op_idx;
-                while op_idx < post_mutation_pipeline.len()
-                    && matches!(
-                        post_mutation_pipeline[op_idx],
-                        PipelineOp::Let { .. }
-                            | PipelineOp::Filter { .. }
-                            | PipelineOp::Offset { .. }
-                            | PipelineOp::Limit { .. }
-                    )
-                {
-                    op_idx += 1;
-                }
-                let stream_ops = &post_mutation_pipeline[stream_start..op_idx];
-                chunk = Some(execute_streaming_fused_chunk(c, stream_ops, &ctx)?);
-                continue;
-            }
-            // Sort, RETURN, With, TopK, For
-            _ => {
-                chunk = Some(stages::execute_pipeline_op_chunk(op, c, &ctx)?);
-            }
-        }
-        op_idx += 1;
-    }
-
-    // Final flatten if still factorized (e.g., no pipeline ops)
-    let final_chunk = ensure_flat(&mut chunk, &mut factorized);
-
-    // Build result: direct Arrow materialization from DataChunk.
+/// Final stage of `execute_plan_inner`: turn the post-pipeline `DataChunk`
+/// into Arrow batches keyed by the plan's projected aliases (or the chunk's
+/// own schema, for `RETURN *` / `YIELD *` where projection is runtime-only).
+fn materialize_result(
+    plan: &ExecutionPlan,
+    final_chunk: DataChunk,
+    mutation_stats: MutationStats,
+) -> Result<GqlResult, GqlError> {
     let row_count = final_chunk.active_len();
     let mut aliases: Vec<IStr> = plan
         .output_schema
@@ -1016,9 +1216,6 @@ fn execute_plan_inner(
         .iter()
         .map(|f| IStr::new(f.name()))
         .collect();
-    // RETURN * / YIELD *: output_schema is empty at plan time because the
-    // projected columns are not known until runtime. Fall back to the
-    // chunk's own schema so that all columns are materialized.
     if aliases.is_empty() && final_chunk.column_count() > 0 {
         aliases = final_chunk.schema().iter().map(|(name, _)| *name).collect();
     }

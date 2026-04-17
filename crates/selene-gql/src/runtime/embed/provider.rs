@@ -28,6 +28,20 @@ pub enum EmbeddingTask {
     Raw,
 }
 
+impl EmbeddingTask {
+    /// Task name as a lowercase string for the HTTP embedding API.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retrieval => "retrieval",
+            Self::SemanticSimilarity => "semantic_similarity",
+            Self::Classification => "classification",
+            Self::Clustering => "clustering",
+            Self::Document => "document",
+            Self::Raw => "raw",
+        }
+    }
+}
+
 /// Trait for embedding providers.
 ///
 /// Implementations must be `Send + Sync` for use in the global static cache.

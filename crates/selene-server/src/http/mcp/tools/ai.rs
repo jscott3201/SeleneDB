@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 
+use crate::http::mcp::format::structured_text_result;
 use crate::http::mcp::params::*;
 use crate::http::mcp::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -90,11 +91,18 @@ pub(super) async fn build_communities_impl(
     }
 
     let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
     let text = format!(
-        "Built {community_count} communities covering {total_nodes_covered} nodes in {:.1}s",
-        elapsed.as_secs_f64()
+        "Built {community_count} communities covering {total_nodes_covered} nodes in {elapsed_secs:.1}s",
     );
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "community_count": community_count,
+            "total_nodes_covered": total_nodes_covered,
+            "elapsed_secs": elapsed_secs,
+        }),
+    ))
 }
 
 pub(super) async fn enrich_communities_impl(
@@ -204,16 +212,23 @@ pub(super) async fn enrich_communities_impl(
         }
     }
 
-    let text = if enriched == row_count as u64 {
+    let failed = row_count as u64 - enriched;
+    let text = if failed == 0 {
         format!("Enriched {enriched} community summaries with embeddings.")
     } else {
         format!(
             "Enriched {enriched}/{row_count} community summaries. \
-             {} failed (check server logs for details).",
-            row_count as u64 - enriched
+             {failed} failed (check server logs for details).",
         )
     };
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "enriched": enriched,
+            "total": row_count,
+            "failed": failed,
+        }),
+    ))
 }
 
 pub(super) async fn graphrag_search_impl(
@@ -263,11 +278,19 @@ pub(super) async fn graphrag_search_impl(
     }
 
     let data = result.data_json.unwrap_or_else(|| "[]".to_string());
+    let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
     let text = format!(
         "GraphRAG search for '{}': {} results\n{data}",
         p.query, result.row_count
     );
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "query": p.query,
+            "row_count": result.row_count,
+            "results": parsed,
+        }),
+    ))
 }
 
 // ── Community detection helpers ──────────────────────────────────────

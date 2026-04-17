@@ -18,9 +18,83 @@ use selene_core::{EdgeId, NodeId};
 /// Custom Selene vector datatype URI for dense float vectors.
 const SELENE_VECTOR_DATATYPE: &str = "urn:selene:vector";
 
+/// GeoSPARQL wktLiteral datatype URI — primary geometry encoding on export.
+/// Broadest SPARQL-engine support (Jena, RDF4J, Stardog, GraphDB).
+const WKT_LITERAL_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
+
+/// GeoSPARQL geoJSONLiteral datatype URI. Accepted on import for
+/// round-tripping and interop with web-native producers.
+const GEOJSON_LITERAL_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
+
+/// EPSG CRS URI prefix, used for non-WGS84 codes.
+const GEO_EPSG_CRS_URI_PREFIX: &str = "http://www.opengis.net/def/crs/EPSG/0/";
+
+/// OGC CRS84 URI — WGS84 with explicit (longitude, latitude) axis order.
+/// This is the CRS we want to emit for Selene's `EPSG:4326` geometries,
+/// since our coordinate order is (lng, lat). The EPSG:4326 code itself is
+/// formally (lat, lon) per the EPSG database, so axis-order-aware engines
+/// (Jena ARQ in strict mode) would otherwise flip our coordinates.
+const OGC_CRS84_URI: &str = "http://www.opengis.net/def/crs/OGC/1.3/CRS84";
+
 /// Return a `NamedNode` for the custom `selene:vector` datatype.
 fn selene_vector_datatype() -> NamedNode {
     NamedNode::new_unchecked(SELENE_VECTOR_DATATYPE)
+}
+
+/// Return a `NamedNode` for the GeoSPARQL wktLiteral datatype.
+fn wkt_literal_datatype() -> NamedNode {
+    NamedNode::new_unchecked(WKT_LITERAL_DATATYPE)
+}
+
+/// Return a `NamedNode` for the GeoSPARQL geoJSONLiteral datatype.
+fn geojson_literal_datatype() -> NamedNode {
+    NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE)
+}
+
+/// Dispatch a `GeometryValue` to the appropriate GeoSPARQL literal based on
+/// geometry type and CRS. Three cases:
+///
+/// 1. **Point, any CRS** → `geo:wktLiteral` with the CRS IRI (CRS84 for
+///    EPSG:4326, the plain EPSG URI otherwise). wktLiteral has the broadest
+///    SPARQL-engine support, and our WKT importer can round-trip points back.
+/// 2. **Non-Point, no CRS or CRS84/EPSG:4326** → `geo:geoJSONLiteral`.
+///    Lossless round-trip through our existing GeoJSON importer. GeoJSON
+///    per RFC 7946 is defined in CRS84, which matches our tag.
+/// 3. **Non-Point with non-default CRS** → `geo:wktLiteral` with the CRS
+///    IRI. This currently does not round-trip back (the WKT importer is
+///    POINT-only) but it preserves the CRS hint, which matters more for
+///    consumers than reimport fidelity in the non-WGS84 case.
+fn geometry_to_literal(g: &selene_core::geometry::GeometryValue) -> Literal {
+    let is_point = g.geometry_type() == "Point";
+    let crs_tag = g.crs.as_ref().map(|c| c.as_str());
+    let is_default_crs = matches!(crs_tag, None | Some("EPSG:4326"));
+
+    if is_point || !is_default_crs {
+        Literal::new_typed_literal(format_wkt_literal(g), wkt_literal_datatype())
+    } else {
+        Literal::new_typed_literal(g.to_geojson(), geojson_literal_datatype())
+    }
+}
+
+/// Build the GeoSPARQL wktLiteral lexical form: an optional `<crs-uri>`
+/// prefix followed by the WKT text.
+///
+/// - `EPSG:4326` → `<.../OGC/1.3/CRS84>` so axis-order-aware engines
+///   interpret our (lng, lat) coordinates correctly. Selene stores WGS84
+///   points as (lng, lat); the formal EPSG:4326 definition is (lat, lon).
+///   CRS84 is WGS84 with explicit longitude-first axis order.
+/// - Other `EPSG:<code>` values pass through as `<.../EPSG/0/<code>>`.
+/// - Unset or non-EPSG CRS emits no prefix (spec default is CRS84).
+fn format_wkt_literal(geom: &selene_core::geometry::GeometryValue) -> String {
+    let wkt = geom.to_wkt();
+    match geom.crs.as_ref().map(|c| c.as_str()) {
+        Some("EPSG:4326") => format!("<{OGC_CRS84_URI}> {wkt}"),
+        Some(crs) => match crs.strip_prefix("EPSG:") {
+            Some(code) => format!("<{GEO_EPSG_CRS_URI_PREFIX}{code}> {wkt}"),
+            None => wkt,
+        },
+        None => wkt,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +156,7 @@ pub fn value_to_literal(value: &Value) -> Option<Literal> {
             });
             Some(Literal::new_typed_literal(csv, selene_vector_datatype()))
         }
+        Value::Geometry(g) => Some(geometry_to_literal(g)),
         Value::List(_) => None,
     }
 }
@@ -166,8 +241,67 @@ pub fn literal_to_value(literal: &Literal) -> Value {
         return parse_vector(lex).map_or_else(|| Value::str(lex), Value::Vector);
     }
 
+    // GeoSPARQL literals: WKT is the primary encoding on export, but accept
+    // geoJSONLiteral too for round-trips and interop with web-native producers.
+    if dt.as_str() == WKT_LITERAL_DATATYPE {
+        return parse_wkt_literal(lex).map_or_else(|| Value::str(lex), Value::geometry);
+    }
+    if dt.as_str() == GEOJSON_LITERAL_DATATYPE {
+        return selene_core::geometry::GeometryValue::from_geojson(lex)
+            .map_or_else(|_| Value::str(lex), Value::geometry);
+    }
+
     // Unknown datatype: preserve lexical form as string.
     Value::str(lex)
+}
+
+/// Parse the wktLiteral lexical form: an optional `<crs-uri>` prefix followed
+/// by the WKT text.
+///
+/// Currently limited to the exporter-produced `POINT (x y)` shape. If the lex
+/// starts with `<...>`, we extract and normalize the CRS IRI (OGC CRS84 and
+/// EPSG:4326 both map to Selene's `EPSG:4326` tag). Unsupported WKT forms
+/// return `None`, letting callers preserve the original lexical form as
+/// `Value::str` until a fuller WKT parser is added.
+fn parse_wkt_literal(lex: &str) -> Option<selene_core::geometry::GeometryValue> {
+    let (crs_tag, body) = if let Some(rest) = lex.strip_prefix('<') {
+        let end = rest.find('>')?;
+        let uri = &rest[..end];
+        let body = rest[end + 1..].trim_start();
+        let tag = normalize_crs_uri(uri)?;
+        (Some(tag), body)
+    } else {
+        (None, lex.trim_start())
+    };
+
+    let (x, y) = parse_wkt_point(body)?;
+    let mut g = selene_core::geometry::GeometryValue::point_planar(x, y);
+    g.crs = crs_tag.map(|t| selene_core::interner::IStr::new(&t));
+    Some(g)
+}
+
+/// Map a GeoSPARQL CRS IRI back to Selene's short CRS tag. Both CRS84 and
+/// EPSG:4326 normalize to `EPSG:4326` since Selene treats WGS84 as a single
+/// (lng, lat) system. Returns `None` for URIs we don't recognize.
+fn normalize_crs_uri(uri: &str) -> Option<String> {
+    if uri == OGC_CRS84_URI {
+        return Some("EPSG:4326".to_string());
+    }
+    uri.strip_prefix(GEO_EPSG_CRS_URI_PREFIX)
+        .map(|code| format!("EPSG:{code}"))
+}
+
+/// Parse `POINT (x y)` — exporter's shape. Whitespace-tolerant.
+fn parse_wkt_point(s: &str) -> Option<(f64, f64)> {
+    let rest = s.trim().strip_prefix("POINT")?.trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let mut parts = inner.split_ascii_whitespace();
+    let x: f64 = parts.next()?.parse().ok()?;
+    let y: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, y))
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +880,10 @@ fn value_hash<H: std::hash::Hasher>(v: &Value, state: &mut H) {
                 f.to_bits().hash(state);
             }
         }
+        Value::Geometry(g) => {
+            // GeoJSON serialization is stable for equal geometries.
+            g.to_geojson().hash(state);
+        }
         Value::List(l) => {
             l.len().hash(state);
             for item in l.iter() {
@@ -1193,6 +1331,155 @@ mod tests {
         let lit = Literal::new_typed_literal("!!!invalid!!!", xsd::BASE_64_BINARY);
         let val = literal_to_value(&lit);
         assert!(matches!(val, Value::String(_)));
+    }
+
+    // --- GeoSPARQL geometry literals ---
+
+    #[test]
+    fn geometry_wgs84_point_exports_as_wkt_with_crs84() {
+        let g = selene_core::geometry::GeometryValue::point_wgs84(-74.006, 40.7128);
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(lit.datatype().as_str(), WKT_LITERAL_DATATYPE);
+        // CRS84 (lng, lat) rather than EPSG:4326 (lat, lon) so axis-order-aware
+        // engines read our coordinates correctly.
+        assert_eq!(
+            lit.value(),
+            "<http://www.opengis.net/def/crs/OGC/1.3/CRS84> POINT (-74.006 40.7128)"
+        );
+    }
+
+    #[test]
+    fn non_wgs84_epsg_still_emits_epsg_uri() {
+        let mut g = selene_core::geometry::GeometryValue::point_planar(100.0, 200.0);
+        g.crs = Some(selene_core::interner::IStr::new("EPSG:3857"));
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(
+            lit.value(),
+            "<http://www.opengis.net/def/crs/EPSG/0/3857> POINT (100 200)"
+        );
+    }
+
+    #[test]
+    fn epsg_4326_uri_still_accepted_on_import() {
+        // Producers that emit the EPSG:4326 IRI should still round-trip,
+        // even though our exporter prefers CRS84 now.
+        let lit = Literal::new_typed_literal(
+            "<http://www.opengis.net/def/crs/EPSG/0/4326> POINT (1 2)",
+            NamedNode::new_unchecked(WKT_LITERAL_DATATYPE),
+        );
+        match literal_to_value(&lit) {
+            Value::Geometry(g) => {
+                assert_eq!(g.crs.as_ref().map(|c| c.as_str()), Some("EPSG:4326"));
+            }
+            other => panic!("expected Geometry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn geometry_planar_point_exports_without_crs_prefix() {
+        let g = selene_core::geometry::GeometryValue::point_planar(3.0, 4.0);
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(lit.datatype().as_str(), WKT_LITERAL_DATATYPE);
+        assert_eq!(lit.value(), "POINT (3 4)");
+    }
+
+    #[test]
+    fn wkt_point_round_trips_through_rdf() {
+        let orig = Value::geometry(selene_core::geometry::GeometryValue::point_wgs84(
+            -74.006, 40.7128,
+        ));
+        let lit = value_to_literal(&orig).unwrap();
+        let back = literal_to_value(&lit);
+        match back {
+            Value::Geometry(g) => {
+                assert_eq!(g.geometry_type(), "Point");
+                // Export is CRS84, import normalizes both CRS84 and EPSG:4326
+                // back to Selene's `EPSG:4326` short tag.
+                assert_eq!(g.crs.as_ref().map(|c| c.as_str()), Some("EPSG:4326"));
+            }
+            other => panic!("expected Geometry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn geojson_literal_still_accepted_on_import() {
+        // Producers that only speak geoJSONLiteral should round-trip.
+        let lit = Literal::new_typed_literal(
+            r#"{"type":"Point","coordinates":[1.0,2.0]}"#,
+            NamedNode::new_unchecked(GEOJSON_LITERAL_DATATYPE),
+        );
+        let val = literal_to_value(&lit);
+        assert!(matches!(val, Value::Geometry(_)));
+    }
+
+    #[test]
+    fn polygon_exports_as_geojson_literal_for_lossless_round_trip() {
+        // Until the WKT import parser covers the full 2D set, non-Point
+        // geometries in the default CRS export as geoJSONLiteral so
+        // round-trips don't lose shape. Points use wktLiteral; this test
+        // pins the split.
+        let g = selene_core::geometry::GeometryValue::from_geojson(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}"#,
+        )
+        .unwrap();
+        let lit = value_to_literal(&Value::geometry(g.clone())).unwrap();
+        assert_eq!(lit.datatype().as_str(), GEOJSON_LITERAL_DATATYPE);
+
+        let back = literal_to_value(&lit);
+        let rt = match back {
+            Value::Geometry(rt) => rt,
+            other => panic!("expected Geometry, got {other:?}"),
+        };
+
+        // Re-exporting the round-tripped value must produce a byte-identical
+        // literal — catches axis swaps and coordinate mutation that a coord
+        // count alone would miss.
+        let rt_lit = value_to_literal(&Value::Geometry(rt)).unwrap();
+        assert_eq!(rt_lit.datatype().as_str(), GEOJSON_LITERAL_DATATYPE);
+        assert_eq!(rt_lit.value(), lit.value());
+    }
+
+    #[test]
+    fn non_wgs84_polygon_preserves_crs_via_wkt() {
+        // A non-default CRS (e.g. EPSG:3857) can't ride on geoJSONLiteral
+        // (GeoJSON's spec pins it to CRS84), so we fall through to
+        // wktLiteral to keep the CRS hint. This is lossy on reimport
+        // until the WKT parser grows — CRS fidelity for downstream
+        // consumers wins over round-trip for this rare case.
+        let mut g = selene_core::geometry::GeometryValue::from_geojson(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[1000,0],[1000,1000],[0,1000],[0,0]]]}"#,
+        )
+        .unwrap();
+        g.crs = Some(selene_core::interner::IStr::new("EPSG:3857"));
+        let lit = value_to_literal(&Value::geometry(g)).unwrap();
+        assert_eq!(lit.datatype().as_str(), WKT_LITERAL_DATATYPE);
+        assert!(
+            lit.value()
+                .starts_with("<http://www.opengis.net/def/crs/EPSG/0/3857>")
+        );
+        assert!(lit.value().contains("POLYGON"));
+    }
+
+    #[test]
+    fn malformed_wkt_literal_falls_back_to_string() {
+        let lit = Literal::new_typed_literal(
+            "POINT (not a number)",
+            NamedNode::new_unchecked(WKT_LITERAL_DATATYPE),
+        );
+        let val = literal_to_value(&lit);
+        assert!(matches!(val, Value::String(_)));
+    }
+
+    #[test]
+    fn wkt_literal_without_crs_parses_as_planar() {
+        let lit = Literal::new_typed_literal(
+            "POINT (10 20)",
+            NamedNode::new_unchecked(WKT_LITERAL_DATATYPE),
+        );
+        match literal_to_value(&lit) {
+            Value::Geometry(g) => assert!(g.crs.is_none()),
+            other => panic!("expected Geometry, got {other:?}"),
+        }
     }
 
     // --- parse_xsd_duration_to_nanos (full ISO 8601) ---

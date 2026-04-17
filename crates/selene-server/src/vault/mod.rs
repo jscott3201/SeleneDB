@@ -201,6 +201,86 @@ impl VaultHandle {
         Ok(key.to_vec())
     }
 
+    /// Rotate the OAuth signing key: generate a new 32-byte secret, persist
+    /// it in the `oauth_signing_key` vault_config node (replacing the prior
+    /// value), and return the new key bytes.
+    ///
+    /// If the vault already holds multiple `oauth_signing_key` nodes from an
+    /// earlier partial write, race, or manual edit, this updates the first
+    /// and deletes the rest so `resolve_signing_key` is deterministic after
+    /// the call.
+    ///
+    /// The prior key bytes are *not* persisted in the vault. Callers doing
+    /// an offline/direct vault rotation who need a grace period for
+    /// in-flight access tokens should capture the previous key via
+    /// `resolve_signing_key` before calling this, then feed those bytes to
+    /// whatever token-validation path maintains the retired-key ring.
+    ///
+    /// When rotation is initiated through the running `OAuthTokenService`,
+    /// that service can retain the previous decoding key in memory
+    /// automatically, so callers do not need to pre-read the old key just
+    /// to support the live-service rotation flow.
+    pub fn rotate_signing_key(&self, master: &MasterKey) -> Result<Vec<u8>, VaultError> {
+        use rand::RngExt;
+        let mut key = [0u8; 32];
+        rand::rng().fill(&mut key[..]);
+        let b64 = encode_base64(&key);
+
+        // Collect and reconcile existing nodes inside the write transaction
+        // so the read-then-write sequence is atomic. Doing the scan under a
+        // separate read lock leaves a window in which a concurrent rotation
+        // could insert or delete a duplicate between the scan and the update,
+        // leaving stragglers that `resolve_signing_key` would hit later.
+        let duplicate_count = self
+            .graph
+            .write(|m| {
+                let existing: Vec<selene_core::NodeId> = m
+                    .graph()
+                    .nodes_by_label("vault_config")
+                    .filter(|&nid| {
+                        m.graph().get_node(nid).is_some_and(|n| {
+                            n.property("key")
+                                .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
+                        })
+                    })
+                    .collect();
+                match existing.split_first() {
+                    // No existing node — create one.
+                    None => {
+                        m.create_node(
+                            LabelSet::from_strs(&["vault_config"]),
+                            PropertyMap::from_pairs(vec![
+                                (IStr::new("key"), Value::str("oauth_signing_key")),
+                                (IStr::new("value"), Value::str(&b64)),
+                            ]),
+                        )?;
+                        Ok(0)
+                    }
+                    // One or more — update the first, delete any duplicates.
+                    Some((&keeper, duplicates)) => {
+                        m.set_property(keeper, IStr::new("value"), Value::str(&b64))?;
+                        for &dup in duplicates {
+                            m.delete_node(dup)?;
+                        }
+                        Ok(duplicates.len())
+                    }
+                }
+            })
+            .map(|(dup_count, _changes)| dup_count)
+            .map_err(|e| VaultError::InvalidFormat(format!("signing key rotate failed: {e}")))?;
+
+        if duplicate_count > 0 {
+            tracing::warn!(
+                duplicates = duplicate_count,
+                "found multiple oauth_signing_key vault nodes during rotation; removed duplicates"
+            );
+        }
+
+        self.flush(master)?;
+        tracing::info!("OAuth signing key rotated and persisted to vault");
+        Ok(key.to_vec())
+    }
+
     /// Save the token deny list to the vault graph.
     ///
     /// Replaces all existing `revoked_token` nodes with the current deny list.
@@ -210,31 +290,35 @@ impl VaultHandle {
         master: &MasterKey,
         entries: &[(String, u64)],
     ) -> Result<(), VaultError> {
-        // Remove all existing revoked_token nodes
-        let existing_ids: Vec<selene_core::NodeId> = self
+        // Scan and replace under a single write lock — a separate read-then-write
+        // race could miss nodes added concurrently or double-delete ones already
+        // removed by another deny-list writer.
+        let wrote = self
             .graph
-            .read(|g| g.nodes_by_label("revoked_token").collect());
+            .write(|m| {
+                let existing_ids: Vec<selene_core::NodeId> =
+                    m.graph().nodes_by_label("revoked_token").collect();
+                if existing_ids.is_empty() && entries.is_empty() {
+                    return Ok(false);
+                }
+                for nid in &existing_ids {
+                    m.delete_node(*nid)?;
+                }
+                for (jti, exp) in entries {
+                    m.create_node(
+                        LabelSet::from_strs(&["revoked_token"]),
+                        PropertyMap::from_pairs(vec![
+                            (IStr::new("jti"), Value::str(jti)),
+                            (IStr::new("expires_at"), Value::UInt(*exp)),
+                        ]),
+                    )?;
+                }
+                Ok(true)
+            })
+            .map(|(wrote, _changes)| wrote)
+            .map_err(|e| VaultError::InvalidFormat(format!("vault deny list write failed: {e}")))?;
 
-        if !existing_ids.is_empty() || !entries.is_empty() {
-            self.graph
-                .write(|m| {
-                    for nid in &existing_ids {
-                        m.delete_node(*nid)?;
-                    }
-                    for (jti, exp) in entries {
-                        m.create_node(
-                            LabelSet::from_strs(&["revoked_token"]),
-                            PropertyMap::from_pairs(vec![
-                                (IStr::new("jti"), Value::str(jti)),
-                                (IStr::new("expires_at"), Value::UInt(*exp)),
-                            ]),
-                        )?;
-                    }
-                    Ok(())
-                })
-                .map_err(|e| {
-                    VaultError::InvalidFormat(format!("vault deny list write failed: {e}"))
-                })?;
+        if wrote {
             self.flush(master)?;
         }
 
@@ -601,6 +685,68 @@ mod tests {
             VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
         let key3 = handle2.resolve_signing_key(&master).unwrap();
         assert_eq!(key1, key3);
+    }
+
+    #[test]
+    fn rotate_signing_key_cleans_up_duplicate_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("secure.vault");
+        let master = MasterKey::dev_key();
+
+        let (handle, _) =
+            VaultHandle::open_or_create(vault_path, &master, KeySource::Raw, [0u8; 16]).unwrap();
+
+        // Seed the canonical signing key.
+        handle.resolve_signing_key(&master).unwrap();
+
+        // Simulate a corrupt vault by injecting two extra oauth_signing_key
+        // nodes with stale bytes.
+        handle
+            .graph
+            .write(|m| {
+                m.create_node(
+                    LabelSet::from_strs(&["vault_config"]),
+                    PropertyMap::from_pairs(vec![
+                        (IStr::new("key"), Value::str("oauth_signing_key")),
+                        (IStr::new("value"), Value::str("stale-1")),
+                    ]),
+                )?;
+                m.create_node(
+                    LabelSet::from_strs(&["vault_config"]),
+                    PropertyMap::from_pairs(vec![
+                        (IStr::new("key"), Value::str("oauth_signing_key")),
+                        (IStr::new("value"), Value::str("stale-2")),
+                    ]),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let matching = || -> usize {
+            handle.graph.read(|g| {
+                g.nodes_by_label("vault_config")
+                    .filter(|&nid| {
+                        g.get_node(nid).is_some_and(|n| {
+                            n.property("key")
+                                .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
+                        })
+                    })
+                    .count()
+            })
+        };
+        assert_eq!(matching(), 3, "setup should seed three matching nodes");
+
+        let new_key = handle.rotate_signing_key(&master).unwrap();
+        assert_eq!(new_key.len(), 32);
+        assert_eq!(
+            matching(),
+            1,
+            "rotate should collapse duplicates to a single node"
+        );
+
+        // The surviving node carries the newly rotated bytes.
+        let reloaded = handle.resolve_signing_key(&master).unwrap();
+        assert_eq!(reloaded, new_key);
     }
 
     #[test]

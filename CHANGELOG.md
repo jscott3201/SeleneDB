@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-17
+
+Spatial becomes a first-class retrieval shape in v1.1.0. A new `GEOMETRY`
+property type and 18 OGC-aligned `ST_*` scalar functions cover point-in-polygon,
+distance, and envelope queries — all running inside the database process with
+zero C/C++ dependencies. Alongside that, the server narrows its scope back to
+graph-database primitives: the multi-agent coordination tools and workflow
+scaffolding are removed. The README is rewritten capability-first.
+
+### Added
+
+#### Spatial
+
+- **First-class `GEOMETRY` property type** (`Value::Geometry`, `selene_core::geometry::GeometryValue`). Wraps `geo_types::Geometry<f64>` with an optional CRS hint; supports Point, LineString, Polygon (with holes), MultiPoint, MultiLineString, MultiPolygon, and GeometryCollection. Round-trips through GeoJSON (RFC 7946) and postcard. Includes a hand-rolled WKT serializer with no additional crate dependencies.
+- **18 `ST_*` scalar functions** in GQL (`crates/selene-gql/src/runtime/functions/spatial.rs`): constructors (`ST_Point`, `ST_GeomFromGeoJSON`, `ST_MakePolygon`), accessors (`ST_X`, `ST_Y`, `ST_GeometryType`, `ST_IsValid`, `ST_AsGeoJSON`), predicates (`ST_Contains`, `ST_Within`, `ST_Intersects`, `ST_Equals`, `ST_DWithin`), measurements (`ST_Distance`, `ST_DistanceSphere`, `ST_Area`, `ST_Length`), and `ST_Envelope`. `ST_Distance` dispatches to haversine for two WGS84 Points and euclidean otherwise.
+- **Spatial query guide** (`docs/guides/spatial.md`) covering geometry types, ingest paths, query patterns, the full function reference, CRS semantics, the FILTER-vs-WHERE scoping gotcha, performance notes, and a zone-based sensor monitoring example.
+- **GeoSPARQL interop** in `selene-rdf`: Point values export as `geo:wktLiteral` (with the OGC CRS84 IRI for WGS84 points, giving the broadest engine support across Jena, RDF4J, Stardog, and GraphDB); other geometries export as `geo:geoJSONLiteral` so Selene → RDF → Selene round-trips stay lossless until the WKT parser grows beyond the Point shape. The importer accepts both `wktLiteral` and `geoJSONLiteral`, and normalizes CRS84 and EPSG:4326 IRIs back to Selene's short `EPSG:4326` tag.
+- **Spatial benchmark suite** — five workloads (distance sort, radius filter, point-in-polygon, polygon intersection, envelope) wired into `cargo bench -p selene-gql` with per-bench throughput reflecting actual work shape.
+
+#### GQL Engine
+
+- **List iteration family**: list comprehensions, pattern comprehensions, and `ANY`/`ALL`/`NONE`/`SINGLE` quantifiers over lists.
+- **`EXISTS { ... }` subqueries** with early-termination semi-join.
+- **Coercion rules** for mixed numeric, temporal, and string pipeline values.
+- **`validation_mode` on DDL** for gradual schema migration.
+
+#### Server
+
+- **OAuth token revocation** MCP tools and signing-key rotation with a retired-key ring to support zero-downtime key changes.
+- **Managed API keys in the encrypted vault**, with issuance, rotation, and revocation tools.
+- **SSE/WS broadcast backpressure**: subscribers are notified on lag rather than silently dropped; WS message size is configurable.
+- **HTTP robustness pass**: Accept header parsing, a snapshot janitor for periodic cleanup, an anonymous request tier with rate limits, and a structured error flag on responses.
+- **MCP DX hardening**: structured error types, input validation across all tools, and a standardized `structured_result` / `structured_text_result` return convention.
+- **MCP tool hot-path benchmarks** (`crates/selene-server/benches/mcp_tool_bench.rs`). Five criterion groups cover the ops functions that MCP tools delegate to: `graph_stats`, `health`, `list_nodes`, parameterized GQL reads, and GQL INSERTs. Runs under the standard `SELENE_BENCH_PROFILE` scales; integrated into the per-crate bench run commands.
+- **Local macOS Metal deployment target** for building GPU-accelerated binaries outside CI.
+
+### Changed
+
+- **README rewritten capability-first** — "One database, many retrieval shapes" replaces the previous AI-agent-centric positioning. Graph, vector, time-series, full-text, spatial, RAG, and RDF now each get a one-line capability bullet. The tagline is "A property graph database with GQL, vector search, time-series, and on-device embeddings."
+- **`execute_plan_inner` refactor** (`crates/selene-gql/src/runtime/execute/mod.rs`). Extracted three named helpers — `try_count_only_shortcut`, `partition_pipeline`, and `apply_factorized_streaming_op` — to reduce the core execution function from 383 to 280 lines. No behavioral change; all `selene-gql` tests pass unchanged.
+- **Embedding model feature-gated** with an HTTP endpoint fallback for environments that don't want the bundled Candle pipeline compiled in.
+- **Migrated to `ureq` 3.x** and bumped the shared Rust dependency group to current minor versions.
+
+### Removed
+
+- **Multi-agent coordination bridge** removed from the server. The 19 MCP tools (`register_agent`, `heartbeat`, `deregister_agent`, `list_agents`, `share_context`, `get_shared_context`, `claim_intent`, `release_intent`, `check_conflicts`, `start_investigation`, `close_investigation`, `list_investigations`, `find_capable_agent`, `agent_stats`, `propose_task`, `accept_task`, `reject_task`, `complete_task`, `list_tasks`), the `selene://agents` and `selene://agents/{project}` MCP resources, and the background agent-session reaper have all been removed. SeleneDB is refocusing on graph-database primitives; coordination patterns belong in consumers that use Selene as a substrate. Existing `__AgentSession`, `__SharedContext`, `__Investigation`, `__Intent`, and `__Task` nodes in persisted graphs are still queryable via GQL but are no longer maintained by the server.
+- **Proposals and trace MCP tools** removed as part of the same scope cleanup. These were higher-level workflow primitives that now belong in consumer packs on top of SeleneDB.
+- **`agent-workflows.md` and related docs** removed; `docs/guides/` replaces them with feature-specific guides.
+
+### Fixed
+
+- **Auth**: preserve the originally-granted role on `refresh_standalone` instead of falling back to the default role.
+- **Rate limiting**: `Authorization: BEARER …` and other mixed-case scheme forms are now recognized per RFC 9110 §11.1 instead of being misclassified as anonymous traffic.
+- **WebSocket close codes** use axum's named `close_code::POLICY` / `close_code::ERROR` constants rather than magic numbers.
+- **GQL HTTP embedding provider** hardened with timeouts, input length limits, source tracking, and URL validation.
+- **README GPU claim** corrected — CUDA and Metal both require building from source with the right feature.
+- **Config**: TOML example aligned with the actual `ConfigFile` schema.
+- **MCP**: `rmcp` upgraded to 1.4.0 and `prompt_handler` visibility fixed.
+- **CI**: rustfmt drift, `cargo audit` handling, and Copilot README suggestions addressed.
+
 ## [1.0.0] - 2026-04-12
 
 ### Added
@@ -212,7 +272,8 @@ Initial release candidate.
 - GitHub Actions CI (lint, test, feature-gated test, doc audit)
 - Release pipeline to GHCR with semver tagging
 
-[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jscott3201/SeleneDB/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jscott3201/SeleneDB/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jscott3201/SeleneDB/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jscott3201/SeleneDB/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jscott3201/SeleneDB/releases/tag/v0.1.0

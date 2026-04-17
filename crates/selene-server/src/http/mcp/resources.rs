@@ -59,16 +59,6 @@ impl SeleneTools {
                     )
                     .with_mime_type("text/plain"),
             },
-            Annotated {
-                annotations: Some(resource_priority(0.8)),
-                raw: RawResource::new("selene://agents", "agents")
-                    .with_description(
-                        "Active agent sessions for multi-agent coordination. \
-                         Subscribe for real-time updates when agents register, \
-                         heartbeat, or deregister.",
-                    )
-                    .with_mime_type("application/json"),
-            },
         ];
 
         Ok(ListResourcesResult {
@@ -84,23 +74,12 @@ impl SeleneTools {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        let templates = vec![
-            Annotated {
-                annotations: Some(resource_priority(0.7)),
-                raw: RawResourceTemplate::new("selene://schemas/{label}", "schema")
-                    .with_description("Schema definition for a specific label")
-                    .with_mime_type("application/json"),
-            },
-            Annotated {
-                annotations: Some(resource_priority(0.8)),
-                raw: RawResourceTemplate::new("selene://agents/{project}", "agents-by-project")
-                    .with_description(
-                        "Active agent sessions filtered by project. \
-                         Subscribe for real-time updates on project-scoped agent activity.",
-                    )
-                    .with_mime_type("application/json"),
-            },
-        ];
+        let templates = vec![Annotated {
+            annotations: Some(resource_priority(0.7)),
+            raw: RawResourceTemplate::new("selene://schemas/{label}", "schema")
+                .with_description("Schema definition for a specific label")
+                .with_mime_type("application/json"),
+        }];
 
         Ok(ListResourceTemplatesResult {
             meta: None,
@@ -161,53 +140,6 @@ impl SeleneTools {
                 )
             }
             "selene://gql-examples" => (GQL_EXAMPLES.to_string(), "text/plain"),
-            "selene://agents" => {
-                let query = "MATCH (a:__AgentSession) \
-                             FILTER a.status = 'active' OR a.status = 'stale' OR a.status = 'working_locally' \
-                             RETURN a.agent_id AS agent_id, a.project AS project, \
-                             a.status AS status, a.working_on AS working_on, \
-                             a.heartbeat_at AS heartbeat_at \
-                             ORDER BY a.heartbeat_at DESC";
-                let result = ops::gql::execute_gql(
-                    &self.state,
-                    &auth,
-                    query,
-                    None,
-                    false,
-                    false,
-                    ops::gql::ResultFormat::Json,
-                )
-                .map_err(op_err)?;
-                (
-                    result.data_json.unwrap_or_else(|| "[]".into()),
-                    "application/json",
-                )
-            }
-            _ if uri.starts_with("selene://agents/") => {
-                let project = &uri["selene://agents/".len()..];
-                let mut params = std::collections::HashMap::new();
-                params.insert("project".into(), selene_core::Value::from(project));
-                let query = "MATCH (a:__AgentSession {project: $project}) \
-                             FILTER a.status = 'active' OR a.status = 'stale' OR a.status = 'working_locally' \
-                             RETURN a.agent_id AS agent_id, a.project AS project, \
-                             a.status AS status, a.working_on AS working_on, \
-                             a.heartbeat_at AS heartbeat_at \
-                             ORDER BY a.heartbeat_at DESC";
-                let result = ops::gql::execute_gql(
-                    &self.state,
-                    &auth,
-                    query,
-                    Some(&params),
-                    false,
-                    false,
-                    ops::gql::ResultFormat::Json,
-                )
-                .map_err(op_err)?;
-                (
-                    result.data_json.unwrap_or_else(|| "[]".into()),
-                    "application/json",
-                )
-            }
             _ if uri.starts_with("selene://schemas/") => {
                 let label = &uri["selene://schemas/".len()..];
                 if let Ok(schema) = ops::schema::get_node_schema(&self.state, &auth, label) {

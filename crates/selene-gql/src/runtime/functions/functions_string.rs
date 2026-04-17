@@ -197,6 +197,40 @@ impl ScalarFunction for ToFloatFunction {
     }
 }
 
+pub(crate) struct ToBooleanFunction;
+impl ScalarFunction for ToBooleanFunction {
+    fn name(&self) -> &'static str {
+        "toboolean"
+    }
+    fn description(&self) -> &'static str {
+        "Convert a value to boolean; returns Null on unrecognized input or Null input"
+    }
+    fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
+        match args.first() {
+            Some(GqlValue::Null) | None => Ok(GqlValue::Null),
+            Some(GqlValue::Bool(b)) => Ok(GqlValue::Bool(*b)),
+            // Numeric coercion follows C-style: 0 → false, nonzero → true.
+            Some(GqlValue::Int(i)) => Ok(GqlValue::Bool(*i != 0)),
+            Some(GqlValue::UInt(u)) => Ok(GqlValue::Bool(*u != 0)),
+            // NaN and zero → false; nonzero finite/infinite → true.
+            Some(GqlValue::Float(f)) => Ok(GqlValue::Bool(*f != 0.0 && !f.is_nan())),
+            // Case-insensitive string parse. Unknown literal → Null (null-safe
+            // coercion), matching the toInteger/toFloat parse-failure contract.
+            Some(GqlValue::String(s)) => {
+                let trimmed = s.trim();
+                if trimmed.eq_ignore_ascii_case("true") {
+                    Ok(GqlValue::Bool(true))
+                } else if trimmed.eq_ignore_ascii_case("false") {
+                    Ok(GqlValue::Bool(false))
+                } else {
+                    Ok(GqlValue::Null)
+                }
+            }
+            _ => Ok(GqlValue::Null),
+        }
+    }
+}
+
 // ── Type checking functions ───────────────────────────────────────
 
 pub(crate) struct ValueTypeFunction;
@@ -227,6 +261,7 @@ impl ScalarFunction for ValueTypeFunction {
             Some(GqlValue::Duration(_)) => "DURATION",
             Some(GqlValue::Bytes(_)) => "BYTES",
             Some(GqlValue::Vector(_)) => "VECTOR",
+            Some(GqlValue::Geometry(_)) => "GEOMETRY",
             Some(GqlValue::Record(_)) => "RECORD",
         };
         Ok(GqlValue::String(SmolStr::new(name)))
@@ -1132,6 +1167,84 @@ mod tests {
         let (g, reg) = ctx();
         let c = EvalContext::new(&g, &reg);
         assert_eq!(f.invoke(&[GqlValue::Null], &c).unwrap(), s("null"));
+    }
+
+    // ── ToBooleanFunction ──
+
+    #[test]
+    fn to_boolean_true_strings() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(f.invoke(&[s("true")], &c).unwrap(), GqlValue::Bool(true));
+        assert_eq!(f.invoke(&[s("TRUE")], &c).unwrap(), GqlValue::Bool(true));
+        assert_eq!(
+            f.invoke(&[s("  True  ")], &c).unwrap(),
+            GqlValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn to_boolean_false_strings() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(f.invoke(&[s("false")], &c).unwrap(), GqlValue::Bool(false));
+        assert_eq!(f.invoke(&[s("FALSE")], &c).unwrap(), GqlValue::Bool(false));
+    }
+
+    #[test]
+    fn to_boolean_unknown_string_is_null() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        // Matches toInteger/toFloat: unrecognized input → Null, not error.
+        assert_eq!(f.invoke(&[s("yes")], &c).unwrap(), GqlValue::Null);
+        assert_eq!(f.invoke(&[s("1")], &c).unwrap(), GqlValue::Null);
+        assert_eq!(f.invoke(&[s("")], &c).unwrap(), GqlValue::Null);
+    }
+
+    #[test]
+    fn to_boolean_null_input() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(f.invoke(&[GqlValue::Null], &c).unwrap(), GqlValue::Null);
+        assert_eq!(f.invoke(&[], &c).unwrap(), GqlValue::Null);
+    }
+
+    #[test]
+    fn to_boolean_from_bool() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(
+            f.invoke(&[GqlValue::Bool(true)], &c).unwrap(),
+            GqlValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn to_boolean_from_numeric() {
+        let f = ToBooleanFunction;
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        assert_eq!(
+            f.invoke(&[GqlValue::Int(0)], &c).unwrap(),
+            GqlValue::Bool(false)
+        );
+        assert_eq!(
+            f.invoke(&[GqlValue::Int(42)], &c).unwrap(),
+            GqlValue::Bool(true)
+        );
+        assert_eq!(
+            f.invoke(&[GqlValue::Float(0.0)], &c).unwrap(),
+            GqlValue::Bool(false)
+        );
+        assert_eq!(
+            f.invoke(&[GqlValue::Float(f64::NAN)], &c).unwrap(),
+            GqlValue::Bool(false)
+        );
     }
 
     // ── ValueTypeFunction ──

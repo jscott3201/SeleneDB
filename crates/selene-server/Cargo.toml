@@ -120,19 +120,25 @@ tantivy = "0.26"
 selene-rdf.workspace = true
 
 [features]
-default = []
+default = ["embed"]
+embed = ["selene-gql/embed"]
 dev-tls = ["dep:rcgen"]
 cuda = ["selene-gql/cuda"]
 metal = ["selene-gql/metal"]
 
 [dev-dependencies]
-selene-testing = { workspace = true, features = ["tls"] }
+selene-testing = { workspace = true, features = ["tls", "bench"] }
 selene-wire.workspace = true
 smol_str.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 reqwest = { version = "0.13", features = ["json", "form"] }
 serde_json.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "mcp_tool_bench"
+harness = false
 
 # Global allocator (musl only: fixes 2-9x perf loss from musl's single-lock allocator)
 [target.'cfg(target_env = "musl")'.dependencies]

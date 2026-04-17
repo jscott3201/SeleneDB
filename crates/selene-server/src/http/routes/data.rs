@@ -630,13 +630,30 @@ pub(in crate::http) async fn snapshot_export(
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
 
-    // Schedule cleanup of the temp file after response is sent.
+    // Best-effort cleanup of the temp file after the response is sent.
+    // The 60s window covers reasonable client download times. If the
+    // cleanup task is dropped (server shutdown, crash, etc.) the file is
+    // swept on the next bootstrap by `sweep_orphan_snapshot_temps` so it
+    // does not linger forever.
     let cleanup = file_path.clone();
     tokio::spawn(
         async move {
-            // Wait a bit to ensure the stream has been consumed.
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let _ = tokio::fs::remove_file(&cleanup).await;
+            match tokio::fs::remove_file(&cleanup).await {
+                Ok(()) => {
+                    tracing::debug!(path = %cleanup.display(), "snapshot temp file removed");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone — nothing to do.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %cleanup.display(),
+                        error = %e,
+                        "snapshot temp cleanup failed; bootstrap sweep will pick it up"
+                    );
+                }
+            }
         }
         .instrument(tracing::debug_span!("snapshot_cleanup")),
     );

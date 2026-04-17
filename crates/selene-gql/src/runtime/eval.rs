@@ -324,6 +324,195 @@ fn eval_expr_inner(
         } => eval_between(expr, low, high, *negated, binding, ctx),
 
         Expr::CountSubquery(pattern) => eval_count_subquery(pattern, binding, ctx),
+
+        Expr::ListIter {
+            kind,
+            var,
+            source,
+            predicate,
+            projection,
+            reduce_init,
+        } => eval_list_iter(
+            *kind,
+            *var,
+            source,
+            predicate.as_deref(),
+            projection.as_deref(),
+            reduce_init.as_ref().map(|(v, e)| (*v, e.as_ref())),
+            binding,
+            ctx,
+        ),
+    }
+}
+
+/// Evaluator for list iteration expressions (§20.10-11):
+/// list comprehension `[x IN xs WHERE p | f(x)]`,
+/// quantifiers `ANY/ALL/NONE/SINGLE(x IN xs WHERE p)`,
+/// and `REDUCE(acc = init, x IN xs | f(acc, x))`.
+///
+/// Scoping: the iteration variable shadows any outer binding of the same
+/// name for the duration of the loop. We clone the caller's binding into a
+/// local `scope`, rebind the iteration var on each step, then discard the
+/// scope on return — the caller's binding is never mutated.
+#[allow(clippy::too_many_arguments)]
+fn eval_list_iter(
+    kind: ListIterKind,
+    var: IStr,
+    source: &Expr,
+    predicate: Option<&Expr>,
+    projection: Option<&Expr>,
+    reduce_init: Option<(IStr, &Expr)>,
+    binding: &Binding,
+    ctx: &EvalContext<'_>,
+) -> Result<GqlValue, GqlError> {
+    let source_val = eval_expr_ctx(source, binding, ctx)?;
+
+    // Null source propagates to null for comprehension/reduce; quantifiers
+    // treat null source as Unknown (→ Null via trilean_to_value).
+    if matches!(source_val, GqlValue::Null) {
+        return Ok(GqlValue::Null);
+    }
+
+    let list = match source_val {
+        GqlValue::List(l) => l,
+        other => {
+            return Err(GqlError::type_error(format!(
+                "list iteration source must be LIST, got {other:?}"
+            )));
+        }
+    };
+
+    let mut scope = binding.clone();
+
+    match kind {
+        ListIterKind::Comprehension => {
+            let mut out: Vec<GqlValue> = Vec::with_capacity(list.elements.len());
+            for item in list.elements.iter() {
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                if let Some(pred) = predicate {
+                    match eval_predicate(pred, &scope, ctx)? {
+                        Trilean::True => {}
+                        _ => continue, // Unknown and False both exclude (matches WHERE)
+                    }
+                }
+                let projected = match projection {
+                    Some(p) => eval_expr_ctx(p, &scope, ctx)?,
+                    None => item.clone(),
+                };
+                out.push(projected);
+            }
+            // Infer element type from projected values so the output list
+            // matches other list-building paths (COLLECT, list literals,
+            // property-of-list access). `infer_list_element_type` returns
+            // `Nothing` for empty/all-null lists, preserving the previous
+            // behavior in those cases.
+            let element_type = crate::types::value::infer_list_element_type(&out);
+            Ok(GqlValue::List(GqlList {
+                element_type,
+                elements: Arc::from(out),
+            }))
+        }
+
+        ListIterKind::Any => {
+            let pred = predicate
+                .ok_or_else(|| GqlError::internal("ANY quantifier requires a WHERE predicate"))?;
+            let mut saw_unknown = false;
+            for item in list.elements.iter() {
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                match eval_predicate(pred, &scope, ctx)? {
+                    Trilean::True => return Ok(GqlValue::Bool(true)),
+                    Trilean::Unknown => saw_unknown = true,
+                    Trilean::False => {}
+                }
+            }
+            Ok(if saw_unknown {
+                GqlValue::Null
+            } else {
+                GqlValue::Bool(false)
+            })
+        }
+
+        ListIterKind::All => {
+            let pred = predicate
+                .ok_or_else(|| GqlError::internal("ALL quantifier requires a WHERE predicate"))?;
+            let mut saw_unknown = false;
+            for item in list.elements.iter() {
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                match eval_predicate(pred, &scope, ctx)? {
+                    Trilean::False => return Ok(GqlValue::Bool(false)),
+                    Trilean::Unknown => saw_unknown = true,
+                    Trilean::True => {}
+                }
+            }
+            Ok(if saw_unknown {
+                GqlValue::Null
+            } else {
+                GqlValue::Bool(true)
+            })
+        }
+
+        ListIterKind::None => {
+            let pred = predicate
+                .ok_or_else(|| GqlError::internal("NONE quantifier requires a WHERE predicate"))?;
+            let mut saw_unknown = false;
+            for item in list.elements.iter() {
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                match eval_predicate(pred, &scope, ctx)? {
+                    Trilean::True => return Ok(GqlValue::Bool(false)),
+                    Trilean::Unknown => saw_unknown = true,
+                    Trilean::False => {}
+                }
+            }
+            Ok(if saw_unknown {
+                GqlValue::Null
+            } else {
+                GqlValue::Bool(true)
+            })
+        }
+
+        ListIterKind::Single => {
+            let pred = predicate.ok_or_else(|| {
+                GqlError::internal("SINGLE quantifier requires a WHERE predicate")
+            })?;
+            let mut true_count = 0usize;
+            let mut saw_unknown = false;
+            for item in list.elements.iter() {
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                match eval_predicate(pred, &scope, ctx)? {
+                    Trilean::True => {
+                        true_count += 1;
+                        if true_count > 1 {
+                            return Ok(GqlValue::Bool(false));
+                        }
+                    }
+                    Trilean::Unknown => saw_unknown = true,
+                    Trilean::False => {}
+                }
+            }
+            // With unknowns present, the answer "exactly one true" may not be
+            // determinable: true_count could rise if unknowns resolve true.
+            Ok(if saw_unknown && true_count <= 1 {
+                GqlValue::Null
+            } else {
+                GqlValue::Bool(true_count == 1)
+            })
+        }
+
+        ListIterKind::Reduce => {
+            let (acc_var, init_expr) = reduce_init
+                .ok_or_else(|| GqlError::internal("REDUCE requires acc init expression"))?;
+            let step =
+                projection.ok_or_else(|| GqlError::internal("REDUCE requires step expression"))?;
+
+            // Init is evaluated in the caller's scope — before acc/iter vars bind.
+            let mut acc = eval_expr_ctx(init_expr, binding, ctx)?;
+            for item in list.elements.iter() {
+                scope.bind(acc_var, BoundValue::Scalar(acc.clone()));
+                scope.bind(var, BoundValue::Scalar(item.clone()));
+                acc = eval_expr_ctx(step, &scope, ctx)?;
+            }
+            Ok(acc)
+        }
     }
 }
 

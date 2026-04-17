@@ -5,8 +5,12 @@
 > **Sequential run** -- all suites executed one at a time, no parallel contention.
 > Test data: reference building model (6 overlays, 17 labels, 9 edge types, all 14 Value types).
 
-**8 bench targets across 7 crates, ~412 benchmarks across 30+ criterion groups.**
+**9 bench targets across 8 crates, ~423 benchmarks across 30+ criterion groups.**
 **Total wall time: ~19 minutes (full profile, including compilation).**
+
+> MCP tool benchmarks added 2026-04-16; numbers in that section were captured
+> under the `quick` profile (2 scales, 10 samples) and have not yet been folded
+> into the full-profile totals above.
 
 ---
 
@@ -530,6 +534,63 @@ CSR adjacency built per query with lazy incoming direction (outgoing-only for mo
 
 ---
 
+## MCP Tool Hot Path (selene-server)
+
+> Captured 2026-04-16 on Apple M5 (10-core, 16 GB RAM), macOS 26.4, under the
+> `quick` profile. These benchmarks exercise the ops-layer functions that MCP
+> tool handlers delegate to (`ops::graph_stats`, `ops::health`, `ops::nodes::list_nodes`,
+> `ops::gql::execute_gql`). HTTP/rmcp dispatch is intentionally out of scope —
+> those layers are thin wrappers and regressions there are caught by integration
+> tests, not micro-benchmarks.
+
+### Metadata Reads
+
+| Tool | 200 nodes | 1K nodes |
+|------|-----------|----------|
+| `graph_stats` | 6.0 us | 29 us |
+| `health` | 19.5 ns | 19.5 ns |
+
+`health` is constant-time (atomic loads + counter read); `graph_stats` scales
+with label-index cardinality.
+
+### Paginated List (`list_nodes`, LIMIT 100)
+
+| Scale | Median |
+|-------|--------|
+| 200 | 14.9 us |
+| 1K | 16.3 us |
+
+Sub-linear: LIMIT bounds the iterated window, so cost is dominated by fixed
+auth/scope plumbing rather than the candidate set.
+
+### Parameterized GQL Read (`gql_query`)
+
+Query: `MATCH (s:sensor) FILTER s.temp > $threshold RETURN s.name, s.temp LIMIT 50`
+
+| Scale | Median |
+|-------|--------|
+| 200 | 54 us |
+| 1K | 98 us |
+
+Roughly linear in the scanned row set — FILTER runs before LIMIT, so doubling
+the graph ~doubles the cost.
+
+### Mutation Path (`create_node` via GQL INSERT)
+
+| Operation | Median |
+|-----------|--------|
+| Single INSERT | ~686 us |
+
+Includes parse + plan + mutation-batcher round-trip + WAL enqueue. Measured
+with `iter_batched` against a freshly built 100-node state per iteration, so
+each sample reflects steady-state insert cost rather than drifting as the
+graph grows during the measurement window. Setup cost (async `ServerState`
+bootstrap, tempdir creation) dominates iteration-to-iteration variance, so
+treat the CI as indicative of order-of-magnitude rather than ±µs-level
+precision.
+
+---
+
 ## Per-Crate Timing (full profile)
 
 | Crate | Wall Time | Benchmark IDs |
@@ -541,7 +602,8 @@ CSR adjacency built per query with lazy incoming direction (outgoing-only for mo
 | selene-algorithms | 2m25s | ~55 |
 | selene-graph | 3m41s | ~55 |
 | selene-gql | 6m55s | 176 |
-| **Total** | **~19m** | **~412** |
+| selene-server | *not measured* | 11 (MCP tool hot path) |
+| **Total** | **~19m** | **~423** |
 
 Includes compilation time. Measurement-only time is ~60% of wall time.
 
@@ -558,6 +620,7 @@ cargo bench -p selene-ts --all-features
 cargo bench -p selene-graph --all-features
 cargo bench -p selene-algorithms --all-features
 cargo bench -p selene-gql --all-features
+cargo bench -p selene-server --features selene-server/dev-tls
 
 # Quick profile (200 / 1K only, ~30s per crate)
 SELENE_BENCH_PROFILE=quick cargo bench -p selene-gql --all-features

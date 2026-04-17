@@ -9,11 +9,14 @@ description = "Core types, schemas, and codec traits for the Selene property gra
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 lasso = { version = "0.7", features = ["multi-threaded"] }
 smallvec.workspace = true
 smol_str.workspace = true
+geo-types = { version = "0.7", default-features = false, features = ["serde", "std"] }
+geojson = { version = "1.0", default-features = false, features = ["geo-types"] }
 
 [dev-dependencies]
 postcard.workspace = true
 selene-testing.workspace = true
-serde_json.workspace = true

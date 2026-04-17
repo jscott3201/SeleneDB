@@ -75,6 +75,123 @@ fn type_ddl_create_node_type_duplicate_errors() {
     assert!(result.is_err());
 }
 
+// ── Per-type validation mode (STRICT / WARN) ────────────────────────
+
+#[test]
+fn type_ddl_strict_clause_persists_on_schema() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :workflow (title :: STRING NOT NULL) STRICT")
+        .execute(&shared)
+        .unwrap();
+    let schema = shared
+        .read(|g| g.schema().node_schema("workflow").cloned())
+        .unwrap();
+    assert_eq!(
+        schema.validation_mode,
+        Some(selene_core::ValidationMode::Strict)
+    );
+}
+
+#[test]
+fn type_ddl_warn_clause_persists_on_schema() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :telemetry (temp :: FLOAT) WARN")
+        .execute(&shared)
+        .unwrap();
+    let schema = shared
+        .read(|g| g.schema().node_schema("telemetry").cloned())
+        .unwrap();
+    assert_eq!(
+        schema.validation_mode,
+        Some(selene_core::ValidationMode::Warn)
+    );
+}
+
+#[test]
+fn type_ddl_no_mode_clause_leaves_validation_unset() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :generic (x :: INT)")
+        .execute(&shared)
+        .unwrap();
+    let schema = shared
+        .read(|g| g.schema().node_schema("generic").cloned())
+        .unwrap();
+    assert_eq!(schema.validation_mode, None);
+}
+
+#[test]
+fn type_ddl_edge_strict_clause_persists() {
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new(
+        "CREATE EDGE TYPE :delivers (FROM :workflow TO :milestone, weight :: FLOAT NOT NULL) STRICT",
+    )
+    .execute(&shared)
+    .unwrap();
+    let schema = shared
+        .read(|g| g.schema().edge_schema("delivers").cloned())
+        .unwrap();
+    assert_eq!(
+        schema.validation_mode,
+        Some(selene_core::ValidationMode::Strict)
+    );
+}
+
+#[test]
+fn type_ddl_per_type_strict_rejects_missing_required_even_if_global_warn() {
+    // Global mode is default (Warn). Per-type STRICT on :workflow should still
+    // block a missing required property.
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :workflow (title :: STRING NOT NULL) STRICT")
+        .execute(&shared)
+        .unwrap();
+    // Missing required 'title' -- strict mode must reject.
+    let err = MutationBuilder::new("INSERT (:workflow {status: 'open'})")
+        .execute(&shared)
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("title"),
+        "error should mention the missing required property: {err:?}"
+    );
+}
+
+#[test]
+fn type_ddl_per_type_warn_allows_missing_required_globally_warn() {
+    // Explicit WARN per-type matches default; ensure it doesn't accidentally
+    // promote to strict.
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :telemetry (temp :: FLOAT NOT NULL) WARN")
+        .execute(&shared)
+        .unwrap();
+    // Missing required 'temp' under WARN is accepted (logged as warning).
+    MutationBuilder::new("INSERT (:telemetry {source: 'sensor'})")
+        .execute(&shared)
+        .unwrap();
+}
+
+#[test]
+fn type_ddl_sibling_types_have_independent_modes() {
+    // Two types, different modes: writes to WARN type succeed, writes to
+    // STRICT type are rejected -- proves modes are resolved per-label.
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("CREATE NODE TYPE :strict_t (name :: STRING NOT NULL) STRICT")
+        .execute(&shared)
+        .unwrap();
+    MutationBuilder::new("CREATE NODE TYPE :warn_t (name :: STRING NOT NULL) WARN")
+        .execute(&shared)
+        .unwrap();
+
+    // Warn type accepts despite missing required property.
+    MutationBuilder::new("INSERT (:warn_t {id: 1})")
+        .execute(&shared)
+        .unwrap();
+
+    // Strict type rejects.
+    let err = MutationBuilder::new("INSERT (:strict_t {id: 1})")
+        .execute(&shared)
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("name"));
+}
+
 #[test]
 fn type_ddl_encoding_constraint() {
     let shared = SharedGraph::new(SeleneGraph::new());

@@ -210,13 +210,17 @@ docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510
 
 ### GPU-accelerated inference
 
-For on-device embedding with EmbeddingGemma (CUDA or Metal):
+For on-device embedding with EmbeddingGemma, build from source with GPU support:
 
 ```bash
-docker compose -f docker-compose.gpu.yml up -d
+# Apple Silicon (Metal)
+cargo build --release -p selene-server --features metal,dev-tls
+
+# NVIDIA CUDA
+cargo build --release -p selene-server --features cuda,dev-tls
 ```
 
-This enables native embedding inference at ~50ms/query on a Tesla T4, with no external API calls or network dependency.
+This enables native embedding inference with no external API calls or network dependency. See the [Deployment guide](operations/deployment.md) for full macOS Metal and CUDA setup instructions.
 
 ## Server Flags
 
@@ -237,10 +241,9 @@ This enables native embedding inference at ~50ms/query on a Tesla T4, with no ex
 | | |
 |---|---|
 | [GQL Guide](guides/gql/overview.md) | Learn the query language — pattern matching, mutations, functions, procedures |
-| [MCP Tools](guides/mcp.md) | 64 tools purpose-built for AI agents |
+| [MCP Tools](guides/mcp.md) | MCP surface over the GQL engine |
 | [Vector Search](guides/vector-search.md) | Embeddings, HNSW indexing, semantic search, GraphRAG |
 | [Time-Series](guides/time-series.md) | Multi-tier sensor data storage with built-in aggregation |
-| [Agent Workflows](agent-workflows.md) | End-to-end patterns for AI agent integration |
 | [Configuration](operations/configuration.md) | TOML config, runtime profiles, environment variables |
 | [Deployment](operations/deployment.md) | Docker, GPU, edge, cloud, and federation deployment |
 | [HTTP API](guides/http-api.md) | REST endpoint reference |

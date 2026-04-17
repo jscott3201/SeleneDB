@@ -3,7 +3,7 @@
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 
-use super::{SeleneTools, format_json, mcp_auth, op_err};
+use super::{SeleneTools, mcp_auth, op_err, structured_result};
 use crate::http::mcp::params::{
     CreatePrincipalParams, DisablePrincipalParams, GetPrincipalParams, RotateCredentialParams,
     UpdatePrincipalParams,
@@ -13,9 +13,9 @@ use crate::ops;
 pub(super) async fn list_principals_impl(tools: &SeleneTools) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
     let principals = ops::principals::list_principals(&tools.state, &auth).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &principals,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&principals).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn get_principal_impl(
@@ -25,9 +25,9 @@ pub(super) async fn get_principal_impl(
     let auth = mcp_auth(tools)?;
     let principal =
         ops::principals::get_principal(&tools.state, &auth, &p.identity).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &principal,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&principal).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn create_principal_impl(
@@ -43,9 +43,9 @@ pub(super) async fn create_principal_impl(
         p.password.as_deref(),
     )
     .map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &principal,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&principal).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn update_principal_impl(
@@ -61,9 +61,9 @@ pub(super) async fn update_principal_impl(
         p.enabled,
     )
     .map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &principal,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&principal).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn disable_principal_impl(
@@ -73,9 +73,9 @@ pub(super) async fn disable_principal_impl(
     let auth = mcp_auth(tools)?;
     let principal =
         ops::principals::disable_principal(&tools.state, &auth, &p.identity).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &principal,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&principal).unwrap_or_default(),
+    ))
 }
 
 pub(super) async fn rotate_credential_impl(

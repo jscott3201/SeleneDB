@@ -8,8 +8,9 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content, ErrorCode};
+use rmcp::model::CallToolResult;
 
+use crate::http::mcp::format::structured_text_result;
 use crate::http::mcp::params::*;
 use crate::http::mcp::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -28,11 +29,9 @@ pub(super) async fn remember_impl(
 
     // Validate: tier and valid_until are mutually exclusive.
     if p.tier.is_some() && p.valid_until.is_some() {
-        return Err(McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: "tier and valid_until are mutually exclusive — use one or the other".into(),
-            data: None,
-        });
+        return Err(op_err(ops::OpError::InvalidRequest(
+            "tier and valid_until are mutually exclusive — use one or the other".into(),
+        )));
     }
 
     // 1. Read __MemoryConfig for namespace (defaults if absent)
@@ -220,15 +219,26 @@ pub(super) async fn remember_impl(
         .as_millis() as i64;
 
     let valid_until = if let Some(ref tier_name) = p.tier {
-        // Resolve tier name to TTL via namespace config.
+        // Resolve tier name to TTL via namespace config. Two distinct failure
+        // modes: (a) namespace has no __MemoryConfig at all, so the caller
+        // needs to call configure_memory first; (b) namespace is configured
+        // but this specific tier is not in its ttl_tiers map, so we list the
+        // valid tiers so the caller can pick one.
         let tier_ttl = ttl_tiers.get(tier_name.as_str()).copied().ok_or_else(|| {
-            let available: Vec<&str> = ttl_tiers.keys().map(String::as_str).collect();
-            McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: format!("unknown tier '{tier_name}'; configured tiers: {available:?}")
-                    .into(),
-                data: None,
-            }
+            let msg = if ttl_tiers.is_empty() {
+                format!(
+                    "namespace '{namespace}' has no configured tiers — call configure_memory \
+                     with ttl_tiers first, or use valid_until directly"
+                )
+            } else {
+                let mut available: Vec<&str> = ttl_tiers.keys().map(String::as_str).collect();
+                available.sort_unstable();
+                format!(
+                    "unknown tier '{tier_name}' for namespace '{namespace}'; configured \
+                     tiers: {available:?}"
+                )
+            };
+            op_err(ops::OpError::InvalidRequest(msg))
         })?;
         if tier_ttl > 0 { now_ms + tier_ttl } else { 0 }
     } else if let Some(vu) = p.valid_until {
@@ -348,7 +358,15 @@ pub(super) async fn remember_impl(
     if valid_until > 0 {
         let _ = write!(text, ", expires at {valid_until}");
     }
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "node_id": node_id,
+            "namespace": namespace,
+            "entities_linked": entities.len(),
+            "valid_until": if valid_until > 0 { Some(valid_until) } else { None },
+        }),
+    ))
 }
 
 pub(super) async fn recall_impl(
@@ -360,11 +378,9 @@ pub(super) async fn recall_impl(
     let k = p.k.unwrap_or(10);
 
     if k <= 0 {
-        return Err(McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: "k must be a positive integer".into(),
-            data: None,
-        });
+        return Err(op_err(ops::OpError::InvalidRequest(
+            "k must be a positive integer".into(),
+        )));
     }
 
     // Call memory.recall procedure via GQL
@@ -407,11 +423,18 @@ pub(super) async fn recall_impl(
         }
     }
 
-    let text = format!(
-        "Recalled {} memories from namespace '{namespace}'\n{data_str}",
-        rows.len()
-    );
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    let returned = rows.len();
+    let text = format!("Recalled {returned} memories from namespace '{namespace}'\n{data_str}");
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "namespace": namespace,
+            "query": p.query,
+            "k": k,
+            "returned": returned,
+            "memories": rows,
+        }),
+    ))
 }
 
 pub(super) async fn forget_impl(
@@ -423,11 +446,9 @@ pub(super) async fn forget_impl(
     let namespace = p.namespace;
 
     if p.node_id.is_none() && p.query.is_none() {
-        return Err(McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: "forget requires either node_id or query".into(),
-            data: None,
-        });
+        return Err(op_err(ops::OpError::InvalidRequest(
+            "forget requires either node_id or query".into(),
+        )));
     }
 
     if let Some(node_id) = p.node_id {
@@ -461,9 +482,13 @@ pub(super) async fn forget_impl(
             ns_counters.remove(&node_id);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deleted memory node {node_id} from namespace '{namespace}'"
-        ))]))
+        Ok(structured_text_result(
+            format!("Deleted memory node {node_id} from namespace '{namespace}'"),
+            serde_json::json!({
+                "deleted_node_ids": [node_id],
+                "namespace": namespace,
+            }),
+        ))
     } else if let Some(query_text) = p.query {
         // Match by content CONTAINS and delete
         let mut del_params = HashMap::new();
@@ -522,11 +547,18 @@ pub(super) async fn forget_impl(
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deleted {} memories matching '{}' from namespace '{namespace}'",
-            deleted_ids.len(),
-            query_text
-        ))]))
+        Ok(structured_text_result(
+            format!(
+                "Deleted {} memories matching '{}' from namespace '{namespace}'",
+                deleted_ids.len(),
+                query_text
+            ),
+            serde_json::json!({
+                "deleted_node_ids": deleted_ids,
+                "namespace": namespace,
+                "query": query_text,
+            }),
+        ))
     } else {
         unreachable!()
     }
@@ -542,14 +574,9 @@ pub(super) async fn configure_memory_impl(
     if let Some(ref policy) = p.eviction_policy {
         const VALID_POLICIES: &[&str] = &["clock", "oldest", "lowest_confidence"];
         if !VALID_POLICIES.contains(&policy.as_str()) {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: format!(
-                    "unknown eviction policy '{policy}'; valid options: clock, oldest, lowest_confidence"
-                )
-                .into(),
-                data: None,
-            });
+            return Err(op_err(ops::OpError::InvalidRequest(format!(
+                "unknown eviction policy '{policy}'; valid options: clock, oldest, lowest_confidence"
+            ))));
         }
     }
 
@@ -557,13 +584,11 @@ pub(super) async fn configure_memory_impl(
     if let Some(ref tiers_json) = p.ttl_tiers {
         let parsed: Result<HashMap<String, i64>, _> = serde_json::from_str(tiers_json);
         if parsed.is_err() {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: "ttl_tiers must be a JSON object mapping tier names to TTL in \
-                          milliseconds (e.g., {\"ephemeral\": 3600000, \"persistent\": 0})"
+            return Err(op_err(ops::OpError::InvalidRequest(
+                "ttl_tiers must be a JSON object mapping tier names to TTL in milliseconds \
+                 (e.g., {\"ephemeral\": 3600000, \"persistent\": 0})"
                     .into(),
-                data: None,
-            });
+            )));
         }
     }
 
@@ -610,7 +635,16 @@ pub(super) async fn configure_memory_impl(
         .await?;
 
     let text = format!("Configured memory for namespace '{namespace}'");
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "namespace": namespace,
+            "max_memories": p.max_memories,
+            "default_ttl_ms": p.default_ttl_ms,
+            "eviction_policy": p.eviction_policy,
+            "ttl_tiers": p.ttl_tiers,
+        }),
+    ))
 }
 
 // ── Eviction helpers ─────────────────────────────────────────────────

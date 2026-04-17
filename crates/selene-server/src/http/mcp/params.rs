@@ -27,32 +27,6 @@ where
     }
 }
 
-/// Accept a Vec of u64 IDs where each element may be a number or string.
-fn deserialize_vec_u64_or_string<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-    let v = serde_json::Value::deserialize(deserializer)?;
-    match v {
-        serde_json::Value::Array(arr) => arr
-            .into_iter()
-            .map(|item| match &item {
-                serde_json::Value::Number(n) => n
-                    .as_u64()
-                    .ok_or_else(|| D::Error::custom(format!("expected u64, got {item}"))),
-                serde_json::Value::String(s) => s
-                    .parse::<u64>()
-                    .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as u64"))),
-                _ => Err(D::Error::custom(format!(
-                    "expected number or string, got {item}"
-                ))),
-            })
-            .collect(),
-        _ => Err(D::Error::custom(format!("expected array of IDs, got {v}"))),
-    }
-}
-
 /// Accept both a single string `"sensor"` and an array `["sensor", "temperature"]`
 /// for label fields. MCP clients often pass a single label as a bare string.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -276,27 +250,6 @@ pub(crate) struct IngestEdge {
 pub(crate) struct BatchIngestParams {
     /// Array of nodes to create, each with optional edges to existing nodes.
     pub(crate) entries: Vec<IngestEntry>,
-}
-
-/// Parameters for bulk-updating node status and linking to a commit.
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct MarkFixedParams {
-    /// Node IDs to mark as fixed.
-    #[serde(deserialize_with = "deserialize_vec_u64_or_string")]
-    pub(crate) node_ids: Vec<u64>,
-    /// Status to set (default: "fixed").
-    #[serde(default = "default_fixed_status")]
-    pub(crate) status: String,
-    /// Optional commit SHA to record.
-    #[serde(default)]
-    pub(crate) commit_sha: Option<String>,
-    /// Optional note or resolution description.
-    #[serde(default)]
-    pub(crate) note: Option<String>,
-}
-
-fn default_fixed_status() -> String {
-    "fixed".to_string()
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -695,150 +648,6 @@ pub(crate) struct RelatedParams {
     pub(crate) neighbor_limit: Option<usize>,
 }
 
-// ── Trace (training data) ────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct LogTraceParams {
-    /// Session identifier for grouping related traces.
-    pub(crate) session_id: String,
-    /// Turn number within the session.
-    pub(crate) turn: i64,
-    /// Name of the tool that was called.
-    pub(crate) tool_name: String,
-    /// JSON string of tool parameters.
-    pub(crate) tool_params: String,
-    /// Compact summary of the tool result.
-    pub(crate) tool_result_summary: String,
-    /// What the agent said after this tool call.
-    #[serde(default)]
-    pub(crate) agent_response: Option<String>,
-    /// Feedback: "approved", "rejected", "corrected", or "none" (default).
-    #[serde(default)]
-    pub(crate) feedback: Option<String>,
-    /// If feedback is "corrected", the correct answer.
-    #[serde(default)]
-    pub(crate) correction: Option<String>,
-    /// Which model generated this trace.
-    #[serde(default)]
-    pub(crate) model_id: Option<String>,
-    /// Tool execution time in milliseconds.
-    #[serde(default)]
-    pub(crate) latency_ms: Option<i64>,
-    /// The model's internal reasoning chain (maps to thinking tokens).
-    #[serde(default)]
-    pub(crate) thinking: Option<String>,
-    /// The user query that triggered this tool call.
-    #[serde(default)]
-    pub(crate) user_query: Option<String>,
-    /// Node IDs of entities this trace references (creates :about edges).
-    #[serde(default)]
-    pub(crate) about_node_ids: Option<Vec<u64>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ExportTracesParams {
-    /// Filter by session ID.
-    #[serde(default)]
-    pub(crate) session_id: Option<String>,
-    /// Filter by tool name.
-    #[serde(default)]
-    pub(crate) tool_name: Option<String>,
-    /// Filter by feedback type.
-    #[serde(default)]
-    pub(crate) feedback: Option<String>,
-    /// Filter by model ID.
-    #[serde(default)]
-    pub(crate) model_id: Option<String>,
-    /// Start timestamp (ms). Omit for earliest.
-    #[serde(default)]
-    pub(crate) start_ms: Option<i64>,
-    /// End timestamp (ms). Omit for latest.
-    #[serde(default)]
-    pub(crate) end_ms: Option<i64>,
-    /// Maximum traces to return (default: 1000, max: 10000).
-    #[serde(default)]
-    pub(crate) limit: Option<usize>,
-    /// Output format: "jsonl" (default), "json", or "huggingface".
-    #[serde(default)]
-    pub(crate) format: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct LogSessionParams {
-    /// Session identifier (must match session_id used in log_trace calls).
-    pub(crate) session_id: String,
-    /// System prompt or context used for this session.
-    #[serde(default)]
-    pub(crate) system_prompt: Option<String>,
-    /// Building or facility name.
-    #[serde(default)]
-    pub(crate) building: Option<String>,
-    /// Operator role (e.g., "facilities_manager", "energy_analyst").
-    #[serde(default)]
-    pub(crate) operator_role: Option<String>,
-    /// Current weather conditions.
-    #[serde(default)]
-    pub(crate) weather: Option<String>,
-    /// Active pricing or demand tier.
-    #[serde(default)]
-    pub(crate) active_tier: Option<String>,
-    /// Arbitrary metadata as a JSON string.
-    #[serde(default)]
-    pub(crate) metadata: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct LogOutcomeParams {
-    /// Session identifier to associate the outcome with.
-    pub(crate) session_id: String,
-    /// Whether the session achieved its goal.
-    pub(crate) success: bool,
-    /// Summary of what happened.
-    pub(crate) outcome_summary: String,
-    /// If failed, the reason why.
-    #[serde(default)]
-    pub(crate) failure_reason: Option<String>,
-    /// Quality score from 0 (worst) to 10 (best).
-    #[serde(default)]
-    pub(crate) quality_score: Option<i64>,
-}
-
-// ── Proposals (human-in-the-loop) ───────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ProposeActionParams {
-    /// Human-readable description of the proposed action.
-    pub(crate) description: String,
-    /// The GQL query to execute if approved.
-    pub(crate) query: String,
-    /// Category for grouping proposals (e.g., "setpoint_change", "schedule").
-    #[serde(default)]
-    pub(crate) category: Option<String>,
-    /// Priority: "low", "normal" (default), "high".
-    #[serde(default)]
-    pub(crate) priority: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ProposalIdParams {
-    /// Numeric proposal node ID.
-    #[serde(deserialize_with = "deserialize_u64_or_string")]
-    pub(crate) proposal_id: u64,
-    /// Optional reason for the action.
-    #[serde(default)]
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ListProposalsParams {
-    /// Filter by status: "pending", "approved", "executed", "rejected", "expired". Omit for all.
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-    /// Maximum proposals to return (default: 50).
-    #[serde(default)]
-    pub(crate) limit: Option<usize>,
-}
-
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct ConfigureMemoryParams {
     /// Memory namespace to configure.
@@ -904,345 +713,53 @@ pub(crate) struct RotateCredentialParams {
     pub(crate) new_password: String,
 }
 
-// ── Context Bridge: multi-agent coordination ───────────────────────
-
-fn default_intent_level() -> String {
-    "advisory".into()
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreateApiKeyParams {
+    /// Human-readable name for this key (for example, "ci-runner" or "mobile-app").
+    pub(crate) name: String,
+    /// Identity of the principal this key authenticates as.
+    pub(crate) identity: String,
+    /// Optional TTL in days. Omit for a non-expiring key.
+    #[serde(default)]
+    pub(crate) ttl_days: Option<u32>,
+    /// Optional scope tags recorded on the key for downstream enforcement.
+    #[serde(default)]
+    pub(crate) scopes: Option<Vec<String>>,
 }
 
-fn default_context_type() -> String {
-    "discovery".into()
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ListApiKeysParams {
+    /// Filter to keys issued to this identity. Omit to list all.
+    #[serde(default)]
+    pub(crate) identity: Option<String>,
 }
 
-fn default_visibility() -> String {
-    "project".into()
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct RegisterAgentParams {
-    /// Unique agent identifier (e.g., "claude-artemis-1").
-    pub(crate) agent_id: String,
-    /// Project the agent is working on.
-    pub(crate) project: String,
-    /// What the agent is currently working on.
-    #[serde(default)]
-    pub(crate) working_on: Option<String>,
-    /// File paths the agent is actively touching.
-    #[serde(default)]
-    pub(crate) files_touched: Option<Vec<String>>,
-    /// Free-text agent capabilities or role description.
-    #[serde(default)]
-    pub(crate) capabilities: Option<String>,
-    /// Structured: tools/skills this agent supports (e.g., \["code_review", "testing"\]).
-    #[serde(default)]
-    pub(crate) supported_tools: Option<Vec<String>>,
-    /// Structured: domain expertise areas (e.g., \["HVAC", "security", "rust"\]).
-    #[serde(default)]
-    pub(crate) domain_expertise: Option<Vec<String>>,
-    /// Model family identifier (e.g., "claude-opus-4", "gemma-4-e4b").
-    #[serde(default)]
-    pub(crate) model_family: Option<String>,
-    /// Context window size in tokens.
-    #[serde(default)]
-    pub(crate) context_window: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct HeartbeatParams {
-    /// Agent identifier to update.
-    pub(crate) agent_id: String,
-    /// Optional update to what the agent is working on.
-    #[serde(default)]
-    pub(crate) working_on: Option<String>,
-    /// Optional update to files being touched.
-    #[serde(default)]
-    pub(crate) files_touched: Option<Vec<String>>,
-    /// Session status: 'active' (default) or 'working_locally'.
-    /// Use 'working_locally' during extended local work to prevent stale marking
-    /// (safety-reaped after 30 minutes without heartbeat).
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct DeregisterAgentParams {
-    /// Agent identifier to deregister.
-    pub(crate) agent_id: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ListAgentsParams {
-    /// Filter by project name.
-    #[serde(default)]
-    pub(crate) project: Option<String>,
-    /// Filter by status (active, stale, done). Default: returns all.
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ShareContextParams {
-    /// Agent publishing this context.
-    pub(crate) author: String,
-    /// Context type: discovery, decision, warning, request, blocker.
-    #[serde(default = "default_context_type")]
-    pub(crate) context_type: String,
-    /// Project scope for this context.
-    pub(crate) scope: String,
-    /// Optional fine-grained targets (file paths, crate names).
-    #[serde(default)]
-    pub(crate) targets: Option<Vec<String>>,
-    /// The context content.
-    pub(crate) content: String,
-    /// Visibility: project (default), global, or agent:<id> for directed.
-    #[serde(default = "default_visibility")]
-    pub(crate) visibility: String,
-    /// Time-to-live in milliseconds. 0 = no expiry.
-    #[serde(default)]
-    pub(crate) ttl_ms: Option<i64>,
-    /// Optional node IDs this context is about (creates edges).
-    #[serde(default)]
-    pub(crate) about_node_ids: Option<Vec<u64>>,
-    /// Author's confidence in this context (0.0–1.0). Helps receivers calibrate
-    /// how much to re-investigate vs. extend findings.
-    #[serde(default)]
-    pub(crate) confidence: Option<f64>,
-    /// If true, signals that the author expects a response from the target agent.
-    #[serde(default)]
-    pub(crate) response_requested: Option<bool>,
-    /// Deadline for response in milliseconds from now. Only meaningful when
-    /// response_requested is true. The reaper marks context as overdue after this.
-    #[serde(default)]
-    pub(crate) response_deadline_ms: Option<i64>,
-    /// Link this context to an open investigation thread (investigation_id from start_investigation).
-    #[serde(default)]
-    pub(crate) investigation_id: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct GetSharedContextParams {
-    /// Filter by project scope.
-    #[serde(default)]
-    pub(crate) scope: Option<String>,
-    /// Filter by context type.
-    #[serde(default)]
-    pub(crate) context_type: Option<String>,
-    /// Only return context created after this timestamp (ms since epoch).
-    #[serde(default)]
-    pub(crate) since_ms: Option<i64>,
-    /// Filter by target path prefix (e.g., "crates/selene-gql/").
-    #[serde(default)]
-    pub(crate) target_prefix: Option<String>,
-    /// Include expired context. Default: false.
-    #[serde(default)]
-    pub(crate) include_expired: Option<bool>,
-    /// Maximum results. Default: 50.
-    #[serde(default)]
-    pub(crate) limit: Option<usize>,
-    /// Filter by investigation thread ID.
-    #[serde(default)]
-    pub(crate) investigation_id: Option<String>,
-    /// Filter by publishing agent.
-    #[serde(default)]
-    pub(crate) author: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ClaimIntentParams {
-    /// Agent claiming the intent.
-    pub(crate) agent_id: String,
-    /// Description of the intended action.
-    pub(crate) action: String,
-    /// File paths or crate names being claimed.
-    pub(crate) targets: Vec<String>,
-    /// Intent level: advisory (default), exclusive, locked.
-    #[serde(default = "default_intent_level")]
-    pub(crate) level: String,
-    /// Reason for the claim.
-    #[serde(default)]
-    pub(crate) reason: Option<String>,
-    /// If true and targets contain `node:<id>` entries, expand via `:contains` edges
-    /// to also claim all descendant nodes. Works with any containment hierarchy.
-    #[serde(default)]
-    pub(crate) cascade: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ReleaseIntentParams {
-    /// Agent releasing the intent.
-    pub(crate) agent_id: String,
-    /// Specific intent node ID to release. If omitted, releases all intents for this agent.
-    #[serde(default)]
-    pub(crate) intent_id: Option<u64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct CheckConflictsParams {
-    /// Agent checking for conflicts (excluded from results).
-    pub(crate) agent_id: String,
-    /// Target paths to check for conflicting intents.
-    pub(crate) targets: Vec<String>,
-}
-
-// ── Investigation sessions ──────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct StartInvestigationParams {
-    /// Agent starting the investigation.
-    pub(crate) author: String,
-    /// Project scope for this investigation.
-    pub(crate) scope: String,
-    /// Brief subject line describing what is being investigated.
-    pub(crate) subject: String,
-    /// Initial findings or observations that triggered the investigation.
-    #[serde(default)]
-    pub(crate) initial_findings: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct CloseInvestigationParams {
-    /// The investigation_id returned by start_investigation.
-    pub(crate) investigation_id: String,
-    /// Conclusion summarizing the investigation outcome.
-    pub(crate) conclusion: String,
-    /// Outcome classification (e.g., "resolved", "escalated", "inconclusive").
-    #[serde(default)]
-    pub(crate) outcome: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ListInvestigationsParams {
-    /// Filter by project scope.
-    #[serde(default)]
-    pub(crate) scope: Option<String>,
-    /// Filter by status: "open" or "closed".
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-    /// Filter by author agent ID.
-    #[serde(default)]
-    pub(crate) author: Option<String>,
-    /// Maximum results. Default: 50.
-    #[serde(default)]
-    pub(crate) limit: Option<usize>,
-}
-
-// ── Agent capability discovery ──────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct FindCapableAgentParams {
-    /// Required tools/skills the agent must support (e.g., \["code_review", "rust"\]).
-    #[serde(default)]
-    pub(crate) required_tools: Option<Vec<String>>,
-    /// Required domain expertise (e.g., \["security", "HVAC"\]).
-    #[serde(default)]
-    pub(crate) required_expertise: Option<Vec<String>>,
-    /// Free-text capability query for substring matching on the capabilities field.
-    #[serde(default)]
-    pub(crate) query: Option<String>,
-    /// Filter to a specific project. Default: all projects.
-    #[serde(default)]
-    pub(crate) project: Option<String>,
-    /// Only return agents active within this many milliseconds. Default: 300000 (5 min).
-    #[serde(default)]
-    pub(crate) active_within_ms: Option<i64>,
-}
-
-// ── Agent performance tracking ──────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct AgentStatsParams {
-    /// Agent identifier to get stats for.
-    pub(crate) agent_id: String,
-    /// Optional project scope. If omitted, stats cover all projects.
-    #[serde(default)]
-    pub(crate) project: Option<String>,
-}
-
-// ── Task Delegation ─────────────────────────────────────────────────
-
-fn default_task_priority() -> String {
-    "medium".into()
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ProposeTaskParams {
-    /// Agent proposing this task.
-    pub(crate) proposer_agent: String,
-    /// Project scope.
-    pub(crate) project: String,
-    /// Short task title.
-    pub(crate) title: String,
-    /// Detailed task description and requirements.
-    pub(crate) description: String,
-    /// Priority: low, medium (default), high, critical.
-    #[serde(default = "default_task_priority")]
-    pub(crate) priority: String,
-    /// Specific agent to target. If omitted, any agent can accept.
-    #[serde(default)]
-    pub(crate) assignee_agent: Option<String>,
-    /// Tools/skills required (for capability matching via find_capable_agent).
-    #[serde(default)]
-    pub(crate) required_tools: Option<Vec<String>>,
-    /// JSON input data/context for the task.
-    #[serde(default)]
-    pub(crate) input_data: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct AcceptTaskParams {
-    /// Agent accepting the task.
-    pub(crate) agent_id: String,
-    /// Task node ID to accept.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeApiKeyParams {
+    /// Node ID of the api_key to revoke.
     #[serde(deserialize_with = "deserialize_u64_or_string")]
-    pub(crate) task_id: u64,
+    pub(crate) key_id: u64,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct RejectTaskParams {
-    /// Agent rejecting the task.
-    pub(crate) agent_id: String,
-    /// Task node ID to reject.
-    #[serde(deserialize_with = "deserialize_u64_or_string")]
-    pub(crate) task_id: u64,
-    /// Reason for rejection.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RotateSigningKeyParams {
+    /// Seconds to keep the previous signing key valid for decoding existing
+    /// access tokens. Defaults to 86400 (24 hours) when omitted. Set to 0 to
+    /// invalidate all outstanding access tokens immediately.
     #[serde(default)]
-    pub(crate) reason: Option<String>,
+    pub(crate) retire_for_secs: Option<u64>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct CompleteTaskParams {
-    /// Agent completing the task (must be the assignee).
-    pub(crate) agent_id: String,
-    /// Task node ID to complete.
-    #[serde(deserialize_with = "deserialize_u64_or_string")]
-    pub(crate) task_id: u64,
-    /// Whether the task succeeded or failed.
-    pub(crate) success: bool,
-    /// JSON output data/results from the task.
-    #[serde(default)]
-    pub(crate) output_data: Option<String>,
-    /// Reason for failure (required when success is false).
-    #[serde(default)]
-    pub(crate) failure_reason: Option<String>,
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeTokenParams {
+    /// The full JWT access token string to revoke.
+    pub(crate) token: String,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ListTasksParams {
-    /// Filter by project.
-    #[serde(default)]
-    pub(crate) project: Option<String>,
-    /// Filter by status (proposed, accepted, working, completed, failed, rejected).
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-    /// Filter by proposer agent.
-    #[serde(default)]
-    pub(crate) proposer_agent: Option<String>,
-    /// Filter by assignee agent.
-    #[serde(default)]
-    pub(crate) assignee_agent: Option<String>,
-    /// Maximum results. Default: 50.
-    #[serde(default)]
-    pub(crate) limit: Option<usize>,
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UnrevokeTokenParams {
+    /// The `jti` claim of the token to remove from the deny-list.
+    pub(crate) jti: String,
 }
 
 #[cfg(test)]

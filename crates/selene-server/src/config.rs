@@ -41,6 +41,15 @@ pub struct HttpConfig {
     /// Per-endpoint rate limiting configuration.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Maximum number of concurrent WebSocket subscriber connections.
+    /// Each long-lived subscription holds a broadcast receiver and a tokio
+    /// task; the cap protects the server from runaway fan-out. Default: 100.
+    #[serde(default = "default_max_ws_subscriptions")]
+    pub max_ws_subscriptions: usize,
+}
+
+fn default_max_ws_subscriptions() -> usize {
+    100
 }
 
 /// Per-endpoint rate limiting (token bucket, requests per second).
@@ -64,6 +73,14 @@ pub struct RateLimitConfig {
     /// Requests/sec for heavy data endpoints: CSV/RDF import/export.
     #[serde(default = "default_rate_data")]
     pub data_per_sec: u32,
+    /// Requests/sec for unauthenticated requests on non-system endpoints.
+    /// Charged separately from the per-tier budgets above so a flood of
+    /// anonymous traffic cannot exhaust the budget that authenticated
+    /// clients depend on. Default: 10/sec, generous enough for legitimate
+    /// pre-auth probes (OpenAPI fetch, OAuth discovery) but tight enough
+    /// to bound brute-force surface area.
+    #[serde(default = "default_rate_anonymous")]
+    pub anonymous_per_sec: u32,
 }
 
 fn default_rate_read() -> u32 {
@@ -78,6 +95,9 @@ fn default_rate_query() -> u32 {
 fn default_rate_data() -> u32 {
     20
 }
+fn default_rate_anonymous() -> u32 {
+    10
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -86,6 +106,7 @@ impl Default for RateLimitConfig {
             write_per_sec: default_rate_write(),
             query_per_sec: default_rate_query(),
             data_per_sec: default_rate_data(),
+            anonymous_per_sec: default_rate_anonymous(),
         }
     }
 }
@@ -102,6 +123,7 @@ impl std::fmt::Debug for HttpConfig {
             )
             .field("allow_plaintext", &self.allow_plaintext)
             .field("rate_limit", &self.rate_limit)
+            .field("max_ws_subscriptions", &self.max_ws_subscriptions)
             .finish()
     }
 }
@@ -115,6 +137,7 @@ impl Default for HttpConfig {
             metrics_token: None,
             allow_plaintext: false,
             rate_limit: RateLimitConfig::default(),
+            max_ws_subscriptions: default_max_ws_subscriptions(),
         }
     }
 }

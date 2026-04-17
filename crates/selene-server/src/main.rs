@@ -135,6 +135,11 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
 
     // Set embedding model config before bootstrap
     {
+        // Pass remote endpoint config (takes priority over local model).
+        if let Some(ref endpoint) = config.vector.endpoint {
+            selene_gql::runtime::embed::set_endpoint(endpoint.clone());
+        }
+
         let model_path = config
             .vector
             .model_path
