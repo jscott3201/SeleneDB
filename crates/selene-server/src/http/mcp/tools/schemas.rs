@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 
-use crate::http::mcp::format::{format_json, format_value};
+use crate::http::mcp::format::{structured_result, structured_text_result};
 use crate::http::mcp::params::*;
 use crate::http::mcp::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -15,31 +15,29 @@ pub(super) async fn list_schemas_impl(tools: &SeleneTools) -> Result<CallToolRes
     let auth = mcp_auth(tools)?;
     let node_schemas = ops::schema::list_node_schemas(&tools.state, &auth).map_err(op_err)?;
     let edge_schemas = ops::schema::list_edge_schemas(&tools.state, &auth).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_value(
-        serde_json::json!({
-            "node_schemas": node_schemas.iter().map(|s| {
-                let mut obj = serde_json::json!({
-                    "label": &*s.label,
-                    "description": &s.description,
-                    "properties": s.properties.len(),
-                    "parent": s.parent.as_deref(),
-                });
-                if !s.annotations.is_empty() {
-                    let annot: serde_json::Map<String, serde_json::Value> = s.annotations.iter()
-                        .map(|(k, v)| (k.to_string(), crate::ops::value_to_json(v)))
-                        .collect();
-                    obj["annotations"] = serde_json::Value::Object(annot);
-                }
-                obj
-            }).collect::<Vec<_>>(),
-            "edge_schemas": edge_schemas.iter().map(|s| {
-                serde_json::json!({
-                    "label": &*s.label,
-                    "description": &s.description,
-                })
-            }).collect::<Vec<_>>(),
-        }),
-    ))]))
+    Ok(structured_result(serde_json::json!({
+        "node_schemas": node_schemas.iter().map(|s| {
+            let mut obj = serde_json::json!({
+                "label": &*s.label,
+                "description": &s.description,
+                "properties": s.properties.len(),
+                "parent": s.parent.as_deref(),
+            });
+            if !s.annotations.is_empty() {
+                let annot: serde_json::Map<String, serde_json::Value> = s.annotations.iter()
+                    .map(|(k, v)| (k.to_string(), crate::ops::value_to_json(v)))
+                    .collect();
+                obj["annotations"] = serde_json::Value::Object(annot);
+            }
+            obj
+        }).collect::<Vec<_>>(),
+        "edge_schemas": edge_schemas.iter().map(|s| {
+            serde_json::json!({
+                "label": &*s.label,
+                "description": &s.description,
+            })
+        }).collect::<Vec<_>>(),
+    })))
 }
 
 pub(super) async fn get_schema_impl(
@@ -51,22 +49,18 @@ pub(super) async fn get_schema_impl(
 
     // Try node schema first
     if let Ok(schema) = ops::schema::get_node_schema(&tools.state, &auth, label) {
-        return Ok(CallToolResult::success(vec![Content::text(format_value(
-            serde_json::json!({
-                "type": "node",
-                "schema": schema,
-            }),
-        ))]));
+        return Ok(structured_result(serde_json::json!({
+            "type": "node",
+            "schema": schema,
+        })));
     }
 
     // Fallback to edge schema
     let schema = ops::schema::get_edge_schema(&tools.state, &auth, label).map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_value(
-        serde_json::json!({
-            "type": "edge",
-            "schema": schema,
-        }),
-    ))]))
+    Ok(structured_result(serde_json::json!({
+        "type": "edge",
+        "schema": schema,
+    })))
 }
 
 pub(super) async fn create_schema_impl(
@@ -259,9 +253,7 @@ pub(super) async fn export_schemas_impl(tools: &SeleneTools) -> Result<CallToolR
         "relationships": relationships,
     });
 
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &export,
-    ))]))
+    Ok(structured_result(export))
 }
 
 pub(super) async fn create_edge_schema_impl(
@@ -328,12 +320,22 @@ pub(super) async fn import_schema_pack_impl(
     let result = tools
         .submit_mut(move || ops::schema::import_pack(&st, &auth, pack))
         .await?;
-    Ok(CallToolResult::success(vec![Content::text(format!(
+    let text = format!(
         "Imported pack '{}': {} node schemas ({} skipped), {} edge schemas ({} skipped)",
         result.pack_name,
         result.node_schemas_registered,
         result.node_schemas_skipped,
         result.edge_schemas_registered,
         result.edge_schemas_skipped
-    ))]))
+    );
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "pack_name": result.pack_name,
+            "node_schemas_registered": result.node_schemas_registered,
+            "node_schemas_skipped": result.node_schemas_skipped,
+            "edge_schemas_registered": result.edge_schemas_registered,
+            "edge_schemas_skipped": result.edge_schemas_skipped,
+        }),
+    ))
 }

@@ -27,11 +27,6 @@ pub fn format_json(val: &impl serde::Serialize) -> String {
     serde_json::to_string(val).unwrap_or_default()
 }
 
-/// Format an inline `serde_json::Value` as minified JSON.
-pub fn format_value(val: serde_json::Value) -> String {
-    serde_json::to_string(&val).unwrap_or_default()
-}
-
 /// Build a tool result with both text content (for LLMs) and structured
 /// content (for programmatic MCP clients). The structured content is the
 /// raw JSON value; the text content is the minified JSON string.

@@ -1,9 +1,9 @@
 //! MCP tool for OAuth signing-key rotation.
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 
-use super::{SeleneTools, format_json, mcp_auth, op_err};
+use super::{SeleneTools, mcp_auth, op_err, structured_result};
 use crate::http::mcp::params::RotateSigningKeyParams;
 use crate::ops;
 
@@ -14,7 +14,7 @@ pub(super) async fn rotate_signing_key_impl(
     let auth = mcp_auth(tools)?;
     let result = ops::signing_key::rotate_signing_key(&tools.state, &auth, p.retire_for_secs)
         .map_err(op_err)?;
-    Ok(CallToolResult::success(vec![Content::text(format_json(
-        &result,
-    ))]))
+    Ok(structured_result(
+        serde_json::to_value(&result).unwrap_or_default(),
+    ))
 }

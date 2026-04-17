@@ -241,10 +241,9 @@ This enables native embedding inference with no external API calls or network de
 | | |
 |---|---|
 | [GQL Guide](guides/gql/overview.md) | Learn the query language — pattern matching, mutations, functions, procedures |
-| [MCP Tools](guides/mcp.md) | 64 tools purpose-built for AI agents |
+| [MCP Tools](guides/mcp.md) | MCP surface over the GQL engine |
 | [Vector Search](guides/vector-search.md) | Embeddings, HNSW indexing, semantic search, GraphRAG |
 | [Time-Series](guides/time-series.md) | Multi-tier sensor data storage with built-in aggregation |
-| [Agent Workflows](agent-workflows.md) | End-to-end patterns for AI agent integration |
 | [Configuration](operations/configuration.md) | TOML config, runtime profiles, environment variables |
 | [Deployment](operations/deployment.md) | Docker, GPU, edge, cloud, and federation deployment |
 | [HTTP API](guides/http-api.md) | REST endpoint reference |

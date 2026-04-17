@@ -8,8 +8,9 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 
+use crate::http::mcp::format::structured_text_result;
 use crate::http::mcp::params::*;
 use crate::http::mcp::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
@@ -357,7 +358,15 @@ pub(super) async fn remember_impl(
     if valid_until > 0 {
         let _ = write!(text, ", expires at {valid_until}");
     }
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "node_id": node_id,
+            "namespace": namespace,
+            "entities_linked": entities.len(),
+            "valid_until": if valid_until > 0 { Some(valid_until) } else { None },
+        }),
+    ))
 }
 
 pub(super) async fn recall_impl(
@@ -416,7 +425,7 @@ pub(super) async fn recall_impl(
 
     let returned = rows.len();
     let text = format!("Recalled {returned} memories from namespace '{namespace}'\n{data_str}");
-    Ok(crate::http::mcp::format::structured_text_result(
+    Ok(structured_text_result(
         text,
         serde_json::json!({
             "namespace": namespace,
@@ -473,9 +482,13 @@ pub(super) async fn forget_impl(
             ns_counters.remove(&node_id);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deleted memory node {node_id} from namespace '{namespace}'"
-        ))]))
+        Ok(structured_text_result(
+            format!("Deleted memory node {node_id} from namespace '{namespace}'"),
+            serde_json::json!({
+                "deleted_node_ids": [node_id],
+                "namespace": namespace,
+            }),
+        ))
     } else if let Some(query_text) = p.query {
         // Match by content CONTAINS and delete
         let mut del_params = HashMap::new();
@@ -534,11 +547,18 @@ pub(super) async fn forget_impl(
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deleted {} memories matching '{}' from namespace '{namespace}'",
-            deleted_ids.len(),
-            query_text
-        ))]))
+        Ok(structured_text_result(
+            format!(
+                "Deleted {} memories matching '{}' from namespace '{namespace}'",
+                deleted_ids.len(),
+                query_text
+            ),
+            serde_json::json!({
+                "deleted_node_ids": deleted_ids,
+                "namespace": namespace,
+                "query": query_text,
+            }),
+        ))
     } else {
         unreachable!()
     }
@@ -615,7 +635,16 @@ pub(super) async fn configure_memory_impl(
         .await?;
 
     let text = format!("Configured memory for namespace '{namespace}'");
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(structured_text_result(
+        text,
+        serde_json::json!({
+            "namespace": namespace,
+            "max_memories": p.max_memories,
+            "default_ttl_ms": p.default_ttl_ms,
+            "eviction_policy": p.eviction_policy,
+            "ttl_tiers": p.ttl_tiers,
+        }),
+    ))
 }
 
 // ── Eviction helpers ─────────────────────────────────────────────────

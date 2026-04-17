@@ -589,26 +589,13 @@ Persistent memory that survives across sessions. Agents store, recall, and forge
 | `k` | integer | no | Number of vector results (default: 10) |
 | `max_hops` | integer | no | BFS expansion depth (default: 2) |
 
-### Graph Intelligence (4 tools)
+### Graph Intelligence (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `resolve` | Resolve a name, alias, or description to a graph node. Tries exact ID, then name match, then semantic search. |
 | `related` | Get a node and all its connections in one call. Returns properties plus edges grouped by direction. |
 | `graph_stats` | Per-label breakdowns of node and edge counts. |
-| `mark_fixed` | Bulk-update node status and optionally link to a commit SHA. |
-
-### Proposals (4 tools)
-
-Human-in-the-loop workflow for sensitive operations.
-
-| Tool | Description |
-|------|-------------|
-| `propose_action` | Create a proposal with a GQL query for human review. Auto-expires after 24 hours. |
-| `approve_proposal` | Approve a pending proposal. |
-| `reject_proposal` | Reject a pending proposal with an optional reason. |
-| `execute_proposal` | Execute an approved proposal's stored GQL query. |
-| `list_proposals` | List proposals filtered by status (pending, approved, executed, rejected, expired). |
 
 ### Batch Operations (3 tools)
 
@@ -646,13 +633,6 @@ Identity and access management for the secure vault.
 |------|-------------|
 | `create_edge_schema` | Create an edge type schema with field shorthand and source/target label constraints. |
 | `delete_edge_schema` | Delete an edge schema by label. |
-
-### Tracing (2 tools)
-
-| Tool | Description |
-|------|-------------|
-| `log_trace` | Log a tool interaction trace for training data collection. |
-| `export_traces` | Export traces as JSONL for fine-tuning. Filter by session, tool, feedback, model, or date range. |
 
 ### Server (2 tools)
 
