@@ -140,8 +140,11 @@ pub enum GqlStatement {
         or_replace: bool,
         if_not_exists: bool,
         /// Optional per-type validation mode override. `None` inherits the
-        /// global default (Warn). `STRICT` rejects writes with undeclared
-        /// properties; `WARN` logs but accepts them.
+        /// global default (Warn). `STRICT` rejects writes that have any
+        /// schema-validation issue (missing required props, type mismatch,
+        /// out-of-range numerics, length or pattern violation, unique-key
+        /// collision, etc.); `WARN` logs the same issues but accepts the
+        /// write.
         validation_mode: Option<selene_core::ValidationMode>,
     },
     /// DROP NODE TYPE [IF EXISTS] :label

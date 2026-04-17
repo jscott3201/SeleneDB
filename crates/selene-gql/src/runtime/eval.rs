@@ -401,10 +401,14 @@ fn eval_list_iter(
                 };
                 out.push(projected);
             }
-            // Heterogeneous output per-row; use NOTHING as element type placeholder,
-            // matching the ValueType::List → GqlType conversion used elsewhere.
+            // Infer element type from projected values so the output list
+            // matches other list-building paths (COLLECT, list literals,
+            // property-of-list access). `infer_list_element_type` returns
+            // `Nothing` for empty/all-null lists, preserving the previous
+            // behavior in those cases.
+            let element_type = crate::types::value::infer_list_element_type(&out);
             Ok(GqlValue::List(GqlList {
-                element_type: GqlType::Nothing,
+                element_type,
                 elements: Arc::from(out),
             }))
         }

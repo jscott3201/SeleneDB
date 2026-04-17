@@ -861,7 +861,10 @@ fn e2e_list_comprehension_projection() {
 #[test]
 fn e2e_list_comprehension_with_where() {
     let g = setup_graph();
-    // Filter-only comprehension: [x IN xs WHERE p] projects x by default.
+    // Full form: `[x IN xs WHERE p | f(x)]`. Projection (`| x`) is required
+    // in the current grammar; ISO §20.10 shorthand `[x IN xs WHERE p]` (where
+    // an omitted projection defaults to the iteration variable) is not yet
+    // supported.
     let result = QueryBuilder::new(
         "MATCH (b:building) RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 2 | x] AS big",
         &g,

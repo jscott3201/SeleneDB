@@ -9,15 +9,16 @@ use std::sync::Arc;
 use selene_core::schema::{PropertyDef, ValueType};
 use selene_core::{Edge, IStr, Node, Value};
 
-use crate::schema::{SchemaValidator, ValidationIssue};
+use crate::schema::{SchemaKind, SchemaValidator, ValidationIssue};
 
 // ── Validation impl block ────────────────────────────────────────────────────
 
 impl SchemaValidator {
     /// Validate a node against all registered schemas whose labels appear on it.
     ///
-    /// Each issue carries the label it was produced under, so enforcement can
-    /// consult per-type validation mode overrides in [`Self::effective_mode_for_label`].
+    /// Each issue carries the label + [`SchemaKind::Node`] tag it was produced
+    /// under, so enforcement can consult per-type validation mode overrides in
+    /// [`Self::effective_mode_for`].
     pub fn validate_node(&self, node: &Node) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -25,9 +26,11 @@ impl SchemaValidator {
             if let Some(schema) = self.node_schemas.get(&label) {
                 let start = issues.len();
                 check_properties(&schema.properties, &node.properties, &mut issues);
-                // Tag every issue emitted for this label.
+                // Tag every issue emitted for this label with its kind so the
+                // correct (node) schema registry is consulted at enforcement.
                 for issue in &mut issues[start..] {
                     issue.label = Some(schema.label.as_ref().into());
+                    issue.kind = Some(SchemaKind::Node);
                 }
             }
         }
@@ -47,6 +50,7 @@ impl SchemaValidator {
             check_properties(&schema.properties, &edge.properties, &mut issues);
             for issue in &mut issues[start..] {
                 issue.label = Some(schema.label.as_ref().into());
+                issue.kind = Some(SchemaKind::Edge);
             }
         }
 
@@ -83,7 +87,7 @@ impl SchemaValidator {
                             .collect::<Vec<_>>(),
                         source_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
                     ))
-                    .with_label(label),
+                    .with_edge_label(label),
                 );
             }
             if !schema.target_labels.is_empty()
@@ -103,7 +107,7 @@ impl SchemaValidator {
                             .collect::<Vec<_>>(),
                         target_labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
                     ))
-                    .with_label(label),
+                    .with_edge_label(label),
                 );
             }
         }
@@ -154,7 +158,7 @@ impl SchemaValidator {
                     ValidationIssue::new(format!(
                         "edge '{edge_label}' source exceeds max_out_degree {max_out} (has {source_out_count})"
                     ))
-                    .with_label(edge_label),
+                    .with_edge_label(edge_label),
                 );
             }
             if let Some(max_in) = schema.max_in_degree
@@ -164,7 +168,7 @@ impl SchemaValidator {
                     ValidationIssue::new(format!(
                         "edge '{edge_label}' target exceeds max_in_degree {max_in} (has {target_in_count})"
                     ))
-                    .with_label(edge_label),
+                    .with_edge_label(edge_label),
                 );
             }
         }
@@ -203,7 +207,7 @@ impl SchemaValidator {
                             ValidationIssue::new(format!(
                                 "node requires at least {min_out} outgoing '{edge_label}' edge(s), has {actual}"
                             ))
-                            .with_label(edge_label.as_str()),
+                            .with_edge_label(edge_label.as_str()),
                         );
                     }
                 }
@@ -224,7 +228,7 @@ impl SchemaValidator {
                             ValidationIssue::new(format!(
                                 "node requires at least {min_in} incoming '{edge_label}' edge(s), has {actual}"
                             ))
-                            .with_label(edge_label.as_str()),
+                            .with_edge_label(edge_label.as_str()),
                         );
                     }
                 }

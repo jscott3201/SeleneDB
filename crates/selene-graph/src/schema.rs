@@ -27,14 +27,30 @@ const MAX_INHERITANCE_DEPTH: usize = 32;
 /// The caller uses the validator's [`ValidationMode`] to decide whether an
 /// issue should be logged as a warning or cause a write to be rejected.
 ///
-/// `label` — the node or edge label the issue is attributable to, used by
-/// [`SchemaValidator::effective_mode_for_label`] to resolve per-type mode
-/// overrides. `None` means the issue is schema-agnostic (e.g., unique or
-/// composite-key checks that span multiple labels).
+/// `label` + `kind` — the node or edge label the issue is attributable to,
+/// used by [`SchemaValidator::effective_mode_for`] to resolve per-type mode
+/// overrides. `kind` disambiguates the node-schema and edge-schema
+/// registries when a label is shared between them. `None` means the issue
+/// is schema-agnostic (e.g., unique or composite-key checks that span
+/// multiple labels).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationIssue {
     pub message: String,
     pub label: Option<IStr>,
+    /// Which schema namespace the label belongs to. Required because node
+    /// and edge types share no namespace but are keyed separately by label,
+    /// so a shared label (e.g. "employee" as both node type and edge type)
+    /// can't be disambiguated from the label alone.
+    pub kind: Option<SchemaKind>,
+}
+
+/// Schema namespace tag for a validation issue. Disambiguates node-label
+/// overrides from edge-label overrides when resolving per-type validation
+/// mode (see `SchemaValidator::effective_mode_for`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaKind {
+    Node,
+    Edge,
 }
 
 impl ValidationIssue {
@@ -42,14 +58,25 @@ impl ValidationIssue {
         Self {
             message: message.into(),
             label: None,
+            kind: None,
         }
     }
 
-    /// Attach a label to this issue so per-type validation mode can be
-    /// resolved at enforcement time.
+    /// Attach a node label to this issue so per-type validation mode can be
+    /// resolved at enforcement time against the node-schema registry.
     #[must_use]
-    pub fn with_label(mut self, label: impl Into<IStr>) -> Self {
+    pub fn with_node_label(mut self, label: impl Into<IStr>) -> Self {
         self.label = Some(label.into());
+        self.kind = Some(SchemaKind::Node);
+        self
+    }
+
+    /// Attach an edge label to this issue so per-type validation mode can be
+    /// resolved at enforcement time against the edge-schema registry.
+    #[must_use]
+    pub fn with_edge_label(mut self, label: impl Into<IStr>) -> Self {
+        self.label = Some(label.into());
+        self.kind = Some(SchemaKind::Edge);
         self
     }
 }
@@ -114,7 +141,8 @@ impl SchemaValidator {
         let mut strict = Vec::new();
         let mut warn = Vec::new();
         for issue in issues {
-            let mode = self.effective_mode_for_label(issue.label.as_ref().map(|s| s.as_str()));
+            let mode =
+                self.effective_mode_for(issue.kind, issue.label.as_ref().map(|s| s.as_str()));
             match mode {
                 ValidationMode::Strict => strict.push(issue),
                 ValidationMode::Warn => warn.push(issue),
@@ -123,29 +151,43 @@ impl SchemaValidator {
         (strict, warn)
     }
 
-    /// Resolve the effective validation mode for a given label.
+    /// Resolve the effective validation mode for an issue, using the schema
+    /// namespace (`kind`) to disambiguate node vs edge labels.
     ///
     /// Per-type override (set via `CREATE NODE TYPE ... STRICT/WARN` or
     /// `validation_mode` in a schema pack) wins over the global default.
-    /// `None` label or unknown label falls back to global mode — this covers
-    /// cross-label checks like composite keys and structural violations that
-    /// aren't attributable to a single type.
-    pub fn effective_mode_for_label(&self, label: Option<&str>) -> ValidationMode {
-        let Some(lbl) = label else {
+    /// `None` kind+label or unknown label falls back to global mode — this
+    /// covers cross-label checks like composite keys and structural
+    /// violations that aren't attributable to a single type.
+    pub fn effective_mode_for(
+        &self,
+        kind: Option<SchemaKind>,
+        label: Option<&str>,
+    ) -> ValidationMode {
+        let (Some(lbl), Some(kind)) = (label, kind) else {
+            // Without a definite (kind, label) pair we can't safely pick a
+            // registry — fall back to the global mode.
             return self.mode;
         };
         let key = IStr::new(lbl);
-        if let Some(node_schema) = self.node_schemas.get(&key)
-            && let Some(mode) = node_schema.validation_mode
-        {
-            return mode;
+        match kind {
+            SchemaKind::Node => self
+                .node_schemas
+                .get(&key)
+                .and_then(|s| s.validation_mode)
+                .unwrap_or(self.mode),
+            SchemaKind::Edge => self
+                .edge_schemas
+                .get(&key)
+                .and_then(|s| s.validation_mode)
+                .unwrap_or(self.mode),
         }
-        if let Some(edge_schema) = self.edge_schemas.get(&key)
-            && let Some(mode) = edge_schema.validation_mode
-        {
-            return mode;
-        }
-        self.mode
+    }
+
+    /// Node-label convenience for callers that know they're looking at a
+    /// node-namespace issue (e.g. label-removal inheritance checks).
+    pub fn effective_mode_for_node_label(&self, label: &str) -> ValidationMode {
+        self.effective_mode_for(Some(SchemaKind::Node), Some(label))
     }
 
     /// Register a [`NodeSchema`], keyed by `schema.label`.

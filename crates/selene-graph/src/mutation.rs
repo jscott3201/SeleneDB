@@ -509,11 +509,14 @@ impl<'g> TrackedMutation<'g> {
                 if chain.contains(&ilabel) {
                     // Strict wins if either the label being removed or the
                     // label depending on it declares Strict.
-                    let mode_removed = self.graph.schema.effective_mode_for_label(Some(label));
+                    // Label-removal inheritance check: both sides are node
+                    // labels (edge labels can't inherit), so resolve both
+                    // against the node schema registry explicitly.
+                    let mode_removed = self.graph.schema.effective_mode_for_node_label(label);
                     let mode_owner = self
                         .graph
                         .schema
-                        .effective_mode_for_label(Some(other_label.as_str()));
+                        .effective_mode_for_node_label(other_label.as_str());
                     let strict = matches!(mode_removed, ValidationMode::Strict)
                         || matches!(mode_owner, ValidationMode::Strict);
                     if strict {
@@ -1164,7 +1167,7 @@ fn validate_immutability(
                         crate::schema::ValidationIssue::new(format!(
                             "property '{key}' is immutable on label '{label}'"
                         ))
-                        .with_label(label.as_str()),
+                        .with_node_label(label.as_str()),
                     );
                 }
             }
@@ -1213,7 +1216,7 @@ fn validate_unique_constraints(
                                         "unique violation: '{}'='{}' already exists on node {}",
                                         prop_def.name, val, other_id.0
                                     ))
-                                    .with_label(label.as_str()),
+                                    .with_node_label(label.as_str()),
                                 );
                             }
                             continue;
@@ -1239,7 +1242,7 @@ fn validate_unique_constraints(
                                             "unique violation: '{}'='{}' already exists on node {}",
                                             prop_def.name, val, other_id.0
                                         ))
-                                        .with_label(label.as_str()),
+                                        .with_node_label(label.as_str()),
                                     );
                                 }
                             }
@@ -1304,7 +1307,7 @@ fn validate_composite_keys(
                                         "composite key violation on :{}: ({key_desc}) already exists on node {}",
                                         label, other_id.0
                                     ))
-                                    .with_label(label.as_str()),
+                                    .with_node_label(label.as_str()),
                                 );
                             }
                         }
@@ -1335,7 +1338,7 @@ fn validate_composite_keys(
                                             "composite key violation on :{}: ({key_desc}) already exists on node {}",
                                             label, other_id.0
                                         ))
-                                        .with_label(label.as_str()),
+                                        .with_node_label(label.as_str()),
                                     );
                                     break; // One violation per node is enough
                                 }
