@@ -1,6 +1,7 @@
 //! Embedded HTTP server — axum routes + optional MCP.
 
 pub(crate) mod auth;
+pub(crate) mod changelog_event;
 pub(crate) mod error;
 pub(crate) mod rate_limit;
 pub(crate) mod routes;
