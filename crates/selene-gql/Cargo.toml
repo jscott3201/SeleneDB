@@ -27,6 +27,7 @@ serde_json.workspace = true
 rayon = "1"
 unicode-normalization = "0.1"
 regex.workspace = true
+geo-types = { version = "0.7", default-features = false, features = ["std"] }
 
 # Vector embedding (optional, gated by `embed` feature)
 candle-core = { version = "0.10", optional = true }
