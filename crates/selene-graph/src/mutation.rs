@@ -507,20 +507,28 @@ impl<'g> TrackedMutation<'g> {
                 // Check if `label` appears in other_label's parent chain.
                 let chain = self.graph.schema.resolve_label_chain(other_label.as_str());
                 if chain.contains(&ilabel) {
-                    match self.graph.schema.mode() {
-                        ValidationMode::Strict => {
-                            return Err(GraphError::SchemaViolation(format!(
-                                "cannot remove inherited label '{label}' -- required by label '{other_label}'"
-                            )));
-                        }
-                        ValidationMode::Warn => {
-                            tracing::warn!(
-                                label,
-                                required_by = other_label.as_str(),
-                                "removing inherited label"
-                            );
-                        }
+                    // Strict wins if either the label being removed or the
+                    // label depending on it declares Strict.
+                    // Label-removal inheritance check: both sides are node
+                    // labels (edge labels can't inherit), so resolve both
+                    // against the node schema registry explicitly.
+                    let mode_removed = self.graph.schema.effective_mode_for_node_label(label);
+                    let mode_owner = self
+                        .graph
+                        .schema
+                        .effective_mode_for_node_label(other_label.as_str());
+                    let strict = matches!(mode_removed, ValidationMode::Strict)
+                        || matches!(mode_owner, ValidationMode::Strict);
+                    if strict {
+                        return Err(GraphError::SchemaViolation(format!(
+                            "cannot remove inherited label '{label}' -- required by label '{other_label}'"
+                        )));
                     }
+                    tracing::warn!(
+                        label,
+                        required_by = other_label.as_str(),
+                        "removing inherited label"
+                    );
                 }
             }
         }
@@ -577,20 +585,17 @@ impl<'g> TrackedMutation<'g> {
             &target_labels,
         );
         if !issues.is_empty() {
-            match self.graph.schema.mode() {
-                ValidationMode::Strict => {
-                    let msg = issues
-                        .iter()
-                        .map(|i| i.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(GraphError::SchemaViolation(msg));
-                }
-                ValidationMode::Warn => {
-                    for issue in &issues {
-                        tracing::warn!(issue = %issue, "edge endpoint warning");
-                    }
-                }
+            let (strict, warn) = self.graph.schema.partition_issues_by_mode(issues);
+            for issue in &warn {
+                tracing::warn!(issue = %issue, "edge endpoint warning");
+            }
+            if !strict.is_empty() {
+                let msg = strict
+                    .iter()
+                    .map(|i| i.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(GraphError::SchemaViolation(msg));
             }
         }
 
@@ -613,20 +618,17 @@ impl<'g> TrackedMutation<'g> {
             current_in + 1,
         );
         if !card_issues.is_empty() {
-            match self.graph.schema.mode() {
-                ValidationMode::Strict => {
-                    let msg = card_issues
-                        .iter()
-                        .map(|i| i.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(GraphError::SchemaViolation(msg));
-                }
-                ValidationMode::Warn => {
-                    for issue in &card_issues {
-                        tracing::warn!(issue = %issue, "edge cardinality warning");
-                    }
-                }
+            let (strict, warn) = self.graph.schema.partition_issues_by_mode(card_issues);
+            for issue in &warn {
+                tracing::warn!(issue = %issue, "edge cardinality warning");
+            }
+            if !strict.is_empty() {
+                let msg = strict
+                    .iter()
+                    .map(|i| i.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(GraphError::SchemaViolation(msg));
             }
         }
 
@@ -858,21 +860,18 @@ impl<'g> TrackedMutation<'g> {
         validate_composite_keys(self.graph, &node_ids, &mut all_issues);
 
         if !all_issues.is_empty() {
-            match self.graph.schema.mode() {
-                ValidationMode::Strict => {
-                    let msg = all_issues
-                        .iter()
-                        .map(|i| i.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    // Do NOT call rollback explicitly -- Drop will handle it.
-                    return Err(GraphError::SchemaViolation(msg));
-                }
-                ValidationMode::Warn => {
-                    for issue in &all_issues {
-                        tracing::warn!(issue = %issue, "schema validation warning");
-                    }
-                }
+            let (strict, warn) = self.graph.schema.partition_issues_by_mode(all_issues);
+            for issue in &warn {
+                tracing::warn!(issue = %issue, "schema validation warning");
+            }
+            if !strict.is_empty() {
+                let msg = strict
+                    .iter()
+                    .map(|i| i.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                // Do NOT call rollback explicitly -- Drop will handle it.
+                return Err(GraphError::SchemaViolation(msg));
             }
         }
 
@@ -1164,9 +1163,12 @@ fn validate_immutability(
         {
             for label in node_ref.labels.iter() {
                 if graph.schema.is_immutable(label.as_str(), key.as_str()) {
-                    issues.push(crate::schema::ValidationIssue::new(format!(
-                        "property '{key}' is immutable on label '{label}'"
-                    )));
+                    issues.push(
+                        crate::schema::ValidationIssue::new(format!(
+                            "property '{key}' is immutable on label '{label}'"
+                        ))
+                        .with_node_label(label.as_str()),
+                    );
                 }
             }
         }
@@ -1209,10 +1211,13 @@ fn validate_unique_constraints(
                                 if node_ids.contains(&other_id) && other_id.0 < nid.0 {
                                     continue;
                                 }
-                                issues.push(crate::schema::ValidationIssue::new(format!(
-                                    "unique violation: '{}'='{}' already exists on node {}",
-                                    prop_def.name, val, other_id.0
-                                )));
+                                issues.push(
+                                    crate::schema::ValidationIssue::new(format!(
+                                        "unique violation: '{}'='{}' already exists on node {}",
+                                        prop_def.name, val, other_id.0
+                                    ))
+                                    .with_node_label(label.as_str()),
+                                );
                             }
                             continue;
                         }
@@ -1232,10 +1237,13 @@ fn validate_unique_constraints(
                                         other_ref.properties.get_by_str(prop_def.name.as_ref())
                                     && val == other_val
                                 {
-                                    issues.push(crate::schema::ValidationIssue::new(format!(
-                                        "unique violation: '{}'='{}' already exists on node {}",
-                                        prop_def.name, val, other_id.0
-                                    )));
+                                    issues.push(
+                                        crate::schema::ValidationIssue::new(format!(
+                                            "unique violation: '{}'='{}' already exists on node {}",
+                                            prop_def.name, val, other_id.0
+                                        ))
+                                        .with_node_label(label.as_str()),
+                                    );
                                 }
                             }
                         }
@@ -1294,10 +1302,13 @@ fn validate_composite_keys(
                             // ID (it will report the violation from its own iteration)
                             if !(node_ids.contains(&other_id) && other_id.0 < nid.0) {
                                 let key_desc = format_key_desc(&schema.key_properties, &key_values);
-                                issues.push(crate::schema::ValidationIssue::new(format!(
-                                    "composite key violation on :{}: ({key_desc}) already exists on node {}",
-                                    label, other_id.0
-                                )));
+                                issues.push(
+                                    crate::schema::ValidationIssue::new(format!(
+                                        "composite key violation on :{}: ({key_desc}) already exists on node {}",
+                                        label, other_id.0
+                                    ))
+                                    .with_node_label(label.as_str()),
+                                );
                             }
                         }
                         continue;
@@ -1322,10 +1333,13 @@ fn validate_composite_keys(
                                 if key_values == other_key {
                                     let key_desc =
                                         format_key_desc(&schema.key_properties, &key_values);
-                                    issues.push(crate::schema::ValidationIssue::new(format!(
-                                        "composite key violation on :{}: ({key_desc}) already exists on node {}",
-                                        label, other_id.0
-                                    )));
+                                    issues.push(
+                                        crate::schema::ValidationIssue::new(format!(
+                                            "composite key violation on :{}: ({key_desc}) already exists on node {}",
+                                            label, other_id.0
+                                        ))
+                                        .with_node_label(label.as_str()),
+                                    );
                                     break; // One violation per node is enough
                                 }
                             }

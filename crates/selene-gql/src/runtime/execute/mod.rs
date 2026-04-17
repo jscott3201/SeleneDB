@@ -240,6 +240,7 @@ fn execute_mut(
             properties,
             or_replace,
             if_not_exists,
+            validation_mode,
         } => ddl::create_node_type(
             shared,
             label,
@@ -247,6 +248,7 @@ fn execute_mut(
             properties,
             *or_replace,
             *if_not_exists,
+            *validation_mode,
         ),
         GqlStatement::DropNodeType { label, if_exists } => {
             ddl::drop_node_type(shared, label, *if_exists)
@@ -259,6 +261,7 @@ fn execute_mut(
             properties,
             or_replace,
             if_not_exists,
+            validation_mode,
         } => ddl::create_edge_type(
             shared,
             label,
@@ -267,6 +270,7 @@ fn execute_mut(
             properties,
             *or_replace,
             *if_not_exists,
+            *validation_mode,
         ),
         GqlStatement::DropEdgeType { label, if_exists } => {
             ddl::drop_edge_type(shared, label, *if_exists)

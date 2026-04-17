@@ -215,6 +215,10 @@ fn build_expr_depth(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> 
                 negated,
             })
         }
+        Rule::list_iter_expr => {
+            let inner = first_inner(pair)?;
+            build_list_iter(inner, depth + 1)
+        }
         Rule::param_ref => {
             // $name -- strip the leading '$'
             let name = &pair.as_str()[1..];
@@ -911,6 +915,129 @@ fn build_postfix(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
 fn build_primary(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
     let inner = first_inner(pair)?;
     build_expr_depth(inner, depth + 1)
+}
+
+// ── List iteration expressions (ISO GQL §20.10-11) ─────────────────
+
+fn build_list_iter(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
+    match pair.as_rule() {
+        Rule::list_comprehension => build_list_comprehension(pair, depth),
+        Rule::list_quant => build_list_quant(pair, depth),
+        Rule::list_reduce => build_list_reduce(pair, depth),
+        rule => Err(GqlError::parse_error(format!(
+            "unexpected rule {rule:?} inside list_iter_expr"
+        ))),
+    }
+}
+
+fn build_list_comprehension(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
+    let mut var: Option<IStr> = None;
+    let mut source: Option<Expr> = None;
+    let mut predicate: Option<Box<Expr>> = None;
+    let mut projection: Option<Expr> = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => var = Some(intern_var(inner)),
+            Rule::expr if source.is_none() => source = Some(build_expr_depth(inner, depth + 1)?),
+            Rule::list_iter_where => {
+                let body = first_inner(inner)?;
+                predicate = Some(Box::new(build_expr_depth(body, depth + 1)?));
+            }
+            Rule::expr => projection = Some(build_expr_depth(inner, depth + 1)?),
+            _ => {}
+        }
+    }
+    let var =
+        var.ok_or_else(|| GqlError::parse_error("list comprehension: missing iteration variable"))?;
+    let source = source
+        .ok_or_else(|| GqlError::parse_error("list comprehension: missing source expression"))?;
+    let projection = projection.ok_or_else(|| {
+        GqlError::parse_error("list comprehension: missing projection expression")
+    })?;
+    Ok(Expr::ListIter {
+        kind: ListIterKind::Comprehension,
+        var,
+        source: Box::new(source),
+        predicate,
+        projection: Some(Box::new(projection)),
+        reduce_init: None,
+    })
+}
+
+fn build_list_quant(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
+    let mut kind: Option<ListIterKind> = None;
+    let mut var: Option<IStr> = None;
+    let mut source: Option<Expr> = None;
+    let mut predicate: Option<Box<Expr>> = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::list_quant_op => {
+                kind = Some(match inner.as_str().to_uppercase().as_str() {
+                    "ANY" => ListIterKind::Any,
+                    "ALL" => ListIterKind::All,
+                    "NONE" => ListIterKind::None,
+                    "SINGLE" => ListIterKind::Single,
+                    other => {
+                        return Err(GqlError::parse_error(format!(
+                            "unknown list quantifier: {other}"
+                        )));
+                    }
+                });
+            }
+            Rule::ident => var = Some(intern_var(inner)),
+            Rule::expr => source = Some(build_expr_depth(inner, depth + 1)?),
+            Rule::list_iter_where => {
+                let body = first_inner(inner)?;
+                predicate = Some(Box::new(build_expr_depth(body, depth + 1)?));
+            }
+            _ => {}
+        }
+    }
+    let kind = kind.ok_or_else(|| GqlError::parse_error("list quantifier: missing operator"))?;
+    let var =
+        var.ok_or_else(|| GqlError::parse_error("list quantifier: missing iteration variable"))?;
+    let source = source
+        .ok_or_else(|| GqlError::parse_error("list quantifier: missing source expression"))?;
+    let predicate = predicate
+        .ok_or_else(|| GqlError::parse_error("list quantifier: missing WHERE predicate"))?;
+    Ok(Expr::ListIter {
+        kind,
+        var,
+        source: Box::new(source),
+        predicate: Some(predicate),
+        projection: None,
+        reduce_init: None,
+    })
+}
+
+fn build_list_reduce(pair: Pair<'_, Rule>, depth: u16) -> Result<Expr, GqlError> {
+    let mut idents: Vec<IStr> = Vec::new();
+    let mut exprs: Vec<Expr> = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => idents.push(intern_var(inner)),
+            Rule::expr => exprs.push(build_expr_depth(inner, depth + 1)?),
+            _ => {}
+        }
+    }
+    if idents.len() != 2 || exprs.len() != 3 {
+        return Err(GqlError::parse_error(
+            "reduce: expected `reduce(acc = init, var IN source | step)`",
+        ));
+    }
+    let acc_var = idents.remove(0);
+    let iter_var = idents.remove(0);
+    let init = exprs.remove(0);
+    let source = exprs.remove(0);
+    let step = exprs.remove(0);
+    Ok(Expr::ListIter {
+        kind: ListIterKind::Reduce,
+        var: iter_var,
+        source: Box::new(source),
+        predicate: None,
+        projection: Some(Box::new(step)),
+        reduce_init: Some((acc_var, Box::new(init))),
+    })
 }
 
 // ── Aggregate ──────────────────────────────────────────────────────

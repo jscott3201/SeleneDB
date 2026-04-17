@@ -90,6 +90,7 @@ pub(super) fn show_triggers(shared: &SharedGraph) -> Result<GqlResult, GqlError>
 
 // ── Node Type DDL ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_node_type(
     shared: &SharedGraph,
     label: &str,
@@ -97,6 +98,7 @@ pub(super) fn create_node_type(
     properties: &[DdlPropertyDef],
     or_replace: bool,
     if_not_exists: bool,
+    validation_mode: Option<selene_core::ValidationMode>,
 ) -> Result<GqlResult, GqlError> {
     if let Some(parent_label) = parent {
         let snap = shared.load_snapshot();
@@ -121,7 +123,7 @@ pub(super) fn create_node_type(
         description: String::new(),
         annotations: HashMap::new(),
         version: Default::default(),
-        validation_mode: None,
+        validation_mode,
         key_properties: Vec::new(),
     };
 
@@ -227,6 +229,7 @@ pub(super) fn create_edge_type(
     properties: &[DdlPropertyDef],
     or_replace: bool,
     if_not_exists: bool,
+    validation_mode: Option<selene_core::ValidationMode>,
 ) -> Result<GqlResult, GqlError> {
     let props = build_property_defs(properties)?;
     let schema = selene_core::EdgeSchema {
@@ -243,7 +246,7 @@ pub(super) fn create_edge_type(
             .collect(),
         annotations: HashMap::new(),
         version: Default::default(),
-        validation_mode: None,
+        validation_mode,
         max_out_degree: None,
         max_in_degree: None,
         min_out_degree: None,

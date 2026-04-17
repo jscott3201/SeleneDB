@@ -188,6 +188,29 @@ pub enum Expr {
     /// COLLECT { subquery } -- executes subquery, collects all result values into a list.
     /// Supports DISTINCT, ORDER BY, LIMIT inside the subquery.
     CollectSubquery(Box<super::statement::QueryPipeline>),
+
+    /// List iteration expression family (ISO GQL §20.10-11).
+    ///
+    /// Binds `var` to each element of `source` (which must evaluate to a list
+    /// or null) and evaluates the inner expressions in a scope that extends
+    /// the outer bindings with that single variable.
+    ///
+    /// Shapes:
+    /// - Comprehension: `[x IN list WHERE pred | projection]` -> list value
+    /// - Any/All/None/Single: `any(x IN list WHERE pred)` -> bool
+    /// - Reduce: `reduce(acc = init, x IN list | step)` -> scalar
+    ListIter {
+        kind: ListIterKind,
+        var: IStr,
+        source: Box<Expr>,
+        /// WHERE predicate. Required for quantifiers, optional for comprehension, unused for reduce.
+        predicate: Option<Box<Expr>>,
+        /// Projection expression (comprehension) or step expression (reduce).
+        /// Unused for quantifiers, whose value is a boolean derived from the predicate.
+        projection: Option<Box<Expr>>,
+        /// Reduce-only: (accumulator variable, initial value expression).
+        reduce_init: Option<(IStr, Box<Expr>)>,
+    },
 }
 
 impl Expr {
@@ -248,6 +271,23 @@ impl Expr {
             Expr::RecordConstruct(_) => GqlType::Record,
             Expr::Like { .. } | Expr::Between { .. } => GqlType::Bool,
             Expr::CountSubquery(_) => GqlType::Int,
+            Expr::ListIter {
+                kind,
+                projection,
+                reduce_init,
+                ..
+            } => match kind {
+                ListIterKind::Comprehension => GqlType::List(Box::new(GqlType::Nothing)),
+                ListIterKind::Any
+                | ListIterKind::All
+                | ListIterKind::None
+                | ListIterKind::Single => GqlType::Bool,
+                ListIterKind::Reduce => projection
+                    .as_ref()
+                    .map(|p| p.infer_type())
+                    .or_else(|| reduce_init.as_ref().map(|(_, e)| e.infer_type()))
+                    .unwrap_or(GqlType::String),
+            },
         }
     }
 
@@ -368,6 +408,24 @@ impl Expr {
                     e.walk(f);
                 }
             }
+            Expr::ListIter {
+                source,
+                predicate,
+                projection,
+                reduce_init,
+                ..
+            } => {
+                source.walk(f);
+                if let Some(p) = predicate {
+                    p.walk(f);
+                }
+                if let Some(p) = projection {
+                    p.walk(f);
+                }
+                if let Some((_, init)) = reduce_init {
+                    init.walk(f);
+                }
+            }
         }
     }
 
@@ -449,6 +507,23 @@ pub enum StringMatchOp {
     Contains,
     StartsWith,
     EndsWith,
+}
+
+/// Kind of list iteration expression (ISO GQL §20.10-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListIterKind {
+    /// `[x IN list WHERE pred | projection]` -- list value
+    Comprehension,
+    /// `any(x IN list WHERE pred)` -- true if any element matches
+    Any,
+    /// `all(x IN list WHERE pred)` -- true if every element matches (vacuously true on empty)
+    All,
+    /// `none(x IN list WHERE pred)` -- true if no element matches (vacuously true on empty)
+    None,
+    /// `single(x IN list WHERE pred)` -- true iff exactly one element matches
+    Single,
+    /// `reduce(acc = init, x IN list | step)` -- fold over list
+    Reduce,
 }
 
 /// Aggregate operation (vertical or horizontal).
