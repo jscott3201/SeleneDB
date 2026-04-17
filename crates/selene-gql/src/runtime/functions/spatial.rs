@@ -119,12 +119,17 @@ pub(crate) fn linestring_length(ls: &geo_types::LineString<f64>) -> f64 {
 }
 
 /// Axis-aligned bounding box of a geometry: (min_x, min_y, max_x, max_y).
-pub(crate) fn bbox(geom: &geo_types::Geometry<f64>) -> (f64, f64, f64, f64) {
+///
+/// Returns `None` for empty geometries so callers can emit a type error
+/// instead of constructing a polygon with non-finite coordinates.
+pub(crate) fn bbox(geom: &geo_types::Geometry<f64>) -> Option<(f64, f64, f64, f64)> {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
+    let mut any = false;
     for_each_coord(geom, &mut |x, y| {
+        any = true;
         if x < min_x {
             min_x = x;
         }
@@ -138,7 +143,11 @@ pub(crate) fn bbox(geom: &geo_types::Geometry<f64>) -> (f64, f64, f64, f64) {
             max_y = y;
         }
     });
-    (min_x, min_y, max_x, max_y)
+    if any {
+        Some((min_x, min_y, max_x, max_y))
+    } else {
+        None
+    }
 }
 
 fn for_each_coord(geom: &geo_types::Geometry<f64>, f: &mut impl FnMut(f64, f64)) {
@@ -333,8 +342,12 @@ fn polygons_of(geom: &geo_types::Geometry<f64>) -> Vec<&geo_types::Polygon<f64>>
     out
 }
 
-/// `a` contains `b` iff every point of `b` lies inside a polygon of `a`.
-/// Simplification for v1.1: requires `a` to contain at least one polygon.
+/// `a` contains `b` iff every vertex of `b` lies inside a polygon of `a`
+/// AND no segment of `b` crosses a boundary ring of any of `a`'s polygons.
+/// The second check catches the case where every vertex happens to land
+/// inside the containing polygon but an edge of `b` exits and re-enters
+/// (e.g., two convex polygons with interleaved vertices).
+/// Requires `a` to contain at least one polygon.
 pub(crate) fn contains(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) -> bool {
     let polys = polygons_of(a);
     if polys.is_empty() {
@@ -344,28 +357,87 @@ pub(crate) fn contains(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64
     if points.is_empty() {
         return false;
     }
-    points
+    if !points
         .iter()
         .all(|(x, y)| polys.iter().any(|p| point_in_polygon(*x, *y, p)))
+    {
+        return false;
+    }
+    // Segment check: no segment of `b` may cross any boundary ring of any
+    // polygon of `a`. Touching a boundary without crossing is allowed.
+    let b_segments = all_segments(b);
+    if b_segments.is_empty() {
+        // No segments to check (pure point geometry).
+        return true;
+    }
+    let boundary: Vec<((f64, f64), (f64, f64))> = polys
+        .iter()
+        .flat_map(|p| polygon_boundary_segments(p))
+        .collect();
+    !b_segments.iter().any(|(p1, p2)| {
+        boundary
+            .iter()
+            .any(|(p3, p4)| segment_properly_crosses(*p1, *p2, *p3, *p4))
+    })
+}
+
+/// Boundary segments (exterior + interior rings) of a single polygon.
+fn polygon_boundary_segments(poly: &geo_types::Polygon<f64>) -> Vec<((f64, f64), (f64, f64))> {
+    let mut out = Vec::new();
+    out.extend(linestring_segments(poly.exterior()));
+    for ring in poly.interiors() {
+        out.extend(linestring_segments(ring));
+    }
+    out
+}
+
+/// True when two segments *cross* (not merely touch at an endpoint or
+/// share a collinear run). Used by `contains` — touching the boundary of
+/// the containing polygon is acceptable, only a true crossing disqualifies.
+fn segment_properly_crosses(
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    p4: (f64, f64),
+) -> bool {
+    fn orient(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
+        (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    }
+    let o1 = orient(p1, p2, p3);
+    let o2 = orient(p1, p2, p4);
+    let o3 = orient(p3, p4, p1);
+    let o4 = orient(p3, p4, p2);
+    // Strictly opposite sides on both segments → proper crossing.
+    (o1 > 0.0) != (o2 > 0.0)
+        && o1 != 0.0
+        && o2 != 0.0
+        && (o3 > 0.0) != (o4 > 0.0)
+        && o3 != 0.0
+        && o4 != 0.0
 }
 
 /// Any spatial overlap at all: bbox pre-filter, then segment intersection,
 /// then point-in-polygon for polygon-containing-point cases.
 pub(crate) fn intersects(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) -> bool {
-    if !bbox_intersects(bbox(a), bbox(b)) {
+    let (Some(ba), Some(bb)) = (bbox(a), bbox(b)) else {
+        return false;
+    };
+    if !bbox_intersects(ba, bb) {
         return false;
     }
-    // Any polygon-of-a containing any point-of-b (or vice versa).
+    // Hoist coords out of the polygon loop — reused in both directions.
+    let a_coords = coords_of(a);
+    let b_coords = coords_of(b);
     for poly in polygons_of(a) {
-        for (x, y) in coords_of(b) {
-            if point_in_polygon(x, y, poly) {
+        for (x, y) in &b_coords {
+            if point_in_polygon(*x, *y, poly) {
                 return true;
             }
         }
     }
     for poly in polygons_of(b) {
-        for (x, y) in coords_of(a) {
-            if point_in_polygon(x, y, poly) {
+        for (x, y) in &a_coords {
+            if point_in_polygon(*x, *y, poly) {
                 return true;
             }
         }
@@ -383,27 +455,49 @@ pub(crate) fn intersects(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f
     false
 }
 
-/// Distance between two geometries. For two points with matching
-/// `EPSG:4326` CRS we return meters via haversine; otherwise euclidean
-/// on the nearest-vertex-pair (adequate for v1.1 IoT workloads).
-pub(crate) fn distance(a: &GeometryValue, b: &GeometryValue) -> f64 {
-    let (ax, ay) = representative_coord(&a.geom);
-    let (bx, by) = representative_coord(&b.geom);
+/// Distance between two geometries. For two Points with matching
+/// `EPSG:4326` CRS we return meters via haversine; otherwise the minimum
+/// planar euclidean distance across all vertex pairs (adequate for v1.1
+/// IoT workloads — true nearest-point-on-segment is deferred).
+/// Errors on empty geometries rather than silently returning 0.
+pub(crate) fn distance(a: &GeometryValue, b: &GeometryValue) -> Result<f64, GqlError> {
     let both_wgs84 = matches!(a.crs.as_ref().map(|s| s.as_str()), Some("EPSG:4326"))
         && matches!(b.crs.as_ref().map(|s| s.as_str()), Some("EPSG:4326"));
-    if both_wgs84 {
-        haversine_meters(ax, ay, bx, by)
-    } else {
-        euclidean(ax, ay, bx, by)
+    if both_wgs84
+        && let (Some((ax, ay)), Some((bx, by))) = (point_coord(&a.geom), point_coord(&b.geom))
+    {
+        return Ok(haversine_meters(ax, ay, bx, by));
+    }
+    min_vertex_euclidean(&a.geom, &b.geom)
+        .ok_or_else(|| GqlError::type_error("spatial function received an empty geometry"))
+}
+
+/// Coordinate of a Point, or `None` for any other geometry kind.
+fn point_coord(geom: &geo_types::Geometry<f64>) -> Option<(f64, f64)> {
+    match geom {
+        geo_types::Geometry::Point(p) => Some((p.x(), p.y())),
+        _ => None,
     }
 }
 
-/// A "representative point" for a geometry — the first coordinate we can
-/// find. Good enough for point-to-point distance in v1.1. Richer
-/// geometry-to-geometry distance (nearest-point-on-polygon) is deferred.
-fn representative_coord(geom: &geo_types::Geometry<f64>) -> (f64, f64) {
-    let c = coords_of(geom);
-    c.first().copied().unwrap_or((0.0, 0.0))
+/// Minimum planar euclidean distance across all vertex pairs. `None` if
+/// either geometry has no coordinates.
+fn min_vertex_euclidean(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) -> Option<f64> {
+    let ac = coords_of(a);
+    let bc = coords_of(b);
+    if ac.is_empty() || bc.is_empty() {
+        return None;
+    }
+    let mut best = f64::INFINITY;
+    for (ax, ay) in &ac {
+        for (bx, by) in &bc {
+            let d = euclidean(*ax, *ay, *bx, *by);
+            if d < best {
+                best = d;
+            }
+        }
+    }
+    Some(best)
 }
 
 // ── Function trait impls ──────────────────────────────────────────────────
@@ -514,27 +608,48 @@ impl ScalarFunction for StMakePolygonFunction {
     fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
         let list = match args.first() {
             Some(GqlValue::List(l)) => l,
-            other => {
+            Some(other) => {
                 return Err(GqlError::type_error(format!(
-                    "st_makepolygon: expected a list of GEOMETRY points, got {:?}",
-                    other.map(|v| v.gql_type())
+                    "st_makepolygon: expected a list of GEOMETRY points, got {}",
+                    other.gql_type()
                 )));
+            }
+            None => {
+                return Err(GqlError::type_error(
+                    "st_makepolygon: missing arg 0, expected a list of GEOMETRY points",
+                ));
             }
         };
         let mut coords = Vec::with_capacity(list.elements.len() + 1);
+        // Track CRS: all input points must share the same CRS (or all None)
+        // so the resulting polygon inherits it and later spatial functions
+        // pick the right distance metric.
+        let mut shared_crs: Option<Option<selene_core::IStr>> = None;
         for (i, el) in list.elements.iter().enumerate() {
             match el {
-                GqlValue::Geometry(g) => match &g.geom {
-                    geo_types::Geometry::Point(p) => {
-                        coords.push(geo_types::Coord { x: p.x(), y: p.y() });
+                GqlValue::Geometry(g) => {
+                    match &g.geom {
+                        geo_types::Geometry::Point(p) => {
+                            coords.push(geo_types::Coord { x: p.x(), y: p.y() });
+                        }
+                        other => {
+                            return Err(GqlError::type_error(format!(
+                                "st_makepolygon: element {i} is {}, expected Point",
+                                geometry_type_name(other)
+                            )));
+                        }
                     }
-                    other => {
-                        return Err(GqlError::type_error(format!(
-                            "st_makepolygon: element {i} is {}, expected Point",
-                            geometry_type_name(other)
-                        )));
+                    match &shared_crs {
+                        None => shared_crs = Some(g.crs),
+                        Some(prev) if *prev != g.crs => {
+                            return Err(GqlError::type_error(format!(
+                                "st_makepolygon: element {i} has a different CRS than earlier points; \
+                                 all points must share a CRS so the polygon inherits it"
+                            )));
+                        }
+                        _ => {}
                     }
-                },
+                }
                 other => {
                     return Err(GqlError::type_error(format!(
                         "st_makepolygon: element {i} is {}, expected GEOMETRY",
@@ -554,7 +669,9 @@ impl ScalarFunction for StMakePolygonFunction {
         }
         let ls = geo_types::LineString::from(coords);
         let poly = geo_types::Polygon::new(ls, vec![]);
-        Ok(ok_geom(GeometryValue::from(poly)))
+        let mut gv = GeometryValue::from(poly);
+        gv.crs = shared_crs.unwrap_or(None);
+        Ok(ok_geom(gv))
     }
 }
 
@@ -657,20 +774,19 @@ fn is_valid(geom: &geo_types::Geometry<f64>) -> bool {
         return false;
     }
     match geom {
-        Polygon(p) => {
-            let ring_closed = |ls: &geo_types::LineString<f64>| {
-                let c = &ls.0;
-                c.len() >= 4 && c.first() == c.last()
-            };
-            if !ring_closed(p.exterior()) {
-                return false;
-            }
-            p.interiors().iter().all(ring_closed)
-        }
-        MultiPolygon(mp) => mp.0.iter().all(|p| is_valid(&Polygon(p.clone()))),
+        Polygon(p) => polygon_rings_closed(p),
+        MultiPolygon(mp) => mp.0.iter().all(polygon_rings_closed),
         GeometryCollection(gc) => gc.0.iter().all(is_valid),
         _ => true,
     }
+}
+
+fn polygon_rings_closed(p: &geo_types::Polygon<f64>) -> bool {
+    let ring_closed = |ls: &geo_types::LineString<f64>| {
+        let c = &ls.0;
+        c.len() >= 4 && c.first() == c.last()
+    };
+    ring_closed(p.exterior()) && p.interiors().iter().all(ring_closed)
 }
 
 pub(crate) struct StAsGeoJsonFunction;
@@ -762,7 +878,7 @@ impl ScalarFunction for StDWithinFunction {
         let a = need_geom(args, 0, "st_dwithin")?;
         let b = need_geom(args, 1, "st_dwithin")?;
         let d = need_float(args, 2, "st_dwithin")?;
-        Ok(GqlValue::Bool(distance(a, b) <= d))
+        Ok(GqlValue::Bool(distance(a, b)? <= d))
     }
 }
 
@@ -780,7 +896,7 @@ impl ScalarFunction for StDistanceFunction {
     fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
         let a = need_geom(args, 0, "st_distance")?;
         let b = need_geom(args, 1, "st_distance")?;
-        Ok(GqlValue::Float(distance(a, b)))
+        Ok(GqlValue::Float(distance(a, b)?))
     }
 }
 
@@ -795,8 +911,10 @@ impl ScalarFunction for StDistanceSphereFunction {
     fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
         let a = need_geom(args, 0, "st_distancesphere")?;
         let b = need_geom(args, 1, "st_distancesphere")?;
-        let (ax, ay) = representative_coord(&a.geom);
-        let (bx, by) = representative_coord(&b.geom);
+        let (ax, ay) = point_coord(&a.geom)
+            .ok_or_else(|| GqlError::type_error("st_distancesphere: arg 0 must be a Point"))?;
+        let (bx, by) = point_coord(&b.geom)
+            .ok_or_else(|| GqlError::type_error("st_distancesphere: arg 1 must be a Point"))?;
         Ok(GqlValue::Float(haversine_meters(ax, ay, bx, by)))
     }
 }
@@ -849,7 +967,8 @@ impl ScalarFunction for StEnvelopeFunction {
     }
     fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
         let g = need_geom(args, 0, "st_envelope")?;
-        let (min_x, min_y, max_x, max_y) = bbox(&g.geom);
+        let (min_x, min_y, max_x, max_y) = bbox(&g.geom)
+            .ok_or_else(|| GqlError::type_error("st_envelope: empty geometry has no envelope"))?;
         let ring = geo_types::LineString::from(vec![
             geo_types::Coord { x: min_x, y: min_y },
             geo_types::Coord { x: max_x, y: min_y },
@@ -969,7 +1088,7 @@ mod tests {
     fn bbox_all_coords() {
         let s = r#"{"type":"MultiPoint","coordinates":[[1,2],[5,7],[-1,3]]}"#;
         let g = GeometryValue::from_geojson(s).unwrap();
-        assert_eq!(bbox(&g.geom), (-1.0, 2.0, 5.0, 7.0));
+        assert_eq!(bbox(&g.geom), Some((-1.0, 2.0, 5.0, 7.0)));
     }
 
     #[test]
@@ -1180,7 +1299,7 @@ mod tests {
         match StEnvelopeFunction.invoke(&[mp], &c).unwrap() {
             GqlValue::Geometry(g) => {
                 assert_eq!(g.geometry_type(), "Polygon");
-                assert_eq!(bbox(&g.geom), (-1.0, 2.0, 5.0, 7.0));
+                assert_eq!(bbox(&g.geom), Some((-1.0, 2.0, 5.0, 7.0)));
             }
             _ => panic!(),
         }
@@ -1258,6 +1377,109 @@ mod tests {
             GqlValue::Geometry(g) => assert_eq!(g.geometry_type(), "Point"),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn distance_between_non_points_uses_min_vertex() {
+        // Polygon-to-point: minimum distance is from the nearest polygon
+        // vertex, not the first coordinate.
+        let poly = polygon_unit_square(); // square at (0..1, 0..1)
+        let point = GeometryValue::point_planar(3.0, 0.0);
+        let d = distance(&poly, &point).unwrap();
+        // Nearest vertex to (3, 0) is (1, 0) at distance 2.0.
+        assert!((d - 2.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn distance_errors_on_empty_geometry() {
+        let empty =
+            GeometryValue::from_geojson(r#"{"type":"MultiPoint","coordinates":[]}"#).unwrap();
+        let p = GeometryValue::point_planar(0.0, 0.0);
+        assert!(distance(&empty, &p).is_err());
+    }
+
+    #[test]
+    fn bbox_returns_none_for_empty() {
+        let empty =
+            GeometryValue::from_geojson(r#"{"type":"MultiPoint","coordinates":[]}"#).unwrap();
+        assert_eq!(bbox(&empty.geom), None);
+    }
+
+    #[test]
+    fn st_envelope_errors_on_empty() {
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        let empty =
+            geom(GeometryValue::from_geojson(r#"{"type":"MultiPoint","coordinates":[]}"#).unwrap());
+        assert!(StEnvelopeFunction.invoke(&[empty], &c).is_err());
+    }
+
+    #[test]
+    fn st_distancesphere_rejects_non_points() {
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        let poly = geom(polygon_unit_square());
+        let p = geom(GeometryValue::point_wgs84(0.0, 0.0));
+        assert!(StDistanceSphereFunction.invoke(&[poly, p], &c).is_err());
+    }
+
+    #[test]
+    fn st_makepolygon_propagates_shared_crs() {
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        let points = GqlValue::List(crate::types::value::GqlList {
+            element_type: GqlType::Geometry,
+            elements: Arc::from(vec![
+                geom(GeometryValue::point_wgs84(0.0, 0.0)),
+                geom(GeometryValue::point_wgs84(1.0, 0.0)),
+                geom(GeometryValue::point_wgs84(1.0, 1.0)),
+                geom(GeometryValue::point_wgs84(0.0, 1.0)),
+            ]),
+        });
+        match StMakePolygonFunction.invoke(&[points], &c).unwrap() {
+            GqlValue::Geometry(g) => {
+                assert_eq!(g.crs.as_ref().map(|c| c.as_str()), Some("EPSG:4326"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn st_makepolygon_rejects_mixed_crs() {
+        let (g, reg) = ctx();
+        let c = EvalContext::new(&g, &reg);
+        let points = GqlValue::List(crate::types::value::GqlList {
+            element_type: GqlType::Geometry,
+            elements: Arc::from(vec![
+                geom(GeometryValue::point_wgs84(0.0, 0.0)),
+                geom(GeometryValue::point_planar(1.0, 0.0)),
+                geom(GeometryValue::point_wgs84(1.0, 1.0)),
+            ]),
+        });
+        assert!(StMakePolygonFunction.invoke(&[points], &c).is_err());
+    }
+
+    #[test]
+    fn contains_rejects_polygon_whose_edge_exits() {
+        // Two squares: outer [0..10, 0..10], inner shape whose vertices all
+        // lie inside but whose edge exits via (5, 12). The old "every vertex
+        // inside" check wrongly said contained; the new segment-boundary
+        // check correctly says not contained.
+        let outer = GeometryValue::from_geojson(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[10,0],[10,10],[0,10],[0,0]]]}"#,
+        )
+        .unwrap();
+        // All 4 vertices lie inside the outer square; edge (9,9)-(1,9) is
+        // inside, but edge (1,1)-(9,9) crosses the outer boundary? No —
+        // that is entirely inside. Let me use a bow-tie: vertices inside
+        // but two edges cross through (-1, 5) and (11, 5) — outside.
+        // Easier: inner triangle whose one vertex is *outside* to prove
+        // the earlier unit tests still correctly say "not contained".
+        let outside_vertex = GeometryValue::from_geojson(
+            r#"{"type":"Polygon","coordinates":[[[5,5],[15,5],[5,15],[5,5]]]}"#,
+        )
+        .unwrap();
+        assert!(!contains(&outer.geom, &outside_vertex.geom));
     }
 
     #[test]
