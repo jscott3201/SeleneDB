@@ -107,9 +107,14 @@ impl GeometryValue {
     /// round-trip. Preferred over `serde_json::from_str(&self.to_geojson())`
     /// on hot paths like HTTP/MCP response serialization, where the
     /// text-then-parse path wastes an allocation per geometry.
+    ///
+    /// If structured serialization fails (e.g. a coordinate is non-finite
+    /// and serde_json rejects it as invalid JSON), falls back to the text
+    /// form wrapped as a JSON string so the geometry isn't silently lost
+    /// from the response.
     pub fn to_geojson_value(&self) -> serde_json::Value {
         let gj: geojson::Geometry = geojson::Geometry::from(&self.geom);
-        serde_json::to_value(gj).unwrap_or(serde_json::Value::Null)
+        serde_json::to_value(gj).unwrap_or_else(|_| serde_json::Value::String(self.to_geojson()))
     }
 
     /// Serialize as Well-Known Text (WKT) 2D.
