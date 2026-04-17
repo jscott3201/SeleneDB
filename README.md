@@ -22,6 +22,7 @@ Most graph stores make you bolt on a separate vector database, a separate time-s
 - **Vector** — mutable HNSW index, cosine/euclidean, auto-embedding on ingest via candle + EmbeddingGemma-300M
 - **Time-series** — hot (Gorilla/RLE/dictionary), warm aggregates, Parquet cold tier, cloud offload
 - **Full-text** — BM25 via tantivy, with hybrid BM25+cosine reciprocal rank fusion
+- **Spatial** — `GEOMETRY` property type and 18 OGC-aligned `ST_*` functions for point-in-polygon, distance, and envelope queries ([guide](docs/guides/spatial.md))
 - **RAG** — GraphRAG combines vectors, BFS traversal, and Louvain community summaries in one call
 - **RDF** — Turtle/N-Triples import/export and SPARQL queries over the same graph
 
