@@ -90,7 +90,9 @@ fn random_alphanumeric(len: usize) -> String {
 }
 
 fn string_prop(node: &selene_graph::NodeRef<'_>, key: &str) -> Option<String> {
-    node.property(key).and_then(|v| v.as_str()).map(str::to_owned)
+    node.property(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 fn list_prop_strings(node: &selene_graph::NodeRef<'_>, key: &str) -> Option<Vec<String>> {
@@ -132,10 +134,7 @@ fn node_to_dto(g: &selene_graph::SeleneGraph, nid: selene_core::NodeId) -> Optio
     })
 }
 
-fn find_by_prefix(
-    g: &selene_graph::SeleneGraph,
-    prefix: &str,
-) -> Option<selene_core::NodeId> {
+fn find_by_prefix(g: &selene_graph::SeleneGraph, prefix: &str) -> Option<selene_core::NodeId> {
     g.nodes_by_label("api_key").find(|&nid| {
         g.get_node(nid).is_some_and(|n| {
             n.property("prefix")
@@ -145,10 +144,7 @@ fn find_by_prefix(
     })
 }
 
-fn find_by_id(
-    g: &selene_graph::SeleneGraph,
-    id: u64,
-) -> Option<selene_core::NodeId> {
+fn find_by_id(g: &selene_graph::SeleneGraph, id: u64) -> Option<selene_core::NodeId> {
     let nid = selene_core::NodeId(id);
     // Label check guards against caller passing an arbitrary node ID.
     let node = g.get_node(nid)?;
@@ -177,7 +173,9 @@ pub fn create_api_key(
     require_principal_manage(state, auth)?;
 
     if name.trim().is_empty() {
-        return Err(OpError::InvalidRequest("api key name cannot be empty".into()));
+        return Err(OpError::InvalidRequest(
+            "api key name cannot be empty".into(),
+        ));
     }
     if identity.trim().is_empty() {
         return Err(OpError::InvalidRequest(
@@ -212,7 +210,10 @@ pub fn create_api_key(
         ttl_days.map(|days| created_at.saturating_add(i64::from(days) * 86_400_000_000_000));
 
     let mut props = vec![
-        (selene_core::IStr::new("name"), selene_core::Value::str(name)),
+        (
+            selene_core::IStr::new("name"),
+            selene_core::Value::str(name),
+        ),
         (
             selene_core::IStr::new("identity"),
             selene_core::Value::str(identity),
@@ -343,10 +344,7 @@ pub fn revoke_api_key(
 ///
 /// Returns `(identity, role)`. Callers are expected to build an `AuthContext`
 /// from this (the scope bitmap belongs to the main graph, not the vault).
-pub fn verify_api_key(
-    state: &ServerState,
-    token: &str,
-) -> Result<(String, Role), OpError> {
+pub fn verify_api_key(state: &ServerState, token: &str) -> Result<(String, Role), OpError> {
     let Some(rest) = token.strip_prefix(TOKEN_PREFIX) else {
         return Err(OpError::AuthDenied);
     };
@@ -387,8 +385,7 @@ pub fn verify_api_key(
         return Err(OpError::AuthDenied);
     }
 
-    let ok = verify_credential(secret, &hash)
-        .map_err(|_| OpError::AuthDenied)?;
+    let ok = verify_credential(secret, &hash).map_err(|_| OpError::AuthDenied)?;
     if !ok {
         return Err(OpError::AuthDenied);
     }
@@ -398,15 +395,14 @@ pub fn verify_api_key(
         .handle
         .graph
         .read(|g| {
-            g.nodes_by_label("principal")
-                .find_map(|nid| {
-                    let n = g.get_node(nid)?;
-                    if n.property("identity").and_then(|v| v.as_str()) == Some(identity.as_str()) {
-                        string_prop(&n, "role")
-                    } else {
-                        None
-                    }
-                })
+            g.nodes_by_label("principal").find_map(|nid| {
+                let n = g.get_node(nid)?;
+                if n.property("identity").and_then(|v| v.as_str()) == Some(identity.as_str()) {
+                    string_prop(&n, "role")
+                } else {
+                    None
+                }
+            })
         })
         .ok_or(OpError::AuthDenied)?;
 

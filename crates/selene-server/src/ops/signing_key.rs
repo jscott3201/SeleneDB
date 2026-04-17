@@ -135,7 +135,12 @@ mod tests {
         // Issue a token under the current (pre-rotation) key.
         let (access_before, _refresh) = oauth.token_service.issue("admin", "admin").unwrap();
         // Standalone decode works with the original key.
-        assert!(oauth.token_service.validate_standalone(&access_before).is_ok());
+        assert!(
+            oauth
+                .token_service
+                .validate_standalone(&access_before)
+                .is_ok()
+        );
 
         let auth = AuthContext::dev_admin();
         let result = rotate_signing_key(&state, &auth, Some(3600)).unwrap();
@@ -143,12 +148,22 @@ mod tests {
         assert!(result.previous_key_valid_until > result.rotated_at);
 
         // Pre-rotation token still decodes thanks to the retired-key ring.
-        assert!(oauth.token_service.validate_standalone(&access_before).is_ok());
+        assert!(
+            oauth
+                .token_service
+                .validate_standalone(&access_before)
+                .is_ok()
+        );
 
         // New tokens issued under the rotated key also validate.
         let (access_after, _) = oauth.token_service.issue("admin", "admin").unwrap();
         assert_ne!(access_before, access_after);
-        assert!(oauth.token_service.validate_standalone(&access_after).is_ok());
+        assert!(
+            oauth
+                .token_service
+                .validate_standalone(&access_after)
+                .is_ok()
+        );
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ mod principals;
 mod proposals;
 mod schemas;
 mod signing_key;
+mod tokens;
 mod traces;
 
 use std::collections::HashMap;
@@ -2356,6 +2357,61 @@ impl SeleneTools {
         params: Parameters<RotateSigningKeyParams>,
     ) -> Result<CallToolResult, McpError> {
         signing_key::rotate_signing_key_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "revoke_token",
+        description = "Revoke an OAuth access token by its raw JWT string. Adds the token's \
+        `jti` to the in-memory deny-list until its original expiry, after which the entry is \
+        pruned since the token would be invalid anyway. Use to force-logout a principal or \
+        invalidate a leaked token. Refresh tokens are unaffected — pair with \
+        `rotate_signing_key` if you also need to cut in-flight refresh flows. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn revoke_token(
+        &self,
+        params: Parameters<RevokeTokenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tokens::revoke_token_impl(self, params.0).await
+    }
+
+    #[tool(
+        name = "list_revoked_tokens",
+        description = "List current OAuth access-token deny-list entries (jti + original \
+        expiry). Expired entries are filtered out. Admin-only.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_revoked_tokens(&self) -> Result<CallToolResult, McpError> {
+        tokens::list_revoked_tokens_impl(self).await
+    }
+
+    #[tool(
+        name = "unrevoke_token",
+        description = "Remove a jti from the access-token deny-list, reinstating any \
+        still-unexpired token that carried it. Idempotent — returns `removed=false` if the \
+        jti was not on the list. Admin-only.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn unrevoke_token(
+        &self,
+        params: Parameters<UnrevokeTokenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tokens::unrevoke_token_impl(self, params.0).await
     }
 }
 

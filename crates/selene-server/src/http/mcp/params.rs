@@ -941,6 +941,18 @@ pub(crate) struct RotateSigningKeyParams {
     pub(crate) retire_for_secs: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RevokeTokenParams {
+    /// The full JWT access token string to revoke.
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UnrevokeTokenParams {
+    /// The `jti` claim of the token to remove from the deny-list.
+    pub(crate) jti: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,8 +31,8 @@ pub(super) async fn list_api_keys_impl(
     p: ListApiKeysParams,
 ) -> Result<CallToolResult, McpError> {
     let auth = mcp_auth(tools)?;
-    let keys = ops::api_keys::list_api_keys(&tools.state, &auth, p.identity.as_deref())
-        .map_err(op_err)?;
+    let keys =
+        ops::api_keys::list_api_keys(&tools.state, &auth, p.identity.as_deref()).map_err(op_err)?;
     Ok(CallToolResult::success(vec![Content::text(format_json(
         &keys,
     ))]))

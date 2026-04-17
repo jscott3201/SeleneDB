@@ -217,13 +217,12 @@ impl VaultHandle {
 
         // Find the existing node (if any) and set its value in place.
         let existing = self.graph.read(|g| {
-            g.nodes_by_label("vault_config")
-                .find(|&nid| {
-                    g.get_node(nid).is_some_and(|n| {
-                        n.property("key")
-                            .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
-                    })
+            g.nodes_by_label("vault_config").find(|&nid| {
+                g.get_node(nid).is_some_and(|n| {
+                    n.property("key")
+                        .is_some_and(|v| v.as_str() == Some("oauth_signing_key"))
                 })
+            })
         });
 
         self.graph

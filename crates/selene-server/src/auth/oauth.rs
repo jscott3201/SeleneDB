@@ -280,12 +280,12 @@ impl OAuthTokenService {
     pub fn validate(&self, token: &str, graph: &SharedGraph) -> Result<AuthContext, OAuthError> {
         // 1+2. Decode and verify HMAC signature + expiry (pre-built Validation).
         // Tries the active key first, then retired keys still within grace period.
-        let token_data =
-            self.decode_with_ring(token, &self.validation)
-                .map_err(|e| match e.kind() {
-                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
-                    _ => OAuthError::InvalidToken(e.to_string()),
-                })?;
+        let token_data = self
+            .decode_with_ring(token, &self.validation)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
+                _ => OAuthError::InvalidToken(e.to_string()),
+            })?;
 
         let claims = token_data.claims;
 
@@ -336,12 +336,12 @@ impl OAuthTokenService {
     /// decoded claims. Use this when the graph is not accessible (e.g.,
     /// Aether server validating tokens independently of SeleneDB).
     pub fn validate_standalone(&self, token: &str) -> Result<McpTokenClaims, OAuthError> {
-        let token_data =
-            self.decode_with_ring(token, &self.validation)
-                .map_err(|e| match e.kind() {
-                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
-                    _ => OAuthError::InvalidToken(e.to_string()),
-                })?;
+        let token_data = self
+            .decode_with_ring(token, &self.validation)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => OAuthError::TokenExpired,
+                _ => OAuthError::InvalidToken(e.to_string()),
+            })?;
 
         let claims = token_data.claims;
 
@@ -456,6 +456,37 @@ impl OAuthTokenService {
         }
         deny.insert(jti.to_string(), original_exp);
         self.deny_dirty.store(true, Ordering::Release);
+    }
+
+    /// Remove a `jti` from the deny-list, reinstating tokens with that id.
+    ///
+    /// Returns `true` if the entry existed and was removed, `false` if the
+    /// `jti` was not on the deny-list (already unrevoked, never revoked,
+    /// or pruned after expiry).
+    pub fn unrevoke(&self, jti: &str) -> bool {
+        let mut deny = self.deny_list.write();
+        let removed = deny.remove(jti).is_some();
+        if removed {
+            self.deny_dirty.store(true, Ordering::Release);
+        }
+        removed
+    }
+
+    /// Snapshot the current deny-list as `(jti, expires_at)` pairs. Entries
+    /// whose expiry has passed are filtered out — they are safe to drop.
+    pub fn list_revoked(&self) -> Vec<(String, u64)> {
+        let now = now_secs();
+        self.deny_list
+            .read()
+            .iter()
+            .filter_map(|(jti, &exp)| {
+                if exp >= now {
+                    Some((jti.clone(), exp))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Remove expired refresh tokens and deny-list entries whose original
