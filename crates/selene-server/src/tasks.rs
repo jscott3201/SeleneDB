@@ -1119,18 +1119,40 @@ async fn hnsw_rebuild_loop(state: Arc<ServerState>, cancel: CancellationToken) {
             });
             if !ns_vectors.is_empty() {
                 let mut graph_w = state.graph.inner().write();
+                let mut total_indexed: usize = 0;
+                let mut total_skipped: usize = 0;
                 for (ns, vectors) in &ns_vectors {
+                    // Anchor the index dimension on the first vector; drop
+                    // any other vectors in this namespace whose dim disagrees.
+                    // Mixing dims would silently yield bogus cosine scores in
+                    // release builds (and panic in debug via the SIMD dot
+                    // product's debug_assert_eq on slice lengths).
                     let stored_dims = vectors[0].1.len() as u16;
+                    let (matching, skipped): (Vec<_>, Vec<_>) = vectors
+                        .iter()
+                        .cloned()
+                        .partition(|(_, v)| v.len() as u16 == stored_dims);
+                    if !skipped.is_empty() {
+                        tracing::warn!(
+                            namespace = ns.as_str(),
+                            expected_dims = stored_dims,
+                            skipped = skipped.len(),
+                            indexed = matching.len(),
+                            "HNSW rebuild: dropped vectors with mismatched dimensions"
+                        );
+                    }
                     let index = selene_graph::hnsw::HnswIndex::new(params.clone(), stored_dims);
-                    index.rebuild(vectors.clone());
+                    index.rebuild(matching.clone());
                     graph_w.set_hnsw_index_for(ns.clone(), std::sync::Arc::new(index));
+                    total_indexed += matching.len();
+                    total_skipped += skipped.len();
                 }
                 drop(graph_w);
                 state.graph.publish_snapshot();
-                let total: usize = ns_vectors.values().map(|v| v.len()).sum();
                 tracing::info!(
                     namespaces = ns_vectors.len(),
-                    vectors = total,
+                    vectors = total_indexed,
+                    skipped = total_skipped,
                     "HNSW indexes built on startup"
                 );
             }
