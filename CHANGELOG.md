@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-19
+
+v1.2.0 is a single-theme breaking release. The agent-memory abstraction —
+`remember`/`recall`/`forget`/`configure_memory`, the `memory.recall` procedure,
+`__Memory` / `__MemoryConfig` node labels, clock-based eviction, TTL tiers —
+leaves SeleneDB. Memory is an application concern; the DB provides graph,
+vector, time-series, and text-search primitives. With memory gone, the
+embedding backend goes with it: SeleneDB is now **BYO-vector**. Applications
+embed text in their own process and pass pre-computed vectors as query
+parameters. This removes candle, EmbeddingGemma, and ~4,000 lines of glue
+from the server.
+
+### Removed (breaking)
+
+#### Agent memory surface
+- **MCP tools**: `remember`, `recall`, `forget`, `configure_memory`. The only
+  in-repo consumer was our own training scenarios, which now call Aether's
+  `aether-memory` crate with SeleneDB as the storage primitive.
+- **GQL procedure**: `CALL memory.recall(...)`.
+- **Node labels**: `__Memory`, `__MemoryConfig`. Pre-1.2 snapshots still load
+  — these become ordinary nodes with no special handling. Operators who want
+  them gone can run `MATCH (m:__Memory) DETACH DELETE m` (and the same for
+  `__MemoryConfig`).
+- **Eviction plumbing**: `ServerState::clock_counters` and the three
+  eviction-candidate helpers.
+
+#### Embedding backend
+- **GQL scalar**: `embed('text') -> Vector`. Callers supply vectors directly.
+- **`selene-gql/src/runtime/embed/`** (2,196 LOC): EmbeddingGemma loader,
+  tokenizer integration, quantized encoder, HTTP provider fallback,
+  embedding_status / embedding_dimensions helpers.
+- **Dependencies**: `candle-core`, `candle-nn`, `candle-transformers`,
+  `tokenizers` removed from `selene-gql`.
+- **Feature flags**: `embed`, `cuda`, `metal` (on both `selene-gql` and
+  `selene-server`).
+- **Server auto-embed**: the `auto_embed_loop` background task and
+  `AutoEmbedRule` config. The HNSW rebuild task keeps running; it now indexes
+  whatever vectors the application has written.
+- **GQL procedure**: `graph.reindex` / `graph.reindexStatus`. Re-embedding is
+  an application workflow now; the DB rebuilds HNSW from the vectors already
+  on disk.
+- **Config surface**: `VectorConfig::{model, model_path, dimensions, endpoint,
+  auto_embed, lazy_load}`. HNSW tuning fields are unchanged.
+
+#### Cascading MCP tool removals
+- **`semantic_search`** — redundant with `gql_query` +
+  `CALL graph.semanticSearch($queryVec, $k, $label?)`.
+- **`enrich_communities`** — composed text from community profiles and called
+  `embed($text)` server-side; applications now do this themselves.
+- **`resolve`** drops its semantic-search fallback strategy. ID match and
+  exact name match remain.
+
+### Changed (breaking)
+
+GQL procedure signatures are updated to take a `Vector` where they previously
+took text. Client applications must embed and pass `$queryVec`:
+
+- `graph.semanticSearch(queryText, k, label?)` → `(queryVector, k, label?)`
+- `graph.scopedSemanticSearch(rootId, maxHops, queryText, k)` →
+  `(rootId, maxHops, queryVector, k)`
+- `graph.communitySearch(queryText, k, communityProp?)` →
+  `(queryVector, k, communityProp?)`
+- `graph.hybridSearch(label, query, k)` →
+  `(label, queryText, queryVector, k)` — BM25 lexical and vector similarity
+  are now both first-class inputs, so the client doesn't have to embed its
+  own query twice.
+- `graphrag.search(queryText, k, maxHops, mode)` →
+  `(queryVector, k, maxHops, mode)`. The `graphrag_search` MCP tool takes
+  `query_vector: number[]` instead of `query: string`.
+
+### Migration notes
+
+No backwards-compatibility shims are provided. For applications that
+previously relied on server-side embedding:
+
+1. Add an embedding model to your application layer (Aether, aether-memory,
+   or any OSS embedder). EmbeddingGemma remains a reasonable default.
+2. Replace `embed($text)` in GQL with `$vec` parameters; compute embeddings
+   before sending the query.
+3. Replace `remember`/`recall`/`forget`/`configure_memory` with equivalents
+   in your memory layer (see Aether's `aether-memory` for one implementation).
+4. Replace `semantic_search` tool calls with `gql_query` +
+   `CALL graph.semanticSearch($queryVec, $k)`.
+5. Replace `enrich_communities` with a client loop that writes
+   `SET c.embedding = $vec` for each `__CommunitySummary` row.
+
+### Internals
+
+- HNSW rebuild on startup no longer warns on dimension mismatch (it had no
+  way to know the "expected" dimension without an embedding provider).
+- Schema-dump system-label filtering (`__` prefix) is unchanged. The
+  convention still applies to `__CommunitySummary` — the filtered label in
+  tests just changed.
+
 ## [1.1.0] - 2026-04-17
 
 Spatial becomes a first-class retrieval shape in v1.1.0. A new `GEOMETRY`

@@ -1,6 +1,6 @@
 # SeleneDB
 
-A property graph database with GQL, vector search, time-series, and on-device embeddings. Pure Rust, single binary, runs on a Raspberry Pi or a GPU-accelerated cloud VM.
+A property graph database with GQL, vector search, time-series, and RDF/SPARQL. Pure Rust, single binary, runs on a Raspberry Pi or a cloud VM.
 
 [![CI](https://github.com/jscott3201/SeleneDB/actions/workflows/ci.yml/badge.svg)](https://github.com/jscott3201/SeleneDB/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
@@ -8,7 +8,7 @@ A property graph database with GQL, vector search, time-series, and on-device em
 
 ## What is SeleneDB?
 
-SeleneDB is an in-memory property graph runtime built around ISO GQL. Alongside the graph engine it ships built-in vector search with on-device embeddings, a multi-tier time-series store, Louvain-based community detection, RDF/SPARQL interop, and a Model Context Protocol server — all in one ~14 MB binary with zero C/C++ dependencies.
+SeleneDB is an in-memory property graph runtime built around ISO GQL. Alongside the graph engine it ships a mutable HNSW vector index, a multi-tier time-series store, BM25 full-text search, Louvain-based community detection, RDF/SPARQL interop, and a Model Context Protocol server — all in one ~14 MB binary with zero C/C++ dependencies. SeleneDB is BYO-vector: applications embed text with their own model and pass pre-computed vectors as query parameters.
 
 The design target is domains that need a living graph of connected entities with real-time state: IoT, smart buildings, factory floors, agent knowledge graphs. Anywhere you want to walk a graph, search it by meaning, and query the sensor history attached to its nodes from one endpoint.
 
@@ -19,11 +19,11 @@ The design target is domains that need a living graph of connected entities with
 Most graph stores make you bolt on a separate vector database, a separate time-series store, and a separate RAG pipeline. SeleneDB treats those as peer capabilities of one engine:
 
 - **Graph** — labels, properties, variable-length paths, worst-case optimal joins, 15 graph algorithms
-- **Vector** — mutable HNSW index, cosine/euclidean, auto-embedding on ingest via candle + EmbeddingGemma-300M
+- **Vector** — mutable HNSW index, cosine/euclidean, PolarQuant (3/4/8-bit) quantization, BYO-vector API
 - **Time-series** — hot (Gorilla/RLE/dictionary), warm aggregates, Parquet cold tier, cloud offload
 - **Full-text** — BM25 via tantivy, with hybrid BM25+cosine reciprocal rank fusion
 - **Spatial** — `GEOMETRY` property type and 18 OGC-aligned `ST_*` functions for point-in-polygon, distance, and envelope queries ([guide](docs/guides/spatial.md))
-- **RAG** — GraphRAG combines vectors, BFS traversal, and Louvain community summaries in one call
+- **RAG** — GraphRAG combines caller-supplied vectors, BFS traversal, and Louvain community summaries in one call
 - **RDF** — Turtle/N-Triples import/export and SPARQL queries over the same graph
 
 GQL is the only write path. HTTP, QUIC, and MCP are thin adapters — the same query runs unchanged across all three.
@@ -33,20 +33,20 @@ GQL is the only write path. HTTP, QUIC, and MCP are thin adapters — the same q
 Most databases assume a data center. SeleneDB assumes you might be running on a building controller, a factory gateway, or a Raspberry Pi, and that it should work just as well on a cloud VM with a GPU.
 
 - **~14 MB CPU image** — distroless, statically linked, no shell or package manager
-- **GPU acceleration** — Apple Metal or NVIDIA CUDA by building from source with `--features metal` or `--features cuda`
 - **Sub-second cold start** — binary snapshot recovery in ~1.8 ms on a 10K-node graph
 - **Runtime profiles** — `--profile edge` for constrained devices, `--profile cloud` for full services
 - **Offline-first sync** — edge nodes operate independently and reconcile bidirectionally with LWW
 - **Federation** — any SeleneDB instance queries any other via `USE <graph>` over QUIC with Arrow IPC
 
-### Built-in embeddings and memory
+### BYO-vector semantic search
 
-Vector search without a second service:
+Applications supply pre-computed embeddings; SeleneDB stores, indexes, and searches them:
 
-- **EmbeddingGemma on candle** — 768-dim, GGUF quantized (Q4/Q8) for 85–92% memory reduction vs. f32
 - **HNSW index** — mutable, with cosine or euclidean distance, and optional PolarQuant (3/4/8-bit) rescoring
-- **Agent memory** — namespace-isolated `remember`/`recall`/`forget` with confidence scoring, TTL, entity linking, and clock-based eviction
-- **Semantic search and resolve** — find nodes by meaning, not just by name
+- **`graph.semanticSearch($queryVec, k, label?)`** — top-k cosine with containment-path enrichment
+- **`graph.similarNodes(nodeId, property, k)`** — reference-node similarity over stored vectors
+- **`graph.hybridSearch(label, queryText, queryVec, k)`** — BM25 lexical + vector cosine via reciprocal rank fusion
+- **`graphrag.search($queryVec, k, maxHops, mode)`** — vector + BFS + Louvain community context
 
 ## Quick Start
 
@@ -98,17 +98,13 @@ MATCH (b:building)-[:contains]->(s:sensor)
 RETURN b.name, count(*) AS sensors, avg(s.temp) AS avg_temp
 GROUP BY b.name
 
--- Semantic search — find nodes by meaning, not just structure
-CALL search.semantic('supply air temperature anomaly', 10)
-  YIELD nodeId, score, name
+-- Semantic search — find nodes by meaning (client supplies the query vector)
+CALL graph.semanticSearch($queryVec, 10)
+  YIELD node_id, score, path
 
--- Graph-enhanced RAG retrieval
-CALL search.graphrag('which zones are overheating?', 'local', 10, 2)
-  YIELD nodeId, score, context
-
--- Agent memory
-CALL memory.remember('selene-dev', 'The auth module uses Cedar policies for RBAC')
-CALL memory.recall('selene-dev', 'how does auth work?', 5) YIELD content, score
+-- Graph-enhanced RAG retrieval (BYO-vector)
+CALL graphrag.search($queryVec, 10, 2, 'local')
+  YIELD node_id, score, source, context, depth
 
 -- Time-series
 CALL ts.range(42, 'temp', '2026-03-20T00:00:00Z', '2026-03-21T00:00:00Z')
@@ -139,11 +135,10 @@ See the [GQL guide](docs/guides/gql/overview.md) for the full language reference
 - **15 graph algorithms**: PageRank, betweenness, Dijkstra, SSSP, APSP, WCC, SCC, Louvain, label propagation, triangle count, topological sort, articulation points, bridges
 
 ### Vector and Search
-- **Vector search**: mutable HNSW index, cosine/euclidean, auto-embedding on ingest
-- **On-device embedding**: EmbeddingGemma-300M via candle, GGUF quantization (Q4/Q8), Metal and CUDA GPU acceleration
+- **Vector search**: mutable HNSW index, cosine/euclidean, BYO-vector (clients embed)
+- **Quantized vectors**: PolarQuant 3/4/8-bit with optional f32 re-ranking
 - **GraphRAG**: local, global, and hybrid search modes combining vectors, BFS expansion, and community context
 - **Full-text search**: tantivy BM25, hybrid BM25+cosine via reciprocal rank fusion
-- **Agent memory**: remember/recall/forget with namespaces, TTL, confidence, entity linking, eviction policies
 - **Community detection**: Louvain clustering with enriched summaries for RAG context
 
 ### Time-Series
@@ -166,9 +161,9 @@ See the [GQL guide](docs/guides/gql/overview.md) for the full language reference
 
 ## Using SeleneDB with AI agents
 
-SeleneDB's MCP server exposes graph, vector, time-series, and memory operations to agent orchestrators (Claude Desktop, Cursor, Copilot, custom). All writes route through parameterized GQL, and tool descriptions carry read/write/destructive annotations so agents know what they're calling.
+SeleneDB's MCP server exposes graph, vector, time-series, and schema operations to agent orchestrators (Claude Desktop, Cursor, Copilot, custom). All writes route through parameterized GQL, and tool descriptions carry read/write/destructive annotations so agents know what they're calling.
 
-We use the graph ourselves to track conventions, decisions, and open work across development sessions. That workflow lives in [ai-agent-skills](https://github.com/jscott3201/ai-agent-skills) as a separate Claude Code plugin — it consumes SeleneDB, it isn't part of the database.
+Agent-specific semantics — memory tiers, session namespaces, confidence decay, embedding strategy — live in application layers above SeleneDB (e.g. [ai-agent-skills](https://github.com/jscott3201/ai-agent-skills) or [Aether](https://github.com/CambrianTech/Aether)). SeleneDB provides the primitives they compose against.
 
 ## Performance
 
@@ -216,16 +211,6 @@ docker run ghcr.io/jscott3201/selenedb --profile cloud       # VMs, full service
 docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510  # read replica
 ```
 
-GPU-accelerated embedding inference (Apple Metal or NVIDIA CUDA):
-
-```bash
-# Apple Silicon (Metal) — build from source
-cargo build --release -p selene-server --features metal,dev-tls
-
-# NVIDIA CUDA — build from source
-cargo build --release -p selene-server --features cuda,dev-tls
-```
-
 Bidirectional sync for offline-first edge nodes:
 
 ```toml
@@ -235,7 +220,7 @@ upstream = "hub.example.com:4510"
 peer_name = "building-42"
 ```
 
-The Docker image is distroless (`gcr.io/distroless/static:nonroot`) at ~14 MB compressed, with no shell, no package manager, and minimal attack surface. GPU acceleration (Metal or CUDA) requires building from source with the appropriate feature flag. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
+The Docker image is distroless (`gcr.io/distroless/static:nonroot`) at ~14 MB compressed, with no shell, no package manager, and minimal attack surface. Runtime profiles control memory budgets and service activation. See [Deployment](docs/operations/deployment.md) and [Configuration](docs/operations/configuration.md).
 
 ## Documentation
 
