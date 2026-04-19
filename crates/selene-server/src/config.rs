@@ -332,29 +332,12 @@ pub struct VaultConfig {
     pub vault_path: Option<PathBuf>,
 }
 
-/// Vector embedding configuration.
-#[derive(Debug, Clone, Deserialize)]
+/// HNSW vector index configuration. SeleneDB is BYO-vector: the application
+/// supplies pre-computed embeddings via `$queryVec` parameters. This struct
+/// tunes the index over those vectors; it does not configure embedding.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct VectorConfig {
-    /// Embedding model name (default: `"embeddinggemma"`).
-    #[serde(default = "default_model_name")]
-    pub model: String,
-    /// Path to model directory (safetensors + tokenizer + config).
-    /// Default: `{data_dir}/models/embeddinggemma-300m/`
-    pub model_path: Option<PathBuf>,
-    /// Output dimensions for EmbeddingGemma (MRL truncation).
-    /// Options: 768 (default), 512, 256, 128.
-    #[serde(default)]
-    pub dimensions: Option<usize>,
-    /// Remote embedding endpoint (alternative to local model).
-    /// When set, embed() calls this HTTP endpoint instead of local candle.
-    /// Example: "http://hub:8090/v1/embeddings"
-    pub endpoint: Option<String>,
-    /// Auto-embedding rules. When a text property changes on a node with
-    /// a matching label, the background task generates an embedding and
-    /// stores it on the specified embedding property.
-    #[serde(default)]
-    pub auto_embed: Vec<AutoEmbedRule>,
     /// Max HNSW connections per node per layer (default: 16).
     #[serde(default)]
     pub hnsw_m: Option<usize>,
@@ -379,30 +362,6 @@ pub struct VectorConfig {
     /// (default: false). Improves recall at minor latency cost.
     #[serde(default)]
     pub hnsw_quantize_rescore: Option<bool>,
-    /// Defer model loading until first embed() call (default: false).
-    /// When false, the model is loaded eagerly at server startup.
-    #[serde(default)]
-    pub lazy_load: bool,
-}
-
-impl Default for VectorConfig {
-    fn default() -> Self {
-        Self {
-            model: default_model_name(),
-            model_path: None,
-            dimensions: None,
-            endpoint: None,
-            auto_embed: Vec::new(),
-            hnsw_m: None,
-            hnsw_m0: None,
-            hnsw_ef_construction: None,
-            hnsw_ef_search: None,
-            hnsw_quantize: None,
-            hnsw_quantize_bits: None,
-            hnsw_quantize_rescore: None,
-            lazy_load: false,
-        }
-    }
 }
 
 impl VectorConfig {
@@ -432,26 +391,6 @@ impl VectorConfig {
         }
         params
     }
-}
-
-/// A rule for automatic embedding generation.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AutoEmbedRule {
-    /// Node label to match (e.g., "sensor").
-    pub label: String,
-    /// Text property to embed (e.g., "name").
-    pub text_property: String,
-    /// Property to store the embedding (e.g., "embedding").
-    #[serde(default = "default_embedding_property")]
-    pub embedding_property: String,
-}
-
-fn default_embedding_property() -> String {
-    "embedding".into()
-}
-
-fn default_model_name() -> String {
-    "embeddinggemma".into()
 }
 
 // ── Runtime profiles & services ──────────────────────────────────────────

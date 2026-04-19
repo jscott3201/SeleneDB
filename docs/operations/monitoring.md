@@ -214,7 +214,6 @@ The server spawns several background tasks at startup. All tasks share `ServerSt
 | TS compaction | `compact_after_hours` | When `compact_after_hours > 0` | Merges small Parquet files in old date directories. |
 | Metrics update | 10 seconds | Always | Updates Prometheus gauges (graph stats, memory, WAL). Prunes the auth rate limiter every ~60 seconds. |
 | Search index | Changelog-driven | `search` feature enabled | Watches the changelog and incrementally updates tantivy full-text indexes. Commits every 1 second. |
-| Auto-embed | Changelog-driven | `vector` feature + auto_embed rules | Watches for text property changes and generates vector embeddings. 200ms debounce. Content-hash deduplication skips unchanged text. |
 | Stats collector | Changelog-driven | Always | Maintains per-label node and edge counts from changelog events. |
 | Vector store | Changelog-driven | `vector` feature | Keeps the contiguous vector buffer in sync with graph changes. |
 | Version pruning | `prune_interval_hours` (default 1h) | `temporal` feature | Prunes expired property versions older than `retention_days`. |

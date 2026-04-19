@@ -618,8 +618,8 @@ fn build_is_kw_suffix(
                 negated: has_not,
             })
         }
-        Some(Rule::label_or) => {
-            let label = super::build_match::build_label_or(payload.unwrap().clone())?;
+        Some(Rule::label_expr) => {
+            let label = super::build_match::build_label_expr(payload.unwrap().clone())?;
             Ok(Expr::IsLabeled {
                 expr: Box::new(comparison),
                 label,

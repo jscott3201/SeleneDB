@@ -82,7 +82,6 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Build docs
-        # Exclude 'metal' feature (requires macOS / objc2).
         run: cargo doc --workspace --no-deps --features selene-server/dev-tls,selene-testing/bench
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

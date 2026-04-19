@@ -1,9 +1,11 @@
 //! Community-enhanced RAG: combines vector similarity search with
 //! Louvain community detection to provide graph-context-aware retrieval.
 //!
-//! `graph.communitySearch(queryText, k)` embeds the query, finds the k
-//! nearest vector matches, detects their Louvain communities, and returns
-//! results enriched with community ID, size, members, and label distribution.
+//! `graph.communitySearch(queryVector, k)` takes a pre-computed embedding,
+//! finds the k nearest vector matches, detects their Louvain communities,
+//! and returns results enriched with community ID, size, members, and
+//! label distribution. SeleneDB is BYO-vector — callers embed text in
+//! their application layer.
 //!
 //! An optional `communityProp` parameter enables a read-through shortcut:
 //! if nodes already have a pre-computed community property (from a prior
@@ -55,8 +57,8 @@ impl Procedure for CommunitySearch {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "queryText",
-                    typ: GqlType::String,
+                    name: "queryVector",
+                    typ: GqlType::Vector,
                 },
                 ProcedureParam {
                     name: "k",
@@ -106,11 +108,20 @@ impl Procedure for CommunitySearch {
         // ── 1. Validate arguments ──
         if args.len() < 2 {
             return Err(GqlError::InvalidArgument {
-                message: "graph.communitySearch requires at least 2 arguments: queryText, k".into(),
+                message: "graph.communitySearch requires at least 2 arguments: queryVector, k"
+                    .into(),
             });
         }
 
-        let query_text = args[0].as_str()?;
+        let query_vec = match &args[0] {
+            GqlValue::Vector(v) => v.as_ref(),
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "graph.communitySearch: queryVector must be VECTOR, got {}",
+                    other.gql_type()
+                )));
+            }
+        };
         let k_raw = args[1].as_int()?;
         if k_raw < 0 {
             return Err(GqlError::InvalidArgument {
@@ -133,16 +144,10 @@ impl Procedure for CommunitySearch {
             None
         };
 
-        // ── 2. Embed query text ──
-        let query_vec = crate::runtime::embed::embed_text_with_task(
-            query_text,
-            crate::runtime::embed::EmbeddingTask::Retrieval,
-        )?;
-
-        // ── 3. Vector search (HNSW fast path or brute-force) ──
+        // ── 2. Vector search (HNSW fast path or brute-force) ──
         let prop_key = IStr::new("embedding");
         let top_results =
-            top_k_cosine_scan(graph, graph.all_node_ids(), prop_key, &query_vec, k, scope);
+            top_k_cosine_scan(graph, graph.all_node_ids(), prop_key, query_vec, k, scope);
 
         if top_results.is_empty() {
             return Ok(vec![]);

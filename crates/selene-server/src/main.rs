@@ -133,33 +133,6 @@ async fn async_main(vault_passphrase: Option<String>) -> anyhow::Result<()> {
         tracing::warn!("Do NOT use dev mode in production deployments");
     }
 
-    // Set embedding model config before bootstrap
-    {
-        // Pass remote endpoint config (takes priority over local model).
-        if let Some(ref endpoint) = config.vector.endpoint {
-            selene_gql::runtime::embed::set_endpoint(endpoint.clone());
-        }
-
-        let model_path = config
-            .vector
-            .model_path
-            .clone()
-            .unwrap_or_else(|| config.data_dir.join("models").join("embeddinggemma-300m"));
-        selene_gql::runtime::embed::set_model_config(
-            config.vector.model.clone(),
-            model_path,
-            config.vector.dimensions,
-        );
-        if !config.vector.lazy_load {
-            match selene_gql::runtime::embed::initialize() {
-                Ok(model_id) => tracing::info!(model = %model_id, "embedding model loaded"),
-                Err(e) => {
-                    tracing::warn!(error = %e, "embedding model not available (semantic search disabled)");
-                }
-            }
-        }
-    }
-
     let mut state = bootstrap::bootstrap(config, vault_passphrase).await?;
     if cli.replica_of.is_some() {
         state.set_replica(true);

@@ -436,35 +436,6 @@ pub(crate) struct RFExportParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub(crate) struct SemanticSearchParams {
-    /// Natural language query text (e.g., "supply air temperature sensor").
-    pub(crate) query_text: String,
-    /// Maximum number of results to return.
-    pub(crate) k: i64,
-    /// Optional label filter (e.g., "sensor"). Omit to search all nodes.
-    #[serde(default)]
-    pub(crate) label: Option<String>,
-    /// If true, include full node properties (name, labels, all properties)
-    /// with each result. Saves follow-up get_node calls. Default: false.
-    #[serde(default)]
-    pub(crate) include_properties: Option<bool>,
-    /// If true, return only id/name/labels/score/path per result (no full
-    /// properties). Overrides include_properties when set. Default: false.
-    #[serde(default)]
-    pub(crate) summary_mode: Option<bool>,
-    /// Maximum character length for any single string property value.
-    /// Values exceeding this are truncated. Only applies when
-    /// include_properties is true and summary_mode is false.
-    /// 0 means no truncation. Default: no truncation.
-    #[serde(default)]
-    pub(crate) max_property_length: Option<usize>,
-    /// Starting offset for pagination (skip this many results).
-    /// `k` serves as the page size / limit. Default: 0.
-    #[serde(default)]
-    pub(crate) offset: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub(crate) struct SimilarNodesParams {
     /// Reference node ID to find similar nodes for.
     #[serde(deserialize_with = "deserialize_u64_or_string")]
@@ -553,8 +524,9 @@ pub(crate) struct BuildCommunitiesParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GraphRagSearchParams {
-    /// Natural language query text.
-    pub(crate) query: String,
+    /// Pre-computed query embedding as an array of floats. Clients embed
+    /// text with their own model (SeleneDB is BYO-vector).
+    pub(crate) query_vector: Vec<f32>,
     /// Number of vector search results (default: 10).
     #[serde(default)]
     pub(crate) k: Option<i64>,
@@ -564,57 +536,6 @@ pub(crate) struct GraphRagSearchParams {
     /// Search mode: "local" (default), "global", or "hybrid".
     #[serde(default)]
     pub(crate) mode: Option<String>,
-}
-
-// ── AI / Agent Memory ───────────────���───────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct RememberParams {
-    /// Memory namespace (isolates memories by agent or context).
-    pub(crate) namespace: String,
-    /// The content to remember.
-    pub(crate) content: String,
-    /// Memory type classification (default: "fact"). Examples: "fact", "preference", "event".
-    #[serde(default = "default_memory_type")]
-    pub(crate) memory_type: String,
-    /// Expiry timestamp in milliseconds since epoch. 0 or omit for no expiry.
-    #[serde(default)]
-    pub(crate) valid_until: Option<i64>,
-    /// Entity names mentioned in this memory. Creates __Entity nodes and __MENTIONS edges.
-    #[serde(default)]
-    pub(crate) entities: Option<Vec<String>>,
-    /// Named TTL tier (e.g., "ephemeral", "session", "persistent"). Resolves to
-    /// a TTL value via the namespace's configured ttl_tiers. Mutually exclusive
-    /// with valid_until.
-    #[serde(default)]
-    pub(crate) tier: Option<String>,
-}
-
-fn default_memory_type() -> String {
-    "fact".into()
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct RecallParams {
-    /// Memory namespace to search.
-    pub(crate) namespace: String,
-    /// Natural language query text for semantic search.
-    pub(crate) query: String,
-    /// Maximum number of results (default: 10).
-    #[serde(default)]
-    pub(crate) k: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ForgetParams {
-    /// Memory namespace to delete from.
-    pub(crate) namespace: String,
-    /// Specific memory node ID to delete.
-    #[serde(default)]
-    pub(crate) node_id: Option<u64>,
-    /// Content substring to match for deletion.
-    #[serde(default)]
-    pub(crate) query: Option<String>,
 }
 
 // ── Resolve + Related ────────────────────────────────────────────────
@@ -646,26 +567,6 @@ pub(crate) struct RelatedParams {
     /// Maximum number of neighbors to return (default: 25).
     #[serde(default)]
     pub(crate) neighbor_limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ConfigureMemoryParams {
-    /// Memory namespace to configure.
-    pub(crate) namespace: String,
-    /// Maximum number of memories before eviction (0 = unlimited, default: 1000).
-    #[serde(default)]
-    pub(crate) max_memories: Option<i64>,
-    /// Default time-to-live in milliseconds for new memories (0 = no expiry).
-    #[serde(default)]
-    pub(crate) default_ttl_ms: Option<i64>,
-    /// Eviction policy: "clock" (default), "oldest", or "lowest_confidence".
-    #[serde(default)]
-    pub(crate) eviction_policy: Option<String>,
-    /// Named TTL tiers as a JSON object mapping tier names to TTL in milliseconds.
-    /// Example: `{"ephemeral": 3600000, "session": 86400000, "persistent": 0}`.
-    /// Memories can reference these tiers by name via the `tier` param in remember.
-    #[serde(default)]
-    pub(crate) ttl_tiers: Option<String>,
 }
 
 // ── Principal management params ──────────────────────────────────────

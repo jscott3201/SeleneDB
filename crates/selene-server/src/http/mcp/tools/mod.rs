@@ -2,7 +2,6 @@
 
 mod ai;
 mod api_keys;
-mod memory;
 mod principals;
 mod schemas;
 mod signing_key;
@@ -16,12 +15,12 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
-use super::format::{format_json, structured_result, structured_text_result};
+use super::format::{structured_result, structured_text_result};
 use super::params::*;
 use super::{SeleneTools, mcp_auth, op_err, reject_replica};
 use crate::ops;
 use crate::ops::json_to_value;
-use selene_core::{IStr, NodeId, Value};
+use selene_core::Value;
 
 #[tool_router]
 impl SeleneTools {
@@ -925,19 +924,11 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
-        let embed = selene_gql::runtime::embed::embedding_status();
         Ok(structured_result(serde_json::json!({
             "node_count": stats.node_count,
             "edge_count": stats.edge_count,
             "node_labels": stats.node_labels,
             "edge_labels": stats.edge_labels,
-            "embedding": {
-                "loaded": embed.loaded,
-                "model_id": embed.model_id,
-                "dimensions": embed.dimensions,
-                "model_path": embed.model_path,
-                "error": embed.error,
-            },
         })))
     }
 
@@ -1253,174 +1244,6 @@ impl SeleneTools {
     // ── Vector Search ────────────────────────────────────────────────
 
     #[tool(
-        name = "semantic_search",
-        description = "Search the graph using natural language. Embeds the query text into a vector, finds the most similar nodes, and returns them with their containment path (e.g., building > floor > zone > sensor). Use summary_mode=true for compact results (name/labels/score only). Use max_property_length to truncate long property values when include_properties=true. Supports pagination via offset (k is page size). Requires the embedding model to be loaded.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn semantic_search(
-        &self,
-        params: Parameters<SemanticSearchParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let auth = mcp_auth(self)?;
-        let p = &params.0;
-
-        if p.k <= 0 {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: "k must be a positive integer".into(),
-                data: None,
-            });
-        }
-
-        // Request k + offset from the engine so pagination can reach beyond
-        // the first k results.
-        let offset = p.offset.unwrap_or(0).max(0) as usize;
-        let effective_k = p.k + offset as i64;
-
-        let mut gql_params = HashMap::new();
-        gql_params.insert("queryText".into(), Value::from(p.query_text.as_str()));
-        gql_params.insert("k".into(), Value::Int(effective_k));
-
-        let query = if let Some(ref label) = p.label {
-            gql_params.insert("label".into(), Value::from(label.as_str()));
-            "CALL graph.semanticSearch($queryText, $k, $label) \
-             YIELD node_id, score, path RETURN node_id, score, path"
-        } else {
-            "CALL graph.semanticSearch($queryText, $k) \
-             YIELD node_id, score, path RETURN node_id, score, path"
-        };
-
-        let result = ops::gql::execute_gql(
-            &self.state,
-            &auth,
-            query,
-            Some(&gql_params),
-            false,
-            false,
-            ops::gql::ResultFormat::Json,
-        )
-        .map_err(op_err)?;
-
-        let data = result.data_json.unwrap_or_else(|| "[]".to_string());
-        let all_rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-        let total = all_rows.len();
-
-        // Apply offset — we requested k+offset from the engine, now slice.
-        let rows: Vec<serde_json::Value> = all_rows
-            .into_iter()
-            .skip(offset)
-            .take(p.k as usize)
-            .collect();
-
-        let summary = p.summary_mode.unwrap_or(false);
-        let include_props = p.include_properties.unwrap_or(false);
-
-        if !include_props && !summary {
-            let rendered = format_json(&rows);
-            let text = format!(
-                "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
-                p.query_text,
-                total,
-                rows.len(),
-                offset,
-                rendered
-            );
-            return Ok(structured_text_result(
-                text,
-                serde_json::json!({
-                    "query": p.query_text,
-                    "total": total,
-                    "offset": offset,
-                    "results": rows,
-                }),
-            ));
-        }
-
-        // Enrich results — summary_mode returns lightweight data,
-        // full mode returns complete node properties.
-        let max_prop_len = p.max_property_length.unwrap_or(0);
-
-        // Load graph snapshot once to avoid per-node ArcSwap::load.
-        // Refresh auth scope first so in_scope() checks are current.
-        let auth = ops::refresh_scope_if_stale(&self.state, &auth);
-        let snapshot = self.state.graph.load_snapshot();
-
-        let enriched: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|row| {
-                let node_id = row
-                    .get("node_id")
-                    .and_then(|v| v.as_i64())
-                    .map_or(0, |v| v as u64);
-                let mut enriched = row;
-                let nid = NodeId(node_id);
-                if auth.in_scope(nid)
-                    && let Some(node) = snapshot.get_node(nid)
-                {
-                    if summary {
-                        // Lightweight: read name + labels directly from NodeRef,
-                        // avoiding full node_to_dto clone.
-                        if let Some(name_val) = node.properties.get(IStr::new("name")) {
-                            enriched["name"] = serde_json::to_value(name_val).unwrap_or_default();
-                        }
-                        let labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
-                        enriched["labels"] = serde_json::to_value(&labels).unwrap_or_default();
-                    } else {
-                        let dto = ops::node_to_dto(node);
-                        let mut node_json = serde_json::to_value(&dto).unwrap_or_default();
-                        if max_prop_len > 0 {
-                            truncate_property_values(&mut node_json, max_prop_len);
-                        }
-                        enriched["node"] = node_json;
-                    }
-                }
-                enriched
-            })
-            .collect();
-
-        let returned = enriched.len();
-        let mut text = format!(
-            "Semantic search for '{}': {} results (showing {}, offset {})\n{}",
-            p.query_text,
-            total,
-            returned,
-            offset,
-            format_json(&enriched)
-        );
-
-        // Response size guard (char-boundary safe). Note: this only truncates
-        // the human text; the structured payload below is unbounded and lets
-        // programmatic clients see all results without the truncation hint.
-        const MAX_RESPONSE_BYTES: usize = 50_000;
-        if text.len() > MAX_RESPONSE_BYTES {
-            let truncate_at = text
-                .char_indices()
-                .map(|(idx, _)| idx)
-                .take_while(|&idx| idx <= MAX_RESPONSE_BYTES)
-                .last()
-                .unwrap_or(0);
-            text.truncate(truncate_at);
-            text.push_str("\n\n... (truncated — use summary_mode=true or reduce k)");
-        }
-
-        Ok(structured_text_result(
-            text,
-            serde_json::json!({
-                "query": p.query_text,
-                "total": total,
-                "offset": offset,
-                "returned": returned,
-                "results": enriched,
-            }),
-        ))
-    }
-
-    #[tool(
         name = "similar_nodes",
         description = "Find nodes most similar to a given node based on vector embeddings. Returns the k most similar nodes ranked by cosine similarity.",
         annotations(
@@ -1456,15 +1279,14 @@ impl SeleneTools {
             };
             match node.property(&p.property) {
                 None => Err(ops::OpError::InvalidRequest(format!(
-                    "node {} has no property '{}' — populate it with an embedding first \
-                     (e.g. SET n.{} = embed($text) for arbitrary nodes, or enrich_communities \
-                     for __CommunitySummary nodes)",
+                    "node {} has no property '{}' — populate it with a pre-computed embedding \
+                     first (e.g. SET n.{} = $vec with the vector supplied as a parameter)",
                     p.node_id, p.property, p.property
                 ))),
                 Some(selene_core::Value::Vector(_)) => Ok(()),
                 Some(other) => Err(ops::OpError::InvalidRequest(format!(
-                    "property '{}' on node {} is {}, not a vector — overwrite it with an \
-                     embedding via SET n.{} = embed($text) before similarity search",
+                    "property '{}' on node {} is {}, not a vector — overwrite it with a \
+                     pre-computed embedding (SET n.{} = $vec) before similarity search",
                     p.property,
                     p.node_id,
                     other.type_name(),
@@ -1572,10 +1394,10 @@ impl SeleneTools {
 
     #[tool(
         name = "resolve",
-        description = "Resolve a human-friendly name, alias, or description to a graph node. \
-        Tries exact ID match, then exact name match, then semantic search. Returns the full \
-        node with all properties, labels, and optional containment path. \
-        Use this instead of writing GQL just to look up a node by name.",
+        description = "Resolve an ID or exact name to a graph node. \
+        Tries exact ID match, then exact name match. Returns the full node with all \
+        properties, labels, and optional containment path. Use this instead of writing \
+        GQL just to look up a node by name.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1641,75 +1463,6 @@ impl SeleneTools {
             && let Ok(node) = ops::nodes::get_node(&self.state, &auth, id)
         {
             return Ok(build_response(&node, "name_match", None));
-        }
-
-        // Strategy 3: Semantic search fallback
-        let mut sem_params = HashMap::new();
-        sem_params.insert("queryText".into(), Value::from(p.identifier.as_str()));
-        sem_params.insert("k".into(), Value::Int(3));
-
-        let sem_query = if let Some(ref label) = p.label {
-            sem_params.insert("label".into(), Value::from(label.as_str()));
-            "CALL graph.semanticSearch($queryText, $k, $label) \
-             YIELD node_id, score RETURN node_id, score"
-        } else {
-            "CALL graph.semanticSearch($queryText, $k) \
-             YIELD node_id, score RETURN node_id, score"
-        };
-
-        let rows: Vec<serde_json::Value> = ops::gql::execute_gql(
-            &self.state,
-            &auth,
-            sem_query,
-            Some(&sem_params),
-            false,
-            false,
-            ops::gql::ResultFormat::Json,
-        )
-        .ok()
-        .and_then(|r| r.data_json)
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default();
-
-        // Return top match if similarity > 0.75
-        if let Some(top) = rows.first() {
-            let score = top.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let node_id = top
-                .get("node_id")
-                .and_then(|v| v.as_i64())
-                .map_or(0, |v| v as u64);
-
-            if score > 0.75
-                && node_id > 0
-                && let Ok(node) = ops::nodes::get_node(&self.state, &auth, node_id)
-            {
-                return Ok(build_response(
-                    &node,
-                    "semantic_search",
-                    Some(("similarity", score)),
-                ));
-            }
-        }
-
-        // Suggest alternatives if no strong match
-        let suggestions: Vec<serde_json::Value> = rows
-            .iter()
-            .filter_map(|r| {
-                let nid = r.get("node_id")?.as_i64()? as u64;
-                let sc = r.get("score")?.as_f64()?;
-                let name = ops::nodes::get_node(&self.state, &auth, nid)
-                    .ok()
-                    .and_then(|n| n.properties.get("name").map(|v| v.to_string()));
-                Some(serde_json::json!({ "node_id": nid, "score": sc, "name": name }))
-            })
-            .collect();
-
-        if !suggestions.is_empty() {
-            return Ok(structured_result(serde_json::json!({
-                "error": "no_exact_match",
-                "message": format!("Could not resolve '{}'. Did you mean one of these?", p.identifier),
-                "suggestions": suggestions,
-            })));
         }
 
         Ok(structured_result(serde_json::json!({
@@ -1922,7 +1675,7 @@ impl SeleneTools {
 
     #[tool(
         name = "build_communities",
-        description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). Use enrich_communities afterwards to add embeddings for global search mode.",
+        description = "Run Louvain community detection on the graph and create __CommunitySummary nodes with structural profiles (label distribution, key entities, node count). Excludes system labels (__ prefix). To enable global/hybrid graphrag_search, SET c.embedding = $vec on each summary using pre-computed embeddings.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1938,22 +1691,8 @@ impl SeleneTools {
     }
 
     #[tool(
-        name = "enrich_communities",
-        description = "Add vector embeddings to __CommunitySummary nodes by composing text from structural profiles and calling embed(). Enables global and hybrid search modes in graphrag_search. Run build_communities first.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn enrich_communities(&self) -> Result<CallToolResult, McpError> {
-        ai::enrich_communities_impl(self).await
-    }
-
-    #[tool(
         name = "graphrag_search",
-        description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth.",
+        description = "Search the graph using GraphRAG: combines vector similarity, graph traversal (BFS expansion), and optional community context. Takes a pre-computed query vector (BYO-vector — the client embeds). Modes: 'local' (default, vector + BFS + community), 'global' (community embeddings only), 'hybrid' (both merged). Returns nodes with scores, provenance source, context snippets, and traversal depth.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1966,70 +1705,6 @@ impl SeleneTools {
         params: Parameters<GraphRagSearchParams>,
     ) -> Result<CallToolResult, McpError> {
         ai::graphrag_search_impl(self, params.0).await
-    }
-
-    // ── Agent Memory Tools (delegated to memory module) ─────────────
-
-    #[tool(
-        name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Use tier (e.g., 'ephemeral', 'session', 'persistent') for named TTL tiers configured via configure_memory, or valid_until for explicit expiry (mutually exclusive). Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn remember(
-        &self,
-        params: Parameters<RememberParams>,
-    ) -> Result<CallToolResult, McpError> {
-        memory::remember_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "recall",
-        description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
-        memory::recall_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "forget",
-        description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
-        memory::forget_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), eviction policy ('clock' default, 'oldest', or 'lowest_confidence'), and named TTL tiers (ttl_tiers JSON object mapping tier names to ms, e.g., {\"ephemeral\": 3600000, \"session\": 86400000, \"persistent\": 0}). Settings persist in a __MemoryConfig node.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn configure_memory(
-        &self,
-        params: Parameters<ConfigureMemoryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        memory::configure_memory_impl(self, params.0).await
     }
 
     // ── Principal Management ────────────────────────────────────────
@@ -2279,52 +1954,6 @@ impl SeleneTools {
         params: Parameters<UnrevokeTokenParams>,
     ) -> Result<CallToolResult, McpError> {
         tokens::unrevoke_token_impl(self, params.0).await
-    }
-}
-
-// ── Standalone helpers ─────────────────────────────────────────────
-
-/// Truncate string property values that exceed `max_len` characters.
-/// Handles both serde-tagged enum format (`{"String": "..."}`) and plain
-/// JSON strings.
-fn truncate_property_values(node_json: &mut serde_json::Value, max_len: usize) {
-    let Some(props) = node_json
-        .get_mut("properties")
-        .and_then(|p| p.as_object_mut())
-    else {
-        return;
-    };
-    for v in props.values_mut() {
-        truncate_string_value(v, max_len);
-    }
-}
-
-/// Truncate a single JSON value in-place if it contains a string exceeding
-/// `max_len` characters. Handles `{"String": "..."}` (serde-tagged
-/// `Value` enum) and plain `"..."` JSON strings.
-fn truncate_string_value(v: &mut serde_json::Value, max_len: usize) {
-    // Check serde-tagged format: {"String": "..."}
-    let needs_tagged_truncation = v
-        .get("String")
-        .and_then(|s| s.as_str())
-        .is_some_and(|s| s.chars().count() > max_len);
-
-    if needs_tagged_truncation {
-        let inner = v["String"].as_str().unwrap();
-        let total = inner.chars().count();
-        let truncated: String = inner.chars().take(max_len).collect();
-        v["String"] =
-            serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
-        return;
-    }
-
-    // Plain JSON string
-    let needs_plain_truncation = v.as_str().is_some_and(|s| s.chars().count() > max_len);
-    if needs_plain_truncation {
-        let s = v.as_str().unwrap();
-        let total = s.chars().count();
-        let truncated: String = s.chars().take(max_len).collect();
-        *v = serde_json::Value::String(format!("{truncated}... (truncated, {total} chars)"));
     }
 }
 
