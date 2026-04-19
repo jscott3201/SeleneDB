@@ -120,7 +120,7 @@ See the [GQL guide](docs/guides/gql/overview.md) for the full language reference
 
 ### Query Engine
 - **ISO GQL** (ISO 39075): pattern matching, mutations, transactions, variable-length paths, worst-case optimal joins
-- **101 scalar functions, 56 procedures**
+- **Built-in scalar function and procedure library**: list via `CALL graph.procedures() YIELD *`
 - **13-rule query optimizer**: predicate pushdown, join reordering, cardinality estimation
 - **Plan cache**: 19 ns cache hits via query hash
 - **Materialized views**: `CREATE MATERIALIZED VIEW` with incremental changelog maintenance
