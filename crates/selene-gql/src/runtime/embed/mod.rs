@@ -31,10 +31,7 @@ use std::sync::OnceLock;
 #[cfg(feature = "embed")]
 use candle_core::Tensor;
 
-use crate::runtime::eval::EvalContext;
-use crate::runtime::functions::ScalarFunction;
 use crate::types::error::GqlError;
-use crate::types::value::GqlValue;
 
 // ── Tensor utilities (used by GemmaProvider) ────────────────────────────
 
@@ -315,36 +312,6 @@ pub fn embed_text_with_task(text: &str, task: EmbeddingTask) -> Result<Vec<f32>,
 /// Query the output vector dimensions of the current provider.
 pub fn embedding_dimensions() -> Result<usize, GqlError> {
     Ok(get_provider()?.dimensions(None))
-}
-
-/// GQL scalar function: `embed('text') -> Vector`
-pub struct EmbedFunction;
-
-impl ScalarFunction for EmbedFunction {
-    fn name(&self) -> &'static str {
-        "embed"
-    }
-
-    fn description(&self) -> &'static str {
-        "Generate a vector embedding from text"
-    }
-
-    fn invoke(&self, args: &[GqlValue], _ctx: &EvalContext<'_>) -> Result<GqlValue, GqlError> {
-        let text = match args.first() {
-            Some(GqlValue::Null) | None => return Ok(GqlValue::Null),
-            Some(GqlValue::String(s)) => s.as_str(),
-            Some(other) => {
-                return Err(GqlError::type_error(format!(
-                    "embed() requires a STRING argument, got {}",
-                    other.gql_type()
-                )));
-            }
-        };
-
-        let provider = get_provider()?;
-        let vec = provider.embed(text, None)?;
-        Ok(GqlValue::Vector(std::sync::Arc::from(vec)))
-    }
 }
 
 #[cfg(all(test, feature = "embed"))]

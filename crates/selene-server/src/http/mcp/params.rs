@@ -436,35 +436,6 @@ pub(crate) struct RFExportParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub(crate) struct SemanticSearchParams {
-    /// Natural language query text (e.g., "supply air temperature sensor").
-    pub(crate) query_text: String,
-    /// Maximum number of results to return.
-    pub(crate) k: i64,
-    /// Optional label filter (e.g., "sensor"). Omit to search all nodes.
-    #[serde(default)]
-    pub(crate) label: Option<String>,
-    /// If true, include full node properties (name, labels, all properties)
-    /// with each result. Saves follow-up get_node calls. Default: false.
-    #[serde(default)]
-    pub(crate) include_properties: Option<bool>,
-    /// If true, return only id/name/labels/score/path per result (no full
-    /// properties). Overrides include_properties when set. Default: false.
-    #[serde(default)]
-    pub(crate) summary_mode: Option<bool>,
-    /// Maximum character length for any single string property value.
-    /// Values exceeding this are truncated. Only applies when
-    /// include_properties is true and summary_mode is false.
-    /// 0 means no truncation. Default: no truncation.
-    #[serde(default)]
-    pub(crate) max_property_length: Option<usize>,
-    /// Starting offset for pagination (skip this many results).
-    /// `k` serves as the page size / limit. Default: 0.
-    #[serde(default)]
-    pub(crate) offset: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub(crate) struct SimilarNodesParams {
     /// Reference node ID to find similar nodes for.
     #[serde(deserialize_with = "deserialize_u64_or_string")]
@@ -553,8 +524,9 @@ pub(crate) struct BuildCommunitiesParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct GraphRagSearchParams {
-    /// Natural language query text.
-    pub(crate) query: String,
+    /// Pre-computed query embedding as an array of floats. Clients embed
+    /// text with their own model (SeleneDB is BYO-vector).
+    pub(crate) query_vector: Vec<f32>,
     /// Number of vector search results (default: 10).
     #[serde(default)]
     pub(crate) k: Option<i64>,

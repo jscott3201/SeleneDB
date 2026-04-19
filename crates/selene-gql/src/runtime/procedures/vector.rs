@@ -343,11 +343,11 @@ pub(crate) fn top_k_cosine_scan(
 
 // ── graph.semanticSearch ────────────────────────────────────────────
 
-/// `CALL graph.semanticSearch('supply air temperature sensor', 10)`
-/// `CALL graph.semanticSearch('supply air temperature sensor', 10, 'sensor')`
+/// `CALL graph.semanticSearch($queryVec, 10)`
+/// `CALL graph.semanticSearch($queryVec, 10, 'sensor')`
 ///
-/// Combines embed() + vector search + containment path traversal.
-/// Requires `--features vector` for the embed() call.
+/// Vector search over the `embedding` property with containment-path enrichment.
+/// The caller supplies a pre-computed embedding vector — SeleneDB is BYO-vector.
 pub struct SemanticSearch;
 
 impl Procedure for SemanticSearch {
@@ -359,8 +359,8 @@ impl Procedure for SemanticSearch {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "queryText",
-                    typ: GqlType::String,
+                    name: "queryVector",
+                    typ: GqlType::Vector,
                 },
                 ProcedureParam {
                     name: "k",
@@ -394,11 +394,20 @@ impl Procedure for SemanticSearch {
     ) -> Result<Vec<ProcedureRow>, GqlError> {
         if args.len() < 2 {
             return Err(GqlError::InvalidArgument {
-                message: "graph.semanticSearch requires at least 2 arguments: queryText, k".into(),
+                message: "graph.semanticSearch requires at least 2 arguments: queryVector, k"
+                    .into(),
             });
         }
 
-        let query_text = args[0].as_str()?;
+        let query_vec = match &args[0] {
+            GqlValue::Vector(v) => v.as_ref(),
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "graph.semanticSearch: queryVector must be VECTOR, got {}",
+                    other.gql_type()
+                )));
+            }
+        };
         let k_raw = args[1].as_int()?;
         if k_raw < 0 {
             return Err(GqlError::InvalidArgument {
@@ -423,25 +432,18 @@ impl Procedure for SemanticSearch {
             None
         };
 
-        // 1. Embed the query text
-        let query_vec = crate::runtime::embed::embed_text_with_task(
-            query_text,
-            crate::runtime::embed::EmbeddingTask::Retrieval,
-        )?;
-
-        // 2. Scan nodes with cosine similarity
         let prop_key = IStr::new("embedding");
         let results = if let Some(label) = label_filter {
             top_k_cosine_scan(
                 graph,
                 graph.nodes_by_label(label),
                 prop_key,
-                &query_vec,
+                query_vec,
                 k,
                 scope,
             )
         } else {
-            top_k_cosine_scan(graph, graph.all_node_ids(), prop_key, &query_vec, k, scope)
+            top_k_cosine_scan(graph, graph.all_node_ids(), prop_key, query_vec, k, scope)
         };
 
         // 3. For each result, walk up the containment hierarchy
@@ -746,12 +748,11 @@ impl Procedure for ScopedVectorSearch {
 
 // ── graph.scopedSemanticSearch ──────────────────────────────────────
 
-/// `CALL graph.scopedSemanticSearch(1, 3, 'find temperature anomalies', 10)`
+/// `CALL graph.scopedSemanticSearch(1, 3, $queryVec, 10)`
 ///
-/// Combines embed() + BFS-scoped vector search. Handles embedding
-/// internally (unlike scopedVectorSearch which requires a pre-computed vector).
-/// Steps: (1) embed query text, (2) BFS from root to collect candidates,
-/// (3) top-k cosine scan over the neighborhood.
+/// BFS-scoped vector search over the `embedding` property. The caller supplies
+/// a pre-computed embedding vector (BYO-vector). Steps: (1) BFS from root to
+/// collect candidates, (2) top-k cosine scan over the neighborhood.
 pub struct ScopedSemanticSearch;
 
 impl Procedure for ScopedSemanticSearch {
@@ -771,8 +772,8 @@ impl Procedure for ScopedSemanticSearch {
                     typ: GqlType::Int,
                 },
                 ProcedureParam {
-                    name: "queryText",
-                    typ: GqlType::String,
+                    name: "queryVector",
+                    typ: GqlType::Vector,
                 },
                 ProcedureParam {
                     name: "k",
@@ -802,7 +803,7 @@ impl Procedure for ScopedSemanticSearch {
         if args.len() < 4 {
             return Err(GqlError::InvalidArgument {
                 message: "graph.scopedSemanticSearch requires 4 arguments: \
-                          rootNodeId, maxHops, queryText, k"
+                          rootNodeId, maxHops, queryVector, k"
                     .into(),
             });
         }
@@ -826,7 +827,15 @@ impl Procedure for ScopedSemanticSearch {
         }
         let max_hops = max_hops.min(20) as u32;
 
-        let query_text = args[2].as_str()?;
+        let query_vec = match &args[2] {
+            GqlValue::Vector(v) => v.as_ref(),
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "scopedSemanticSearch: queryVector must be VECTOR, got {}",
+                    other.gql_type()
+                )));
+            }
+        };
 
         let k = args[3].as_int()? as usize;
         if k == 0 {
@@ -839,23 +848,17 @@ impl Procedure for ScopedSemanticSearch {
             });
         }
 
-        // 1. Embed the query text
-        let query_vec = crate::runtime::embed::embed_text_with_task(
-            query_text,
-            crate::runtime::embed::EmbeddingTask::Retrieval,
-        )?;
-
-        // 2. BFS to collect neighborhood candidates
+        // BFS to collect neighborhood candidates.
         let neighbors = selene_graph::algorithms::traversal::bfs(graph, root_id, None, max_hops);
 
         if neighbors.is_empty() {
             return Ok(vec![]);
         }
 
-        // 3. Top-k cosine search over the neighborhood
+        // Top-k cosine search over the neighborhood.
         let prop_key = IStr::new("embedding");
         let results =
-            top_k_cosine_scan(graph, neighbors.into_iter(), prop_key, &query_vec, k, scope);
+            top_k_cosine_scan(graph, neighbors.into_iter(), prop_key, query_vec, k, scope);
 
         Ok(results
             .into_iter()

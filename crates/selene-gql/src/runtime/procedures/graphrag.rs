@@ -1,8 +1,9 @@
 //! GraphRAG hybrid retriever: vector search + graph traversal + community context.
 //!
-//! `graphrag.search(queryText, k, maxHops, mode)` combines embedding-based
-//! similarity with BFS graph expansion and optional community summaries for
-//! retrieval-augmented generation with graph-aware context.
+//! `graphrag.search(queryVector, k, maxHops, mode)` combines a pre-computed
+//! query embedding with BFS graph expansion and optional community summaries
+//! for retrieval-augmented generation with graph-aware context. Callers embed
+//! their text on the application side and pass the resulting vector.
 //!
 //! Three modes:
 //! - `"local"` (default): vector search on nodes, BFS expansion, opportunistic community
@@ -51,8 +52,8 @@ impl Procedure for GraphRagSearch {
         ProcedureSignature {
             params: vec![
                 ProcedureParam {
-                    name: "queryText",
-                    typ: GqlType::String,
+                    name: "queryVector",
+                    typ: GqlType::Vector,
                 },
                 ProcedureParam {
                     name: "k",
@@ -102,11 +103,19 @@ impl Procedure for GraphRagSearch {
         // -- 1. Validate arguments --
         if args.is_empty() {
             return Err(GqlError::InvalidArgument {
-                message: "graphrag.search requires at least 1 argument: queryText".into(),
+                message: "graphrag.search requires at least 1 argument: queryVector".into(),
             });
         }
 
-        let query_text = args[0].as_str()?;
+        let query_vec = match &args[0] {
+            GqlValue::Vector(v) => v.clone(),
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "graphrag.search: queryVector must be VECTOR, got {}",
+                    other.gql_type()
+                )));
+            }
+        };
 
         let k = if args.len() > 1 && !args[1].is_null() {
             let k_raw = args[1].as_int()?;
@@ -156,13 +165,7 @@ impl Procedure for GraphRagSearch {
             "local".to_string()
         };
 
-        // -- 2. Embed query text --
-        let query_vec = crate::runtime::embed::embed_text_with_task(
-            query_text,
-            crate::runtime::embed::EmbeddingTask::Retrieval,
-        )?;
-
-        // -- 3. Check if community summaries with embeddings exist --
+        // -- 2. Check if community summaries with embeddings exist --
         let embedding_key = IStr::new("embedding");
         let has_community_embeddings = graph.nodes_by_label("__CommunitySummary").any(|nid| {
             graph
@@ -458,12 +461,16 @@ mod tests {
         assert!(err.contains("requires at least 1 argument"));
     }
 
+    fn sample_vector() -> GqlValue {
+        GqlValue::Vector(std::sync::Arc::from(vec![0.1_f32, 0.2, 0.3]))
+    }
+
     #[test]
     fn test_arg_validation_negative_k() {
         let proc = GraphRagSearch;
         let graph = SeleneGraph::new();
         let result = proc.execute(
-            &[GqlValue::String("test".into()), GqlValue::Int(-5)],
+            &[sample_vector(), GqlValue::Int(-5)],
             &graph,
             None,
             None,
@@ -479,7 +486,7 @@ mod tests {
         let graph = SeleneGraph::new();
         let result = proc.execute(
             &[
-                GqlValue::String("test".into()),
+                sample_vector(),
                 GqlValue::Int(10),
                 GqlValue::Int(2),
                 GqlValue::String("invalid_mode".into()),
@@ -499,7 +506,7 @@ mod tests {
         let graph = SeleneGraph::new();
         let result = proc
             .execute(
-                &[GqlValue::String("test".into()), GqlValue::Int(0)],
+                &[sample_vector(), GqlValue::Int(0)],
                 &graph,
                 None,
                 None,

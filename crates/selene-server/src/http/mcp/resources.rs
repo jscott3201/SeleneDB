@@ -255,11 +255,11 @@ CALL graph.schemaDump() YIELD schema RETURN schema
 # Latest time-series value
 CALL ts.latest($entityId, $property) YIELD value, timestamp RETURN value, timestamp
 
-# Vector search (requires vector feature)
-CALL graph.vectorSearch($queryVector, $k) YIELD nodeId, score RETURN nodeId, score
+# Vector search (BYO-vector — caller supplies the query embedding)
+CALL graph.vectorSearch($label, $property, $queryVec, $k) YIELD node_id, score RETURN node_id, score
 
-# Semantic search by text (requires vector feature)
-CALL graph.semanticSearch($queryText, $k) YIELD nodeId, score RETURN nodeId, score
+# Semantic search with containment-path enrichment (BYO-vector)
+CALL graph.semanticSearch($queryVec, $k) YIELD node_id, score, path RETURN node_id, score, path
 
 ## Parameterized queries
 
