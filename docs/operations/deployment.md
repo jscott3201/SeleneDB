@@ -97,16 +97,15 @@ For Apple Silicon Macs, run SeleneDB natively with Metal-accelerated embeddings.
 **First-time setup:**
 
 ```bash
-# 1. Build with Metal acceleration
-cargo build --release -p selene-server --features metal,dev-tls
+# 1. Build
+cargo build --release -p selene-server --features dev-tls
 cargo build --release -p selene-cli
 
 # 2. Copy and customize the config template
 cp selene.local.toml.example selene.local.toml
 
-# 3. Prepare data directory and download the embedding model
-mkdir -p ~/.selene/data/{wal,snapshots,models}
-./scripts/fetch-embeddinggemma.sh --dir ~/.selene/data/models/embeddinggemma-300m
+# 3. Prepare data directory
+mkdir -p ~/.selene/data/{wal,snapshots}
 
 # 4. Start the server
 ./target/release/selene-server --dev --config selene.local.toml --data-dir ~/.selene/data
@@ -136,7 +135,7 @@ tail -f ~/.selene/logs/selene.log
 
 | Path | Contents |
 |------|----------|
-| `~/.selene/data/` | WAL, snapshots, models |
+| `~/.selene/data/` | WAL, snapshots |
 | `~/.selene/logs/` | Server stdout/stderr logs (when using launchd) |
 | `selene.local.toml` | Server configuration (copied from `.example` template) |
 
@@ -155,7 +154,8 @@ cp backup.snap ~/.selene/data/snapshots/
 | M1/M2 Pro (16 GB) | 16 GB | 4096 MB |
 | M3/M4/M5 (16+ GB) | 16+ GB | 4096–8192 MB |
 
-The embedding model (EmbeddingGemma-300M) uses ~600 MB of unified memory via Metal. The memory budget controls graph + time-series allocation only.
+The memory budget controls graph + time-series allocation. SeleneDB is
+BYO-vector, so no embedding model sits in the server's memory footprint.
 
 ## Building from source
 
@@ -164,12 +164,6 @@ SeleneDB requires Rust 1.94+ and has zero C/C++ dependencies:
 ```bash
 # Standard build (all product features compiled unconditionally)
 cargo build --release -p selene-server --features dev-tls
-
-# With GPU acceleration (NVIDIA CUDA)
-cargo build --release -p selene-server --features cuda,dev-tls
-
-# With GPU acceleration (Apple Metal)
-cargo build --release -p selene-server --features metal,dev-tls
 
 # CLI tool (built separately)
 cargo build --release -p selene-cli
@@ -180,12 +174,10 @@ cargo build --release -p selene-cli
 | Flag | Purpose |
 |------|---------|
 | `dev-tls` | Self-signed TLS certificates for development (rcgen) |
-| `cuda` | NVIDIA GPU-accelerated embeddings (candle CUDA kernels) |
-| `metal` | Apple Silicon GPU-accelerated embeddings (candle Metal) |
 | `bench` | Criterion benchmarks |
 | `insecure` | Client TLS bypass (testing only) |
 
-All product features — HTTP, MCP, QUIC, vector search, semantic search, GraphRAG, time-series, federation, RDF/SPARQL, agent memory, cloud storage — are always compiled. Enable or disable at runtime via `ServicesConfig` profiles (Edge/Cloud/Standalone) or environment variables.
+All product features — HTTP, MCP, QUIC, vector index, semantic search, GraphRAG, time-series, federation, RDF/SPARQL, cloud storage — are always compiled. Enable or disable at runtime via `ServicesConfig` profiles (Edge/Cloud/Standalone) or environment variables.
 
 ## Multi-architecture Docker builds
 

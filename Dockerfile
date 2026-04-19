@@ -48,7 +48,7 @@ EXPOSE 8080/tcp
 # Key environment variables:
 #   SELENE_PROFILE          — edge | cloud | standalone (default: edge)
 #   SELENE_DEV_MODE         — true to enable dev mode (no auth, self-signed TLS)
-#   SELENE_VECTOR_ENABLED   — true/false (default: profile-dependent)
+#   SELENE_VECTOR_ENABLED   — true/false, HNSW index toggle (default: profile-dependent)
 #   SELENE_SEARCH_ENABLED   — true/false (default: profile-dependent)
 #   SELENE_TEMPORAL_ENABLED — true/false (default: true)
 #   SELENE_MCP_ENABLED      — true/false (default: false in production)

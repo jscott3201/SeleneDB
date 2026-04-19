@@ -106,38 +106,24 @@ RETURN b.name, count(*) AS sensors, avg(s.temp) AS avg_temp
 GROUP BY b.name
 ```
 
-### Semantic search
+### Semantic search (BYO-vector)
 
-Find nodes by meaning, not just structure:
+SeleneDB is BYO-vector — the caller embeds text in the application layer and
+passes a pre-computed query vector:
 
 ```sql
-CALL search.semantic('supply air temperature anomaly', 10)
-  YIELD nodeId, score, name
+CALL graph.semanticSearch($queryVec, 10)
+  YIELD node_id, score, path
 ```
 
 ### GraphRAG retrieval
 
-Combine vector similarity, graph traversal, and community context in a single query:
+Combine vector similarity, graph traversal, and community context in a single
+query:
 
 ```sql
-CALL search.graphrag('which zones are overheating?', 'local', 10, 2)
-  YIELD nodeId, score, context
-```
-
-### Agent memory
-
-Persistent memory that survives across sessions — agents remember what they learned:
-
-```sql
--- Store a fact
-CALL memory.remember('my-agent', 'The auth module uses Cedar policies for RBAC')
-
--- Recall by semantic similarity
-CALL memory.recall('my-agent', 'how does auth work?', 5)
-  YIELD content, score
-
--- Forget when no longer relevant
-CALL memory.forget('my-agent', 'Cedar policies')
+CALL graphrag.search($queryVec, 10, 2, 'local')
+  YIELD node_id, score, source, context, depth
 ```
 
 ### Time-series
@@ -171,7 +157,7 @@ selene --insecure gql "MATCH (n) RETURN count(*) AS cnt"
 
 ## Connect AI Agents via MCP
 
-SeleneDB ships a full [Model Context Protocol](https://modelcontextprotocol.io/) server with 64 tools. Point any MCP-compatible client at:
+SeleneDB ships a full [Model Context Protocol](https://modelcontextprotocol.io/) server. Point any MCP-compatible client at:
 
 ```
 http://localhost:8080/mcp
@@ -189,13 +175,13 @@ For Claude Code / Copilot CLI, add to your MCP config:
 }
 ```
 
-Agents can immediately use tools like `gql_query`, `semantic_search`, `remember`, `recall`, `graphrag_search`, `batch_ingest`, and `resolve` — no additional setup required.
+Agents can immediately use tools like `gql_query`, `similar_nodes`, `graphrag_search`, `batch_ingest`, and `resolve` — no additional setup required. For semantic search, call `gql_query` with `CALL graph.semanticSearch($queryVec, $k)` and pass a pre-computed embedding.
 
 See the [MCP Guide](guides/mcp.md) for the full tool reference.
 
 ## Deployment Profiles
 
-SeleneDB scales from a Raspberry Pi to a GPU-accelerated cloud VM:
+SeleneDB scales from a Raspberry Pi to a cloud VM:
 
 ```bash
 # Edge device (RPi 5, gateways) — minimal memory footprint
@@ -207,20 +193,6 @@ docker run ghcr.io/jscott3201/selenedb --profile cloud
 # Read replica — live changelog streaming from a primary
 docker run ghcr.io/jscott3201/selenedb --replica-of primary:4510
 ```
-
-### GPU-accelerated inference
-
-For on-device embedding with EmbeddingGemma, build from source with GPU support:
-
-```bash
-# Apple Silicon (Metal)
-cargo build --release -p selene-server --features metal,dev-tls
-
-# NVIDIA CUDA
-cargo build --release -p selene-server --features cuda,dev-tls
-```
-
-This enables native embedding inference with no external API calls or network dependency. See the [Deployment guide](operations/deployment.md) for full macOS Metal and CUDA setup instructions.
 
 ## Server Flags
 

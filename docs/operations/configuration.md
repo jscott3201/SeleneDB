@@ -116,20 +116,19 @@ TLS configuration for the QUIC listener. Required in production mode; omitted in
 
 ### [vector]
 
+SeleneDB is BYO-vector — applications embed text in their own process and
+pass pre-computed vectors as GQL parameters. The `[vector]` section tunes
+the HNSW index that sits over those stored vectors.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model_path` | string | `{data_dir}/models/all-MiniLM-L6-v2/` | Path to the model directory (safetensors + tokenizer + config) |
-| `endpoint` | string | (none) | Remote embedding endpoint URL; when set, `embed()` calls this endpoint instead of the local candle model |
-| `auto_embed` | list of rules | `[]` | Auto-embedding rules (see below) |
-
-Each auto-embed rule specifies a label, a text property to embed, and a property to store the resulting vector:
-
-```toml
-[[vector.auto_embed]]
-label = "sensor"
-text_property = "name"
-embedding_property = "embedding"   # default: "embedding"
-```
+| `hnsw_m` | integer | `16` | Max HNSW connections per node per layer |
+| `hnsw_m0` | integer | `2*M` | Max HNSW connections at layer 0 |
+| `hnsw_ef_construction` | integer | `200` | HNSW build search width |
+| `hnsw_ef_search` | integer | `50` | Default HNSW query search width |
+| `hnsw_quantize` | bool | `false` | Enable PolarQuant vector quantization |
+| `hnsw_quantize_bits` | integer | `4` | Quantization bit width (3, 4, or 8) |
+| `hnsw_quantize_rescore` | bool | `false` | Re-rank top-k with exact f32 cosine after quantized search |
 
 ### [temporal]
 
@@ -377,11 +376,7 @@ data_dir = "/tmp/selene-dev"
 query_timeout_ms = 10000
 
 [vector]
-model_path = "/home/dev/models/all-MiniLM-L6-v2"
-
-[[vector.auto_embed]]
-label = "sensor"
-text_property = "name"
+hnsw_ef_search = 100
 ```
 
 This enables all services (vector, search, temporal, MCP, algorithms) with dev mode authentication (no credentials required).

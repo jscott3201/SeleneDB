@@ -36,8 +36,12 @@ replicas = { enabled = false }
 budget_mb = 4096                  # Adjust based on available RAM
 
 [vector]
-model_path = "models/embeddinggemma-300m"   # Relative to data-dir
-dimensions = 768
+# SeleneDB is BYO-vector — applications supply pre-computed embeddings.
+# The [vector] section only tunes the HNSW index; uncomment to override
+# defaults (see docs/operations/configuration.md).
+# hnsw_m = 16
+# hnsw_ef_construction = 200
+# hnsw_ef_search = 50
 
 [persist]
 snapshot_interval_secs = 300
