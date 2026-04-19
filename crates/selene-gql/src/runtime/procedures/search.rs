@@ -194,8 +194,9 @@ impl Procedure for HybridSearch {
     ) -> Result<Vec<ProcedureRow>, GqlError> {
         if args.len() < 4 {
             return Err(GqlError::InvalidArgument {
-                message: "graph.hybridSearch requires 4 arguments: label, queryText, queryVector, k"
-                    .into(),
+                message:
+                    "graph.hybridSearch requires 4 arguments: label, queryText, queryVector, k"
+                        .into(),
             });
         }
 

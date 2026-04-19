@@ -469,12 +469,7 @@ mod tests {
     fn test_arg_validation_negative_k() {
         let proc = GraphRagSearch;
         let graph = SeleneGraph::new();
-        let result = proc.execute(
-            &[sample_vector(), GqlValue::Int(-5)],
-            &graph,
-            None,
-            None,
-        );
+        let result = proc.execute(&[sample_vector(), GqlValue::Int(-5)], &graph, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("non-negative"));
@@ -505,12 +500,7 @@ mod tests {
         let proc = GraphRagSearch;
         let graph = SeleneGraph::new();
         let result = proc
-            .execute(
-                &[sample_vector(), GqlValue::Int(0)],
-                &graph,
-                None,
-                None,
-            )
+            .execute(&[sample_vector(), GqlValue::Int(0)], &graph, None, None)
             .unwrap();
         assert!(result.is_empty());
     }

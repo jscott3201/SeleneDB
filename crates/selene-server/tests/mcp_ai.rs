@@ -199,4 +199,3 @@ async fn gql_examples_resource_readable() {
         "should contain INSERT patterns: {resource_text}"
     );
 }
-

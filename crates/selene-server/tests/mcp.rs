@@ -430,5 +430,3 @@ async fn invalid_session_id_rejected() {
     );
     assert!(json["recovery"].as_str().unwrap().contains("initialize"));
 }
-
-

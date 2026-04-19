@@ -538,7 +538,6 @@ pub(crate) struct GraphRagSearchParams {
     pub(crate) mode: Option<String>,
 }
 
-
 // ── Resolve + Related ────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
