@@ -261,9 +261,6 @@ impl FunctionRegistry {
         // Text matching
         reg.register(Arc::new(TextMatchFunction));
 
-        // Embedding function (feature-gated)
-        reg.register(Arc::new(crate::runtime::embed::EmbedFunction));
-
         // Spatial ST_* family (OGC-aligned names; stored lowercased per registry)
         reg.register(Arc::new(StPointFunction));
         reg.register(Arc::new(StGeomFromGeoJsonFunction));

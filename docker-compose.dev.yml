@@ -1,21 +1,12 @@
 # Docker Compose — development mode with all services enabled.
 #
-# Standard build (no embedding model):
 #   docker compose -f docker-compose.dev.yml up -d
-#
-# With EmbeddingGemma model baked in:
-#   docker compose -f docker-compose.dev.yml build --build-arg DOCKERFILE=Dockerfile.dev
-#   docker compose -f docker-compose.dev.yml up -d
-#
-# Requires HF_TOKEN in .env for the AI build (reads as Docker secret).
 #
 services:
   selene:
     build:
       context: .
-      dockerfile: ${DOCKERFILE:-Dockerfile}
-      secrets:
-        - hf_token
+      dockerfile: Dockerfile
     command: ["--dev", "--data-dir", "/data"]
     ports:
       - "4510:4510/udp"
@@ -32,10 +23,6 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
-
-secrets:
-  hf_token:
-    environment: HF_TOKEN
 
 volumes:
   selene-data:

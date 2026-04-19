@@ -140,10 +140,11 @@ impl Procedure for TextSearch {
 
 // ── graph.hybridSearch ──────────────────────────────────────────────
 
-/// `CALL graph.hybridSearch('sensor', 'supply air temperature', 10)`
+/// `CALL graph.hybridSearch('sensor', 'supply air temperature', $queryVec, 10)`
 ///
-/// Combines BM25 text search + cosine vector search via reciprocal rank fusion.
-/// Requires both `search` and `vector` features.
+/// Combines BM25 text search over `queryText` with cosine vector search over
+/// `queryVector` via reciprocal rank fusion. Callers supply the text (for the
+/// lexical side) and the pre-computed embedding (for the vector side).
 pub struct HybridSearch;
 
 impl Procedure for HybridSearch {
@@ -159,8 +160,12 @@ impl Procedure for HybridSearch {
                     typ: GqlType::String,
                 },
                 ProcedureParam {
-                    name: "query",
+                    name: "queryText",
                     typ: GqlType::String,
+                },
+                ProcedureParam {
+                    name: "queryVector",
+                    typ: GqlType::Vector,
                 },
                 ProcedureParam {
                     name: "k",
@@ -187,15 +192,26 @@ impl Procedure for HybridSearch {
         _hot_tier: Option<&HotTier>,
         scope: Option<&roaring::RoaringBitmap>,
     ) -> Result<Vec<ProcedureRow>, GqlError> {
-        if args.len() < 3 {
+        if args.len() < 4 {
             return Err(GqlError::InvalidArgument {
-                message: "graph.hybridSearch requires 3 arguments: label, query, k".into(),
+                message:
+                    "graph.hybridSearch requires 4 arguments: label, queryText, queryVector, k"
+                        .into(),
             });
         }
 
         let label = args[0].as_str()?;
         let query_text = args[1].as_str()?;
-        let k_raw = args[2].as_int()?;
+        let query_vec = match &args[2] {
+            GqlValue::Vector(v) => v.as_ref(),
+            other => {
+                return Err(GqlError::type_error(format!(
+                    "graph.hybridSearch: queryVector must be VECTOR, got {}",
+                    other.gql_type()
+                )));
+            }
+        };
+        let k_raw = args[3].as_int()?;
         if k_raw <= 0 {
             return Ok(vec![]);
         }
@@ -213,17 +229,13 @@ impl Procedure for HybridSearch {
             })
             .unwrap_or_default();
 
-        // 2. Vector search
-        let query_vec = crate::runtime::embed::embed_text_with_task(
-            query_text,
-            crate::runtime::embed::EmbeddingTask::Retrieval,
-        )?;
+        // 2. Vector search over the caller-supplied query vector
         let prop_key = IStr::new("embedding");
         let vec_results = super::vector::top_k_cosine_scan(
             graph,
             graph.nodes_by_label(label),
             prop_key,
-            &query_vec,
+            query_vec,
             fetch_k,
             scope,
         );

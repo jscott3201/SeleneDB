@@ -10,7 +10,7 @@ services:
       - RUST_LOG=selene_server=info
       # Runtime service configuration (uncomment to override profile defaults):
       # - SELENE_PROFILE=edge          # edge | cloud | standalone
-      # - SELENE_VECTOR_ENABLED=true   # enable vector embeddings (requires model)
+      # - SELENE_VECTOR_ENABLED=true   # enable HNSW vector index (BYO-vector)
       # - SELENE_SEARCH_ENABLED=true   # enable full-text search
       # - SELENE_TEMPORAL_ENABLED=true # enable property versioning
       # - SELENE_MCP_ENABLED=false     # MCP disabled in production by default

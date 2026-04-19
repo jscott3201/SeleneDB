@@ -33,7 +33,7 @@ Cargo workspace with 13 crates:
 |-------|---------|
 | `selene-core` | Types: Node, Edge, Value, IStr, PropertyMap, LabelSet, Vector, schema types, Codec trait, Origin |
 | `selene-graph` | In-memory property graph (dense Vec), SharedGraph (ArcSwap), transactions, RoaringBitmap label indexes, TypedIndex, hybrid HNSW vector index |
-| `selene-gql` | ISO GQL engine: pest parser, AST, planner, 13-rule optimizer, WCO joins, factorized representations, pattern executor, pipeline, mutations, plan cache, materialized views, GraphRAG + memory procedures, pluggable embedding layer |
+| `selene-gql` | ISO GQL engine: pest parser, AST, planner, 13-rule optimizer, WCO joins, factorized representations, pattern executor, pipeline, mutations, plan cache, materialized views, GraphRAG + community search procedures |
 | `selene-ts` | Multi-tier time-series: hot (Gorilla/RLE/Dictionary), warm aggregates, Parquet cold, cloud offload |
 | `selene-persist` | WAL v2 (postcard+zstd+XXH3+HLC) + binary snapshots, recovery |
 | `selene-wire` | SWP framing, codec, postcard/JSON/Arrow serialization, federation and sync DTOs |

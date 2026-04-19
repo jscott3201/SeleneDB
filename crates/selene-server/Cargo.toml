@@ -120,11 +120,8 @@ tantivy = "0.26"
 selene-rdf.workspace = true
 
 [features]
-default = ["embed"]
-embed = ["selene-gql/embed"]
+default = []
 dev-tls = ["dep:rcgen"]
-cuda = ["selene-gql/cuda"]
-metal = ["selene-gql/metal"]
 
 [dev-dependencies]
 selene-testing = { workspace = true, features = ["tls", "bench"] }

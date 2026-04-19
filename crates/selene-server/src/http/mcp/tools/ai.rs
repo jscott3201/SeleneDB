@@ -105,132 +105,6 @@ pub(super) async fn build_communities_impl(
     ))
 }
 
-pub(super) async fn enrich_communities_impl(
-    tools: &SeleneTools,
-) -> Result<CallToolResult, McpError> {
-    let auth = mcp_auth(tools)?;
-    reject_replica(&tools.state)?;
-
-    // Pre-flight: verify embedding model is loaded before starting work
-    let embed_status = selene_gql::runtime::embed::embedding_status();
-    if !embed_status.loaded {
-        let detail = embed_status
-            .error
-            .as_deref()
-            .unwrap_or("model not initialized");
-        return Ok(CallToolResult::success(vec![Content::text(format!(
-            "Error: Embedding model not loaded ({detail}). \
-             Set SELENE_MODEL_PATH or place model files in {} and restart the server.",
-            embed_status.model_path
-        ))]));
-    }
-
-    // 1. MATCH all __CommunitySummary nodes
-    let query = "MATCH (c:__CommunitySummary) \
-                 RETURN id(c) AS node_id, c.label_distribution AS labels, \
-                 c.key_entities AS entities, c.node_count AS total";
-    let result = ops::gql::execute_gql(
-        &tools.state,
-        &auth,
-        query,
-        None,
-        false,
-        false,
-        ops::gql::ResultFormat::Json,
-    )
-    .map_err(op_err)?;
-
-    if result.row_count == 0 {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "No __CommunitySummary nodes found. Run build_communities first.",
-        )]));
-    }
-
-    // Parse result JSON to get node data
-    let data_str = result.data_json.unwrap_or_else(|| "[]".to_string());
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&data_str).unwrap_or_default();
-
-    let row_count = rows.len();
-    let total_f64 = row_count as f64;
-    let mut enriched = 0u64;
-    for (i, row) in rows.iter().enumerate() {
-        tools
-            .send_progress(
-                i as f64,
-                Some(total_f64),
-                Some(&format!("Enriching community {}/{row_count}", i + 1)),
-            )
-            .await;
-        let node_id = row
-            .get("node_id")
-            .and_then(|v| v.as_i64())
-            .map_or(0, |v| v as u64);
-        if node_id == 0 {
-            continue;
-        }
-
-        let labels = row.get("labels").and_then(|v| v.as_str()).unwrap_or("");
-        let entities = row.get("entities").and_then(|v| v.as_str()).unwrap_or("");
-        let total = row.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
-
-        // Compose text for embedding
-        let text =
-            format!("Community with {total} nodes. Labels: {labels}. Key entities: {entities}.");
-
-        // SET embedding via embed() function
-        let mut params_map = HashMap::new();
-        params_map.insert("id".into(), Value::UInt(node_id));
-        params_map.insert("text".into(), Value::from(text.as_str()));
-
-        let set_query = "MATCH (c:__CommunitySummary) FILTER id(c) = $id \
-                        SET c.embedding = embed($text)";
-
-        let st = Arc::clone(&tools.state);
-        let auth2 = auth.clone();
-        let result = tools
-            .submit_mut(move || {
-                ops::gql::execute_gql(
-                    &st,
-                    &auth2,
-                    set_query,
-                    Some(&params_map),
-                    false,
-                    false,
-                    ops::gql::ResultFormat::Json,
-                )
-            })
-            .await?;
-        if result.status_code.starts_with("00") {
-            enriched += 1;
-        } else {
-            tracing::warn!(
-                node_id,
-                status = %result.status_code,
-                message = %result.message,
-                "Failed to embed community summary"
-            );
-        }
-    }
-
-    let failed = row_count as u64 - enriched;
-    let text = if failed == 0 {
-        format!("Enriched {enriched} community summaries with embeddings.")
-    } else {
-        format!(
-            "Enriched {enriched}/{row_count} community summaries. \
-             {failed} failed (check server logs for details).",
-        )
-    };
-    Ok(structured_text_result(
-        text,
-        serde_json::json!({
-            "enriched": enriched,
-            "total": row_count,
-            "failed": failed,
-        }),
-    ))
-}
-
 pub(super) async fn graphrag_search_impl(
     tools: &SeleneTools,
     p: GraphRagSearchParams,
@@ -247,13 +121,20 @@ pub(super) async fn graphrag_search_impl(
             data: None,
         });
     }
+    if p.query_vector.is_empty() {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: "query_vector must be a non-empty array of floats".into(),
+            data: None,
+        });
+    }
 
-    let query = "CALL graphrag.search($queryText, $k, $maxHops, $mode) \
+    let query = "CALL graphrag.search($queryVec, $k, $maxHops, $mode) \
                  YIELD node_id, score, source, context, depth \
                  RETURN node_id, score, source, context, depth";
 
     let mut gql_params = HashMap::new();
-    gql_params.insert("queryText".into(), Value::from(p.query.as_str()));
+    gql_params.insert("queryVec".into(), Value::Vector(Arc::from(p.query_vector)));
     gql_params.insert("k".into(), Value::Int(k));
     gql_params.insert("maxHops".into(), Value::Int(max_hops));
     gql_params.insert("mode".into(), Value::from(mode.as_str()));
@@ -269,7 +150,6 @@ pub(super) async fn graphrag_search_impl(
     )
     .map_err(op_err)?;
 
-    // Surface embedding errors instead of reporting "0 results"
     if !result.status_code.starts_with("00") && !result.status_code.starts_with("02") {
         return Ok(CallToolResult::success(vec![Content::text(format!(
             "Error: {}",
@@ -279,14 +159,10 @@ pub(super) async fn graphrag_search_impl(
 
     let data = result.data_json.unwrap_or_else(|| "[]".to_string());
     let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
-    let text = format!(
-        "GraphRAG search for '{}': {} results\n{data}",
-        p.query, result.row_count
-    );
+    let text = format!("GraphRAG search: {} results\n{data}", result.row_count);
     Ok(structured_text_result(
         text,
         serde_json::json!({
-            "query": p.query,
             "row_count": result.row_count,
             "results": parsed,
         }),

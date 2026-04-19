@@ -26,13 +26,11 @@ The compounding effect matters most. Every fact stored makes all future sessions
 
 ### Why SeleneDB for agents
 
-- **Single MCP endpoint** replaces multi-database orchestration. Graph relationships, time-series telemetry, vector similarity, and agent memory — all through one connection with 64 purpose-built tools.
+- **Single MCP endpoint** replaces multi-database orchestration. Graph relationships, time-series telemetry, and BYO-vector similarity — all through one connection.
 
-- **Built-in memory** with `remember`/`recall`/`forget`. Namespace-isolated, semantically searchable, with TTL, confidence scoring, entity linking, and automatic eviction. Agents carry context across sessions without external memory systems.
+- **GraphRAG** combines caller-supplied query vectors, BFS graph traversal, and Louvain community summaries in a single query — agents get contextual answers, not just similar documents.
 
-- **GraphRAG** combines vector similarity, BFS graph traversal, and Louvain community summaries in a single query — agents get contextual answers, not just similar documents.
-
-- **On-device embedding** via EmbeddingGemma (300M params, GGUF quantized). Metal and CUDA GPU acceleration. No external API calls, no network dependency, no per-token costs.
+- **BYO-vector** — applications own embedding strategy and model choice. SeleneDB stores vectors, indexes them with HNSW (PolarQuant-compressed when enabled), and serves cosine top-k with sub-millisecond latency on up to ~100K vectors.
 
 - **Edge-native MCP is unoccupied territory.** An MCP server running on a Raspberry Pi inside a building, on a factory floor, or in a tactical vehicle. AI agents interact with local infrastructure data at sub-millisecond latency without cloud round-trips.
 

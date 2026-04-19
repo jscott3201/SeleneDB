@@ -4,12 +4,12 @@
 
 SeleneDB ships a [Model Context Protocol](https://modelcontextprotocol.io/) server over the GQL engine. Tool descriptions carry read/write/destructive annotations, all writes route through parameterized GQL, and batch operations keep round-trips low.
 
-Where a typical agentic workflow orchestrates three separate databases (graph for relationships, vector for similarity, time-series for telemetry), SeleneDB provides all three through a single MCP connection. Agents get graph queries, semantic search, GraphRAG retrieval, time-series analytics, and persistent memory in one place.
+Where a typical agentic workflow orchestrates three separate databases (graph for relationships, vector for similarity, time-series for telemetry), SeleneDB provides all three through a single MCP connection. Agents get graph queries, BYO-vector search, GraphRAG retrieval, and time-series analytics in one place.
 
 MCP is served over Streamable HTTP at the `/mcp` endpoint (JSON-RPC 2.0). Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Copilot, custom agents) can connect without a dedicated SDK.
 
 SeleneDB declares three MCP capabilities:
-- **Tools**: query, mutate, search, import/export, agent memory, admin, and AI operations
+- **Tools**: query, mutate, search, import/export, admin, and AI operations
 - **Resources** (5): read-only data agents can inspect without a tool call round-trip
 - **Prompts** (3): guided workflow templates for common agent tasks
 
@@ -471,23 +471,15 @@ Field shorthand syntax for the `fields` object:
 |-----------|------|----------|-------------|
 | `toml` | string | yes | TOML or JSON content of the schema pack to import. Format is auto-detected. |
 
-### Vector Search (2 tools)
+### Vector Search (1 tool)
 
-These tools require the `vector` feature and a loaded embedding model. Without the
-model, calls return an error.
+SeleneDB is BYO-vector: the client embeds text with its own model and supplies
+pre-computed vectors as GQL parameters. For arbitrary semantic search, call
+`gql_query` with `CALL graph.semanticSearch($queryVec, $k [, $label])`.
 
 | Tool | Description |
 |------|-------------|
-| `semantic_search` | Search the graph using natural language. Embeds the query text, finds similar nodes, and returns them with their containment path. |
 | `similar_nodes` | Find nodes most similar to a given node based on vector embeddings, ranked by cosine similarity. |
-
-**semantic_search parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query_text` | string | yes | Natural language query (e.g., `"supply air temperature sensor"`) |
-| `k` | integer | yes | Maximum number of results to return |
-| `label` | string | no | Filter to nodes with this label |
 
 **similar_nodes parameters:**
 
@@ -533,56 +525,18 @@ definitions, resource URIs, and prompt templates.
 | `export_rdf` | Export the graph as RDF (Turtle). Routes through GQL `CALL graph.exportRdf()`. Requires `rdf` feature. |
 | `sparql_query` | Execute a SPARQL query. Routes through GQL `CALL graph.sparql()`. Requires `rdf-sparql` feature. |
 
-### Agent Memory (3 tools)
-
-Persistent memory that survives across sessions. Agents store, recall, and forget facts with semantic search, namespaces, TTL, and automatic eviction.
+### AI Operations (2 tools)
 
 | Tool | Description |
 |------|-------------|
-| `remember` | Store a memory with vector embedding, optional entity links, and temporal validity. Automatically evicts least-accessed memories when namespace capacity is reached. |
-| `recall` | Search memory by semantic similarity. Returns ranked results from the specified namespace. Frequently recalled memories are retained longer during eviction. |
-| `forget` | Delete memories by node ID or content substring match. |
-
-**remember parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `namespace` | string | yes | Memory namespace (isolates memories by agent or context) |
-| `content` | string | yes | The content to remember |
-| `memory_type` | string | no | Classification: `"fact"` (default), `"preference"`, `"event"` |
-| `entities` | string[] | no | Entity names mentioned. Creates `__Entity` nodes and `__MENTIONS` edges. |
-| `valid_until` | integer | no | Expiry timestamp in milliseconds since epoch. 0 or omit for no expiry. |
-
-**recall parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `namespace` | string | yes | Memory namespace to search |
-| `query` | string | yes | Natural language query for semantic search |
-| `k` | integer | no | Maximum results (default: 10) |
-
-**forget parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `namespace` | string | yes | Memory namespace |
-| `node_id` | integer | no | Specific memory node ID to delete |
-| `query` | string | no | Content substring to match for deletion |
-
-### AI Operations (4 tools)
-
-| Tool | Description |
-|------|-------------|
-| `build_communities` | Run Louvain community detection and create `__CommunitySummary` nodes with structural profiles. |
-| `enrich_communities` | Add vector embeddings to community summaries. Enables global and hybrid search modes in `graphrag_search`. |
-| `graphrag_search` | GraphRAG retrieval: combines vector similarity, BFS expansion, and community context. Modes: `local`, `global`, `hybrid`. |
-| `configure_memory` | Configure namespace capacity, TTL, and eviction policy (`clock`, `oldest`, or `lowest_confidence`). |
+| `build_communities` | Run Louvain community detection and create `__CommunitySummary` nodes with structural profiles. To enable global/hybrid graphrag_search, populate `c.embedding` on each summary with pre-computed vectors. |
+| `graphrag_search` | GraphRAG retrieval: combines BYO-vector similarity, BFS expansion, and community context. Modes: `local`, `global`, `hybrid`. |
 
 **graphrag_search parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | yes | Natural language query text |
+| `query_vector` | number[] | yes | Pre-computed query embedding (client-supplied) |
 | `mode` | string | no | `"local"` (default), `"global"`, or `"hybrid"` |
 | `k` | integer | no | Number of vector results (default: 10) |
 | `max_hops` | integer | no | BFS expansion depth (default: 2) |
@@ -591,7 +545,7 @@ Persistent memory that survives across sessions. Agents store, recall, and forge
 
 | Tool | Description |
 |------|-------------|
-| `resolve` | Resolve a name, alias, or description to a graph node. Tries exact ID, then name match, then semantic search. |
+| `resolve` | Resolve a human-friendly identifier to a graph node. Tries exact ID, then exact name match. |
 | `related` | Get a node and all its connections in one call. Returns properties plus edges grouped by direction. |
 | `graph_stats` | Per-label breakdowns of node and edge counts. |
 
