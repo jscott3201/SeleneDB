@@ -95,8 +95,11 @@ previously relied on server-side embedding:
 
 ### Internals
 
-- HNSW rebuild on startup no longer warns on dimension mismatch (it had no
-  way to know the "expected" dimension without an embedding provider).
+- HNSW rebuild on startup no longer compares stored vector dimensions against
+  an embedding-provider "expected" dimension (there is no embedding provider
+  anymore). Per-namespace rebuild still drops vectors whose dimension
+  disagrees with the first-seen vector in that namespace and logs the skip
+  counts.
 - Schema-dump system-label filtering (`__` prefix) is unchanged. The
   convention still applies to `__CommunitySummary` — the filtered label in
   tests just changed.

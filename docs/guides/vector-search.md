@@ -57,7 +57,7 @@ property.
 
 ```sql
 CALL graph.vectorSearch('sensor', 'embedding', $queryVec, 10)
-YIELD nodeId, score
+YIELD node_id, score
 ```
 
 | Parameter | Type | Description |
@@ -67,7 +67,7 @@ YIELD nodeId, score
 | queryVector | VECTOR | Pre-computed query vector |
 | k | INT | Number of results (max 10,000) |
 
-**Yields:** `nodeId` (UINT), `score` (FLOAT)
+**Yields:** `node_id` (INT), `score` (FLOAT)
 
 HNSW fast path kicks in automatically when an index exists for the label's
 namespace.
@@ -79,7 +79,7 @@ inferred from the reference node.
 
 ```sql
 CALL graph.similarNodes(42, 'embedding', 10)
-YIELD nodeId, score
+YIELD node_id, score
 ```
 
 ### graph.scopedVectorSearch — Neighborhood-Scoped Search
@@ -89,7 +89,7 @@ Restricts vector search to the BFS neighborhood of a root node. Efficient for
 
 ```sql
 CALL graph.scopedVectorSearch(1, 3, 'embedding', $queryVec, 10)
-YIELD nodeId, score
+YIELD node_id, score
 ```
 
 ### graph.semanticSearch — Vector Search + Containment Path
