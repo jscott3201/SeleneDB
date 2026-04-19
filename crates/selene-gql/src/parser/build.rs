@@ -361,20 +361,11 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
             })
         }
         Rule::create_procedure => {
-            let full_text = inner.as_str().to_string();
             let mut or_replace = false;
             let mut if_not_exists = false;
             let mut name = String::new();
             let mut params = Vec::new();
-            // Extract procedure body text between { and }
-            let body = full_text
-                .rfind('{')
-                .and_then(|start| {
-                    full_text
-                        .rfind('}')
-                        .map(|end| full_text[start + 1..end].trim().to_string())
-                })
-                .unwrap_or_default();
+            let mut body: Option<String> = None;
             for p in inner.into_inner() {
                 match p.as_rule() {
                     Rule::qualified_name => name = p.as_str().to_string(),
@@ -384,13 +375,18 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                         for pd in p.into_inner() {
                             if pd.as_rule() == Rule::param_decl {
                                 let mut parts = pd.into_inner();
-                                let pname = parts
-                                    .next()
-                                    .map_or_else(|| IStr::new("_"), |x| intern_name(x));
-                                let ptype = parts
-                                    .next()
-                                    .map(|x| x.as_str().to_string())
-                                    .unwrap_or_default();
+                                let pname = parts.next().map_or_else(
+                                    || IStr::new("_"),
+                                    |x| intern_name(x),
+                                );
+                                let ptype = parts.next().map_or_else(
+                                    || {
+                                        Err(GqlError::parse_error(
+                                            "CREATE PROCEDURE parameter requires a type name",
+                                        ))
+                                    },
+                                    |x| Ok(x.as_str().to_string()),
+                                )?;
                                 params.push(ProcedureParam {
                                     name: pname,
                                     type_name: ptype,
@@ -398,9 +394,21 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                             }
                         }
                     }
+                    // Body is the query_pipeline child — use its span directly
+                    // rather than rfind('{') heuristics, which would mis-split
+                    // when the body contains nested braces (record literals,
+                    // CASE blocks, map properties).
+                    Rule::query_pipeline => {
+                        body = Some(p.as_str().trim().to_string());
+                    }
                     _ => {}
                 }
             }
+            let body = body.ok_or_else(|| {
+                GqlError::parse_error(
+                    "CREATE PROCEDURE body missing — expected a query pipeline between { and }",
+                )
+            })?;
             Ok(GqlStatement::CreateProcedure {
                 name,
                 parameters: params,
@@ -468,37 +476,52 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                 .into_inner()
                 .find(|p| p.as_rule() == Rule::ident)
                 .map(|p| p.as_str().to_string())
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    GqlError::parse_error("DROP TRIGGER requires a trigger name")
+                })?;
             Ok(GqlStatement::DropTrigger(name))
         }
         Rule::show_triggers => Ok(GqlStatement::ShowTriggers),
 
         // ── Materialized view DDL ─────────────────────────────────────
         Rule::create_materialized_view => {
-            let full_text = inner.as_str().to_string();
             let mut or_replace = false;
             let mut if_not_exists = false;
             let mut name = IStr::new("");
             let mut match_clause = None;
             let mut return_clause = None;
+            // Extract the definition text from the match_stmt + return_stmt
+            // child spans. Using the full_text with `find(" AS ")` would
+            // miscount if the view name contained " AS " or if any property
+            // alias inside the body did — child spans are unambiguous.
+            let mut match_text: Option<String> = None;
+            let mut return_text: Option<String> = None;
 
             for p in inner.into_inner() {
                 match p.as_rule() {
                     Rule::or_replace => or_replace = true,
                     Rule::if_not_exists => if_not_exists = true,
                     Rule::ident => name = intern_name(p),
-                    Rule::match_stmt => match_clause = Some(build_match(p)?),
-                    Rule::return_stmt => return_clause = Some(build_return(p)?),
+                    Rule::match_stmt => {
+                        match_text = Some(p.as_str().to_string());
+                        match_clause = Some(build_match(p)?);
+                    }
+                    Rule::return_stmt => {
+                        return_text = Some(p.as_str().to_string());
+                        return_clause = Some(build_return(p)?);
+                    }
                     _ => {}
                 }
             }
 
-            // Extract the definition text (everything after AS).
-            let definition_text = full_text
-                .to_uppercase()
-                .find(" AS ")
-                .map(|pos| full_text[pos + 4..].trim().to_string())
-                .unwrap_or_default();
+            let definition_text = match (match_text, return_text) {
+                (Some(m), Some(r)) => format!("{m} {r}"),
+                _ => {
+                    return Err(GqlError::parse_error(
+                        "CREATE MATERIALIZED VIEW requires both MATCH and RETURN clauses",
+                    ));
+                }
+            };
 
             Ok(GqlStatement::CreateMaterializedView {
                 name,

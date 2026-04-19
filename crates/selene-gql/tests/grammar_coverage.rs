@@ -1021,3 +1021,52 @@ fn set_operations() {
         ],
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Regression: CREATE PROCEDURE body preserves nested braces
+//
+// The old body-extraction used `rfind('{')` / `rfind('}')` on the full
+// statement text, which mis-split when the body contained record
+// literals or map properties. Now extracted from the `query_pipeline`
+// child span. Test locks that behavior.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn create_procedure_with_nested_braces_in_body() {
+    use selene_gql::GqlStatement;
+
+    let src = "CREATE PROCEDURE foo() { MATCH (n:sensor) RETURN {name: n.name, id: n.id} AS row }";
+    let stmt = parse_statement(src).expect("create procedure should parse");
+    match stmt {
+        GqlStatement::CreateProcedure { body, .. } => {
+            // Body must include the record literal; must NOT start at the
+            // last `{` (which is inside the record).
+            assert!(
+                body.contains("MATCH") && body.contains("RETURN {name"),
+                "body was mis-extracted (did rfind('{{') pick up the record literal?):\n  {body:?}"
+            );
+        }
+        other => panic!("expected CreateProcedure, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_materialized_view_captures_match_and_return_text() {
+    use selene_gql::GqlStatement;
+
+    // CREATE MATERIALIZED VIEW grammar accepts only match_stmt + return_stmt
+    // (no pipeline stages); WHERE goes inside MATCH.
+    let src = "CREATE MATERIALIZED VIEW high_temps AS MATCH (n:sensor) WHERE n.temp > 80 RETURN n.name AS name";
+    let stmt = parse_statement(src).expect("create view should parse");
+    match stmt {
+        GqlStatement::CreateMaterializedView {
+            definition_text, ..
+        } => {
+            assert!(
+                definition_text.contains("MATCH") && definition_text.contains("RETURN"),
+                "definition_text must contain both MATCH and RETURN:\n  {definition_text:?}"
+            );
+        }
+        other => panic!("expected CreateMaterializedView, got {other:?}"),
+    }
+}
