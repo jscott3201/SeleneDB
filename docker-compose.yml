@@ -9,12 +9,12 @@ services:
     environment:
       - RUST_LOG=selene_server=info
       # Runtime service configuration (uncomment to override profile defaults):
-      # - SELENE_PROFILE=edge          # edge | cloud | standalone
-      # - SELENE_VECTOR_ENABLED=true   # enable HNSW vector index (BYO-vector)
-      # - SELENE_SEARCH_ENABLED=true   # enable full-text search
-      # - SELENE_TEMPORAL_ENABLED=true # enable property versioning
-      # - SELENE_MCP_ENABLED=false     # MCP disabled in production by default
-      # - SELENE_MEMORY_BUDGET_MB=4096 # memory budget (edge default: 4096)
+      # - SELENE_PROFILE=edge                    # edge | cloud | standalone
+      # - SELENE_SERVICES_VECTOR_ENABLED=true    # enable HNSW vector index (BYO-vector)
+      # - SELENE_SERVICES_SEARCH_ENABLED=true    # enable full-text search
+      # - SELENE_SERVICES_TEMPORAL_ENABLED=true  # enable property versioning
+      # - SELENE_SERVICES_MCP_ENABLED=false      # MCP disabled in production by default
+      # - SELENE_MEMORY_BUDGET_MB=4096           # memory budget (edge default: 4096)
     command: ["--dev", "--data-dir", "/data"]
     restart: unless-stopped
     # Security hardening

@@ -46,13 +46,13 @@ EXPOSE 8080/tcp
 # ── Runtime Configuration ───────────────────────────────────────────────
 # Services are toggled at runtime via TOML config or environment variables.
 # Key environment variables:
-#   SELENE_PROFILE          — edge | cloud | standalone (default: edge)
-#   SELENE_DEV_MODE         — true to enable dev mode (no auth, self-signed TLS)
-#   SELENE_VECTOR_ENABLED   — true/false, HNSW index toggle (default: profile-dependent)
-#   SELENE_SEARCH_ENABLED   — true/false (default: profile-dependent)
-#   SELENE_TEMPORAL_ENABLED — true/false (default: true)
-#   SELENE_MCP_ENABLED      — true/false (default: false in production)
-#   SELENE_MEMORY_BUDGET_MB — memory budget in MB (default: profile-dependent)
+#   SELENE_PROFILE                   — edge | cloud | standalone (default: edge)
+#   SELENE_DEV_MODE                  — true to enable dev mode (no auth, self-signed TLS)
+#   SELENE_SERVICES_VECTOR_ENABLED   — true/false, HNSW index toggle (default: profile-dependent)
+#   SELENE_SERVICES_SEARCH_ENABLED   — true/false (default: profile-dependent)
+#   SELENE_SERVICES_TEMPORAL_ENABLED — true/false (default: true)
+#   SELENE_SERVICES_MCP_ENABLED      — true/false (default: false in production)
+#   SELENE_MEMORY_BUDGET_MB          — memory budget in MB (default: profile-dependent)
 #   RUST_LOG                — log level (default: selene_server=info)
 
 ENTRYPOINT ["/selene-server"]

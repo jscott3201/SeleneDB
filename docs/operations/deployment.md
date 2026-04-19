@@ -90,9 +90,12 @@ docker compose -f docker-compose.dev.yml up -d
 
 The `--seed` flag populates an empty graph with a demo building hierarchy (site, building, floors, zones, equipment, sensors) and 180 time-series samples.
 
-## Local macOS (Metal GPU)
+## Local macOS
 
-For Apple Silicon Macs, run SeleneDB natively with Metal-accelerated embeddings. This avoids Docker entirely — Metal is a macOS-only API and cannot be accessed from within a Linux container.
+For Apple Silicon Macs, running SeleneDB natively (outside Docker) avoids the
+nested-virtualization overhead on Darwin hosts. SeleneDB itself is BYO-vector
+— applications supply pre-computed embeddings — so no Metal/CUDA GPU tooling
+is needed on the server side for this path.
 
 **First-time setup:**
 
