@@ -582,9 +582,9 @@ mod tests {
     fn excludes_system_labels_by_default() {
         let mut g = graph_with_schemas();
 
-        let system_schema = NodeSchema::builder("__Memory")
-            .property(PropertyDef::simple("content", ValueType::String, true))
-            .description("System memory node")
+        let system_schema = NodeSchema::builder("__CommunitySummary")
+            .property(PropertyDef::simple("key_entities", ValueType::String, true))
+            .description("System community summary node")
             .build();
         g.schema_mut().register_node_schema(system_schema).unwrap();
 
@@ -593,7 +593,7 @@ mod tests {
         let text = rows[0][0].1.as_str().unwrap();
 
         assert!(
-            !text.contains("__Memory"),
+            !text.contains("__CommunitySummary"),
             "system labels should be excluded by default"
         );
         assert!(text.contains(":sensor"), "non-system labels should remain");
@@ -603,9 +603,9 @@ mod tests {
     fn includes_system_when_requested() {
         let mut g = graph_with_schemas();
 
-        let system_schema = NodeSchema::builder("__Memory")
-            .property(PropertyDef::simple("content", ValueType::String, true))
-            .description("System memory node")
+        let system_schema = NodeSchema::builder("__CommunitySummary")
+            .property(PropertyDef::simple("key_entities", ValueType::String, true))
+            .description("System community summary node")
             .build();
         g.schema_mut().register_node_schema(system_schema).unwrap();
 
@@ -615,7 +615,7 @@ mod tests {
         let text = rows[0][0].1.as_str().unwrap();
 
         assert!(
-            text.contains("__Memory"),
+            text.contains("__CommunitySummary"),
             "system labels should be included when requested"
         );
         assert!(

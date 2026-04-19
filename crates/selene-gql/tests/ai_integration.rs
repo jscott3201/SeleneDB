@@ -1,9 +1,8 @@
 //! AI MVP integration tests: cross-feature verification with synthetic vectors.
 //!
-//! Tests GraphRAG data flow, agent memory structure, community search,
-//! schema dump, and parse check working together. Uses pre-computed
-//! vectors to bypass the embedding model, so these run in CI without
-//! model files.
+//! Tests GraphRAG data flow, community search, schema dump, and parse check
+//! working together. Uses pre-computed vectors to bypass the embedding model,
+//! so these run in CI without model files.
 
 use std::sync::Arc;
 
@@ -40,9 +39,6 @@ fn build_ai_fixture() -> (SeleneGraph, Arc<[f32]>) {
 
     let vec_a = make_vec(&[1.0]);
     let vec_b = make_vec(&[0.9, 0.436]);
-    let vec_c = make_vec(&[0.8, 0.6]);
-    let vec_d = make_vec(&[0.0, 0.0, 1.0]);
-    let vec_e = make_vec(&[0.0, 1.0]);
     let query_vec = vec_a.clone();
 
     let mut m = graph.mutate();
@@ -92,66 +88,6 @@ fn build_ai_fixture() -> (SeleneGraph, Arc<[f32]>) {
             ),
             (IStr::new("key_entities"), Value::from("TempSensor1")),
             (IStr::new("node_count"), Value::Int(3)),
-        ]),
-    )
-    .unwrap();
-
-    // Node 6: Memory (moderate similarity to query)
-    m.create_node(
-        LabelSet::from_strs(&["__Memory"]),
-        PropertyMap::from_pairs(vec![
-            (IStr::new("namespace"), Value::from("test")),
-            (IStr::new("content"), Value::from("temperature rising")),
-            (IStr::new("embedding"), Value::Vector(vec_c)),
-            (IStr::new("memory_type"), Value::from("fact")),
-            (IStr::new("confidence"), Value::Float(1.0)),
-            (IStr::new("created_at"), Value::Int(1000)),
-            (IStr::new("valid_from"), Value::Int(0)),
-            (IStr::new("valid_until"), Value::Int(0)),
-        ]),
-    )
-    .unwrap();
-
-    // Node 7: Memory (orthogonal to query)
-    m.create_node(
-        LabelSet::from_strs(&["__Memory"]),
-        PropertyMap::from_pairs(vec![
-            (IStr::new("namespace"), Value::from("test")),
-            (IStr::new("content"), Value::from("humidity stable")),
-            (IStr::new("embedding"), Value::Vector(vec_d)),
-            (IStr::new("memory_type"), Value::from("fact")),
-            (IStr::new("confidence"), Value::Float(0.8)),
-            (IStr::new("created_at"), Value::Int(2000)),
-            (IStr::new("valid_from"), Value::Int(0)),
-            (IStr::new("valid_until"), Value::Int(0)),
-        ]),
-    )
-    .unwrap();
-
-    // Node 8: Memory in different namespace
-    m.create_node(
-        LabelSet::from_strs(&["__Memory"]),
-        PropertyMap::from_pairs(vec![
-            (IStr::new("namespace"), Value::from("other")),
-            (IStr::new("content"), Value::from("unrelated")),
-            (IStr::new("embedding"), Value::Vector(vec_e)),
-            (IStr::new("memory_type"), Value::from("fact")),
-            (IStr::new("confidence"), Value::Float(1.0)),
-            (IStr::new("created_at"), Value::Int(3000)),
-            (IStr::new("valid_from"), Value::Int(0)),
-            (IStr::new("valid_until"), Value::Int(0)),
-        ]),
-    )
-    .unwrap();
-
-    // Node 9: MemoryConfig
-    m.create_node(
-        LabelSet::from_strs(&["__MemoryConfig"]),
-        PropertyMap::from_pairs(vec![
-            (IStr::new("namespace"), Value::from("test")),
-            (IStr::new("max_memories"), Value::Int(5)),
-            (IStr::new("default_ttl_ms"), Value::Int(0)),
-            (IStr::new("eviction_policy"), Value::from("clock")),
         ]),
     )
     .unwrap();
@@ -270,72 +206,7 @@ fn vector_search_uses_hnsw_when_available() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Memory nodes queryable by namespace
-// ---------------------------------------------------------------------------
-
-#[test]
-fn memory_nodes_queryable_by_namespace() {
-    let (graph, _) = build_ai_fixture();
-
-    let query = "MATCH (m:__Memory {namespace: 'test'}) \
-                 RETURN m.content AS content, m.confidence AS conf \
-                 ORDER BY m.created_at ASC";
-    let result = QueryBuilder::new(query, &graph).execute().unwrap();
-
-    assert_eq!(result.row_count(), 2, "should find 2 memories in 'test'");
-
-    let batch = &result.batches[0];
-    let content = batch
-        .column_by_name("content")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-
-    assert_eq!(content.value(0), "temperature rising");
-    assert_eq!(content.value(1), "humidity stable");
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: Memory vector search ranks across all memories
-// ---------------------------------------------------------------------------
-
-#[test]
-fn memory_vector_search_ranks_by_similarity() {
-    let (graph, query_vec) = build_ai_fixture();
-
-    let query = "CALL graph.vectorSearch('__Memory', 'embedding', $qvec, 10) \
-                 YIELD nodeId, score \
-                 RETURN nodeId, score";
-
-    let mut params = selene_gql::ParameterMap::new();
-    params.insert(IStr::new("qvec"), GqlValue::Vector(query_vec));
-
-    let result = QueryBuilder::new(query, &graph)
-        .with_parameters(&params)
-        .execute()
-        .unwrap();
-
-    assert_eq!(result.row_count(), 3, "should return all 3 __Memory nodes");
-
-    let batch = &result.batches[0];
-    let id_col = batch
-        .column_by_name("nodeId")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-
-    // Node 6 (vec_c, ~0.8 cosine) should rank first
-    assert_eq!(
-        id_col.value(0),
-        6,
-        "node 6 should rank first among memories"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: Schema dump excludes AI system labels by default
+// Test 3: Schema dump excludes AI system labels by default
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -353,8 +224,8 @@ fn schema_dump_excludes_ai_system_labels() {
     graph
         .schema_mut()
         .register_node_schema(
-            NodeSchema::builder("__Memory")
-                .property(PropertyDef::simple("content", ValueType::String, true))
+            NodeSchema::builder("__CommunitySummary")
+                .property(PropertyDef::simple("key_entities", ValueType::String, true))
                 .build(),
         )
         .unwrap();
@@ -375,8 +246,8 @@ fn schema_dump_excludes_ai_system_labels() {
 
     assert!(schema_text.contains(":Sensor"), "should include Sensor");
     assert!(
-        !schema_text.contains("__Memory"),
-        "should exclude __Memory by default"
+        !schema_text.contains("__CommunitySummary"),
+        "should exclude __CommunitySummary by default"
     );
 }
 
@@ -391,8 +262,8 @@ fn schema_dump_includes_system_labels_when_requested() {
     graph
         .schema_mut()
         .register_node_schema(
-            NodeSchema::builder("__Memory")
-                .property(PropertyDef::simple("content", ValueType::String, true))
+            NodeSchema::builder("__CommunitySummary")
+                .property(PropertyDef::simple("key_entities", ValueType::String, true))
                 .build(),
         )
         .unwrap();
@@ -410,8 +281,8 @@ fn schema_dump_includes_system_labels_when_requested() {
         .value(0);
 
     assert!(
-        schema_text.contains("__Memory"),
-        "should include __Memory when includeSystem=true"
+        schema_text.contains("__CommunitySummary"),
+        "should include __CommunitySummary when includeSystem=true"
     );
 }
 
@@ -609,77 +480,7 @@ fn parse_check_validates_schema_derived_query() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 11: Memory config queryable via GQL
-// ---------------------------------------------------------------------------
-
-#[test]
-fn memory_config_queryable() {
-    let (graph, _) = build_ai_fixture();
-
-    let query = "MATCH (c:__MemoryConfig {namespace: 'test'}) \
-                 RETURN c.max_memories AS max_mem, \
-                 c.eviction_policy AS policy";
-    let result = QueryBuilder::new(query, &graph).execute().unwrap();
-
-    assert_eq!(result.row_count(), 1);
-
-    let batch = &result.batches[0];
-    let max_mem = batch
-        .column_by_name("max_mem")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0);
-    assert_eq!(max_mem, 5);
-
-    let policy = batch
-        .column_by_name("policy")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0);
-    assert_eq!(policy, "clock");
-}
-
-// ---------------------------------------------------------------------------
-// Test 12: Cross-feature query counting memories and sensors
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cross_feature_memory_and_sensor_counts() {
-    let (graph, _) = build_ai_fixture();
-
-    let query = "MATCH (m:__Memory {namespace: 'test'}) RETURN count(m) AS cnt";
-    let result = QueryBuilder::new(query, &graph).execute().unwrap();
-
-    let batch = &result.batches[0];
-    let cnt = batch
-        .column_by_name("cnt")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0);
-    assert_eq!(cnt, 2);
-
-    let query2 = "MATCH (s:Sensor) RETURN count(s) AS cnt";
-    let result2 = QueryBuilder::new(query2, &graph).execute().unwrap();
-
-    let batch2 = &result2.batches[0];
-    let sensor_cnt = batch2
-        .column_by_name("cnt")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0);
-    assert_eq!(sensor_cnt, 2);
-}
-
-// ---------------------------------------------------------------------------
-// Test 13: Parameters propagate through CALL procedure in subquery
+// Test 9: Parameters propagate through CALL procedure in subquery
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -689,15 +490,15 @@ fn parameters_propagate_through_subquery_call() {
     // Use $param in MATCH inline properties ({key: $param}) inside a
     // CALL { subquery } to verify parameter propagation through the
     // pattern scan layer (EvalContext threading).
-    let query = "MATCH (s:Sensor) \
+    let query = "MATCH (z:Zone) \
                  CALL { \
-                     MATCH (m:__Memory {namespace: $ns}) \
-                     RETURN count(m) AS mem_count \
+                     MATCH (s:Sensor {name: $target}) \
+                     RETURN count(s) AS hit_count \
                  } \
-                 RETURN count(s) AS sensor_count, mem_count";
+                 RETURN count(z) AS zone_count, hit_count";
 
     let mut params = selene_gql::ParameterMap::new();
-    params.insert(IStr::new("ns"), GqlValue::String("test".into()));
+    params.insert(IStr::new("target"), GqlValue::String("TempSensor1".into()));
 
     let result = QueryBuilder::new(query, &graph)
         .with_parameters(&params)
@@ -710,16 +511,16 @@ fn parameters_propagate_through_subquery_call() {
     );
 
     let batch = &result.batches[0];
-    let mem_count = batch
-        .column_by_name("mem_count")
+    let hit_count = batch
+        .column_by_name("hit_count")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
         .unwrap()
         .value(0);
     assert_eq!(
-        mem_count, 2,
-        "should find 2 memories in 'test' namespace via $ns param"
+        hit_count, 1,
+        "should find 1 sensor with name='TempSensor1' via $target param"
     );
 }
 

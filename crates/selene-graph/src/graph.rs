@@ -58,7 +58,7 @@ pub struct SeleneGraph {
 
     /// HNSW approximate nearest neighbor indexes, keyed by namespace.
     /// Default namespace `""` holds non-system vectors. System labels (e.g.
-    /// `__Memory`) route to namespaces like `"__memory"`.
+    /// `__CommunitySummary`) route to namespaces like `"__communitysummary"`.
     pub(crate) hnsw_indexes: rustc_hash::FxHashMap<String, std::sync::Arc<crate::hnsw::HnswIndex>>,
 
     // Mutation generation -- incremented on every commit for cache invalidation
