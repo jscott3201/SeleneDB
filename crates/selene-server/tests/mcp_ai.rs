@@ -1,22 +1,11 @@
 //! MCP AI integration tests over Streamable HTTP.
 //!
-//! Full-stack tests for GraphRAG, agent memory, and Text2GQL MCP tools.
-//! Tests marked `#[ignore]` require the EmbeddingGemma model
-//! at `data/models/embeddinggemma-300m`.
+//! Full-stack tests for GraphRAG and Text2GQL MCP tools.
 //!
 //! Run: `cargo test -p selene-server --test mcp_ai`
-//! Run ignored: `cargo test -p selene-server --test mcp_ai -- --ignored`
 
 mod support;
 use support::*;
-
-fn has_model() -> bool {
-    let path = std::env::var("SELENE_MODEL_PATH")
-        .unwrap_or_else(|_| "data/models/embeddinggemma-300m".to_string());
-    std::path::Path::new(&path)
-        .join("model.safetensors")
-        .exists()
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: schema_dump returns schema over MCP
@@ -109,55 +98,6 @@ async fn text2gql_workflow_schema_then_parse() {
     assert!(
         check_text.contains("true") || check_text.contains("valid"),
         "schema-derived query should be valid: {check_text}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: configure_memory persists config
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn configure_memory_sets_config() {
-    let (base, _server) = start_server().await;
-    let session = initialize(&base).await;
-
-    let config_result = call_tool(
-        &base,
-        &session,
-        2,
-        "configure_memory",
-        serde_json::json!({
-            "namespace": "config_test",
-            "max_memories": 50,
-            "eviction_policy": "oldest"
-        }),
-    )
-    .await;
-    assert!(
-        config_result.get("error").is_none(),
-        "configure_memory should succeed: {config_result}"
-    );
-    let config_text = tool_text(&config_result);
-    assert!(
-        config_text.contains("config_test"),
-        "should confirm namespace configured: {config_text}"
-    );
-
-    // Configure again with different values to verify idempotent MERGE
-    let update_result = call_tool(
-        &base,
-        &session,
-        3,
-        "configure_memory",
-        serde_json::json!({
-            "namespace": "config_test",
-            "max_memories": 100
-        }),
-    )
-    .await;
-    assert!(
-        update_result.get("error").is_none(),
-        "second configure_memory should succeed: {update_result}"
     );
 }
 
@@ -260,125 +200,3 @@ async fn gql_examples_resource_readable() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 7: remember then recall (requires model)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[ignore = "requires EmbeddingGemma model"]
-async fn remember_then_recall() {
-    if !has_model() {
-        eprintln!("SKIP: embedding model not available");
-        return;
-    }
-
-    let (base, _server) = start_server().await;
-    let session = initialize(&base).await;
-
-    let remember_result = call_tool(
-        &base,
-        &session,
-        2,
-        "remember",
-        serde_json::json!({
-            "namespace": "integration_test",
-            "content": "The building HVAC system uses a variable air volume design",
-            "memory_type": "fact"
-        }),
-    )
-    .await;
-    assert!(
-        remember_result.get("error").is_none(),
-        "remember should succeed: {remember_result}"
-    );
-
-    let recall_result = call_tool(
-        &base,
-        &session,
-        3,
-        "recall",
-        serde_json::json!({
-            "namespace": "integration_test",
-            "query": "HVAC system design",
-            "k": 5
-        }),
-    )
-    .await;
-    assert!(
-        recall_result.get("error").is_none(),
-        "recall should succeed: {recall_result}"
-    );
-    let recall_text = tool_text(&recall_result);
-    assert!(
-        recall_text.contains("variable air volume") || recall_text.contains("HVAC"),
-        "recall should find the stored memory: {recall_text}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 8: remember then forget (requires model)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[ignore = "requires EmbeddingGemma model"]
-async fn remember_then_forget() {
-    if !has_model() {
-        eprintln!("SKIP: embedding model not available");
-        return;
-    }
-
-    let (base, _server) = start_server().await;
-    let session = initialize(&base).await;
-
-    call_tool(
-        &base,
-        &session,
-        2,
-        "remember",
-        serde_json::json!({
-            "namespace": "forget_test",
-            "content": "temporary fact for deletion test",
-            "memory_type": "fact"
-        }),
-    )
-    .await;
-
-    let forget_result = call_tool(
-        &base,
-        &session,
-        3,
-        "forget",
-        serde_json::json!({
-            "namespace": "forget_test",
-            "query": "temporary fact"
-        }),
-    )
-    .await;
-    assert!(
-        forget_result.get("error").is_none(),
-        "forget should succeed: {forget_result}"
-    );
-    let forget_text = tool_text(&forget_result);
-    assert!(
-        forget_text.to_lowercase().contains("delet"),
-        "should confirm deletion: {forget_text}"
-    );
-
-    let recall_result = call_tool(
-        &base,
-        &session,
-        4,
-        "recall",
-        serde_json::json!({
-            "namespace": "forget_test",
-            "query": "temporary fact",
-            "k": 5
-        }),
-    )
-    .await;
-    let recall_text = tool_text(&recall_result);
-    assert!(
-        recall_text.contains("0 results") || recall_text.contains("No memories"),
-        "recall after forget should return empty: {recall_text}"
-    );
-}

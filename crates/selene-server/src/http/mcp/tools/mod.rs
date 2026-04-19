@@ -2,7 +2,6 @@
 
 mod ai;
 mod api_keys;
-mod memory;
 mod principals;
 mod schemas;
 mod signing_key;
@@ -1966,70 +1965,6 @@ impl SeleneTools {
         params: Parameters<GraphRagSearchParams>,
     ) -> Result<CallToolResult, McpError> {
         ai::graphrag_search_impl(self, params.0).await
-    }
-
-    // ── Agent Memory Tools (delegated to memory module) ─────────────
-
-    #[tool(
-        name = "remember",
-        description = "Store a memory in the agent's namespace. Creates a __Memory node with vector embedding, temporal validity, and optional entity links. Use tier (e.g., 'ephemeral', 'session', 'persistent') for named TTL tiers configured via configure_memory, or valid_until for explicit expiry (mutually exclusive). Automatically evicts the least-frequently-accessed memory when the namespace reaches capacity.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn remember(
-        &self,
-        params: Parameters<RememberParams>,
-    ) -> Result<CallToolResult, McpError> {
-        memory::remember_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "recall",
-        description = "Search agent memory by semantic similarity. Returns the most relevant memories from the specified namespace, ranked by vector similarity to the query text. Frequently recalled memories are retained longer during eviction.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
-        memory::recall_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "forget",
-        description = "Delete memories from the agent's namespace. Provide either a specific node_id or a query string to match content. At least one of node_id or query is required.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
-        memory::forget_impl(self, params.0).await
-    }
-
-    #[tool(
-        name = "configure_memory",
-        description = "Configure memory settings for a namespace. Controls capacity (max_memories, 0 = unlimited), auto-expiry (default_ttl_ms), eviction policy ('clock' default, 'oldest', or 'lowest_confidence'), and named TTL tiers (ttl_tiers JSON object mapping tier names to ms, e.g., {\"ephemeral\": 3600000, \"session\": 86400000, \"persistent\": 0}). Settings persist in a __MemoryConfig node.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn configure_memory(
-        &self,
-        params: Parameters<ConfigureMemoryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        memory::configure_memory_impl(self, params.0).await
     }
 
     // ── Principal Management ────────────────────────────────────────
