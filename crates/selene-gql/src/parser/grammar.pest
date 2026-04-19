@@ -242,7 +242,10 @@ mutation_pipeline = { (match_stmt | filter_stmt)* ~ mutation_op+ ~ (return_stmt 
 finish_stmt       = { ^"FINISH" }
 mutation_op       = { insert_op | merge_op | set_stmt | remove_stmt | detach_delete_op | delete_op }
 
-merge_op = { ^"MERGE" ~ node_pattern ~ on_create_clause? ~ on_match_clause? }
+// MERGE accepts ON CREATE and ON MATCH in either order (and either one is
+// optional). The builder routes each clause to the right bucket by rule,
+// so we just need the grammar to accept the two-slot form.
+merge_op = { ^"MERGE" ~ node_pattern ~ (on_create_clause | on_match_clause)? ~ (on_create_clause | on_match_clause)? }
 on_create_clause = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_pair ~ ("," ~ set_pair)* }
 on_match_clause  = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_pair ~ ("," ~ set_pair)* }
 set_pair         = { ident ~ "." ~ prop_ident ~ "=" ~ expr }
@@ -310,7 +313,7 @@ is_expr = { comparison ~ is_suffix? }
 is_suffix = {
     is_kw ~ not_kw ~ null_kw
   | is_kw ~ null_kw
-  | is_kw ~ not_kw? ~ ^"LABELED" ~ label_or
+  | is_kw ~ not_kw? ~ ^"LABELED" ~ label_expr
   | is_kw ~ not_kw? ~ ^"SOURCE" ~ ^"OF" ~ comparison
   | is_kw ~ not_kw? ~ ^"DESTINATION" ~ ^"OF" ~ comparison
   | is_kw ~ not_kw? ~ ^"DIRECTED"
