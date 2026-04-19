@@ -480,9 +480,7 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                 .into_inner()
                 .find(|p| p.as_rule() == Rule::ident)
                 .map(|p| p.as_str().to_string())
-                .ok_or_else(|| {
-                    GqlError::parse_error("DROP TRIGGER requires a trigger name")
-                })?;
+                .ok_or_else(|| GqlError::parse_error("DROP TRIGGER requires a trigger name"))?;
             Ok(GqlStatement::DropTrigger(name))
         }
         Rule::show_triggers => Ok(GqlStatement::ShowTriggers),

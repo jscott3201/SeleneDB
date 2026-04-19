@@ -56,10 +56,7 @@ fn string_escape_newline() {
 
 #[test]
 fn string_escape_tab_and_return() {
-    accepts(
-        "\\t and \\r escapes",
-        &[r"RETURN 'a\tb\rc' AS s"],
-    );
+    accepts("\\t and \\r escapes", &[r"RETURN 'a\tb\rc' AS s"]);
 }
 
 #[test]
@@ -87,7 +84,10 @@ fn string_escape_double_single_quote() {
 #[test]
 fn string_escape_backspace_and_formfeed() {
     // \b is backspace (ASCII 0x08), \f is form feed (0x0C).
-    accepts("\\b backspace and \\f form feed escapes", &[r"RETURN '\b\f' AS s"]);
+    accepts(
+        "\\b backspace and \\f form feed escapes",
+        &[r"RETURN '\b\f' AS s"],
+    );
 }
 
 #[test]
@@ -111,8 +111,8 @@ fn string_escape_invalid_sequences_rejected() {
     rejects(
         "invalid escape sequences",
         &[
-            r"RETURN '\z' AS s",   // \z not defined
-            r"RETURN '\u123' AS s", // \u needs exactly 4 hex
+            r"RETURN '\z' AS s",     // \z not defined
+            r"RETURN '\u123' AS s",  // \u needs exactly 4 hex
             r"RETURN '\U1234' AS s", // \U needs exactly 8 hex
         ],
     );
@@ -129,7 +129,12 @@ fn string_escape_invalid_sequences_rejected() {
 fn number_plain_int() {
     accepts(
         "plain ints",
-        &["RETURN 0 AS n", "RETURN 42 AS n", "RETURN -17 AS n", "RETURN +5 AS n"],
+        &[
+            "RETURN 0 AS n",
+            "RETURN 42 AS n",
+            "RETURN -17 AS n",
+            "RETURN +5 AS n",
+        ],
     );
 }
 
@@ -219,7 +224,10 @@ fn number_bare_dot_rejected() {
 fn number_leading_zero_ambiguity() {
     // 0123 — is this int 123 with leading zero? grammar does not require a hex/oct/bin prefix.
     // int_lit = @{ sign? ~ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* } so 0123 parses as 123.
-    accepts("leading-zero integer", &["RETURN 0123 AS n", "RETURN 0 AS n"]);
+    accepts(
+        "leading-zero integer",
+        &["RETURN 0123 AS n", "RETURN 0 AS n"],
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -261,9 +269,7 @@ fn case_nested() {
 fn case_in_aggregate() {
     accepts(
         "CASE inside an aggregate",
-        &[
-            "MATCH (n:sensor) RETURN count(CASE WHEN n.temp > 70 THEN 1 END) AS hot_count",
-        ],
+        &["MATCH (n:sensor) RETURN count(CASE WHEN n.temp > 70 THEN 1 END) AS hot_count"],
     );
 }
 
@@ -271,10 +277,7 @@ fn case_in_aggregate() {
 fn case_requires_when() {
     rejects(
         "CASE without any WHEN clause",
-        &[
-            "RETURN CASE END AS r",
-            "RETURN CASE 1 END AS r",
-        ],
+        &["RETURN CASE END AS r", "RETURN CASE 1 END AS r"],
     );
 }
 
@@ -379,10 +382,7 @@ fn parameter_starting_digit_rejected() {
 
 #[test]
 fn parameter_empty_rejected() {
-    rejects(
-        "empty parameter name",
-        &["RETURN $ AS x"],
-    );
+    rejects("empty parameter name", &["RETURN $ AS x"]);
 }
 
 #[test]
@@ -419,9 +419,7 @@ fn yield_reserved_keyword_name_rejected() {
     // that the caller should use backticks. This test locks in that behavior.
     rejects(
         "YIELD of a reserved keyword like `count` without escaping",
-        &[
-            "CALL graph.nodeCount() YIELD count RETURN count",
-        ],
+        &["CALL graph.nodeCount() YIELD count RETURN count"],
     );
 }
 
@@ -429,27 +427,20 @@ fn yield_reserved_keyword_name_rejected() {
 fn yield_keyword_with_backticks() {
     accepts(
         "YIELD of a reserved keyword name escaped with backticks",
-        &[
-            "CALL graph.nodeCount() YIELD `count` RETURN `count`",
-        ],
+        &["CALL graph.nodeCount() YIELD `count` RETURN `count`"],
     );
 }
 
 #[test]
 fn yield_star() {
-    accepts(
-        "YIELD *",
-        &["CALL graph.nodeCount() YIELD * RETURN *"],
-    );
+    accepts("YIELD *", &["CALL graph.nodeCount() YIELD * RETURN *"]);
 }
 
 #[test]
 fn yield_with_alias() {
     accepts(
         "YIELD with AS alias",
-        &[
-            "CALL graph.nodeCount() YIELD count AS total RETURN total",
-        ],
+        &["CALL graph.nodeCount() YIELD count AS total RETURN total"],
     );
 }
 
@@ -593,10 +584,7 @@ fn map_empty_literal() {
     // record_constructor requires at least one field per grammar:
     // record_constructor = { ^"RECORD"? ~ "{" ~ record_field ~ ("," ~ record_field)* ~ "}" }
     // So empty {} should NOT parse as a map.
-    rejects(
-        "empty map literal",
-        &["RETURN {} AS empty"],
-    );
+    rejects("empty map literal", &["RETURN {} AS empty"]);
 }
 
 #[test]
@@ -686,10 +674,7 @@ fn is_typed_suffix() {
     );
     rejects(
         "bare IS <type> without TYPED keyword is not GQL",
-        &[
-            "RETURN 1 IS INTEGER AS b",
-            "RETURN 'x' IS STRING AS b",
-        ],
+        &["RETURN 1 IS INTEGER AS b", "RETURN 'x' IS STRING AS b"],
     );
 }
 
@@ -889,9 +874,7 @@ fn call_procedure_requires_yield() {
 fn call_subquery_form() {
     accepts(
         "CALL { query } subquery form",
-        &[
-            "CALL { MATCH (n:sensor) RETURN n.name AS name } RETURN name",
-        ],
+        &["CALL { MATCH (n:sensor) RETURN n.name AS name } RETURN name"],
     );
 }
 
@@ -972,10 +955,7 @@ fn create_edge_type_requires_endpoints_or_body() {
     );
     rejects(
         "CREATE EDGE TYPE without braces or colon",
-        &[
-            "CREATE EDGE TYPE contains",
-            "CREATE EDGE TYPE :contains",
-        ],
+        &["CREATE EDGE TYPE contains", "CREATE EDGE TYPE :contains"],
     );
 }
 
@@ -985,7 +965,7 @@ fn create_procedure_requires_body() {
         "CREATE PROCEDURE requires { body }",
         &[
             "CREATE PROCEDURE foo()",
-            "CREATE PROCEDURE foo() { }",  // empty body must still fail — grammar requires a query pipeline
+            "CREATE PROCEDURE foo() { }", // empty body must still fail — grammar requires a query pipeline
         ],
     );
 }
@@ -994,9 +974,7 @@ fn create_procedure_requires_body() {
 fn create_trigger_requires_event_and_body() {
     accepts(
         "CREATE TRIGGER minimal valid form",
-        &[
-            "CREATE TRIGGER t AFTER INSERT ON :sensor EXECUTE SET n.updated = true",
-        ],
+        &["CREATE TRIGGER t AFTER INSERT ON :sensor EXECUTE SET n.updated = true"],
     );
     rejects(
         "CREATE TRIGGER without event, label, or body",
