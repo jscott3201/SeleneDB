@@ -111,16 +111,10 @@ pub(in crate::http) async fn health(
     let full = ops::health::health(&state);
     match auth.0 {
         Some(_) => {
-            // Authenticated caller -- full operational details + embedding status.
-            let mut value = serde_json::to_value(&full).unwrap_or_else(|_| {
+            // Authenticated caller -- full operational details.
+            let value = serde_json::to_value(&full).unwrap_or_else(|_| {
                 serde_json::json!({"status": "error", "message": "failed to serialize health response"})
             });
-            let embed_status = selene_gql::runtime::embed::embedding_status();
-            if let (Some(obj), Ok(embed_val)) =
-                (value.as_object_mut(), serde_json::to_value(&embed_status))
-            {
-                obj.insert("embedding".into(), embed_val);
-            }
             Json(value)
         }
         None => {

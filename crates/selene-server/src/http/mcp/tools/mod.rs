@@ -924,19 +924,11 @@ impl SeleneTools {
     async fn graph_stats(&self) -> Result<CallToolResult, McpError> {
         let auth = mcp_auth(self)?;
         let stats = ops::graph_stats::graph_stats(&self.state, &auth);
-        let embed = selene_gql::runtime::embed::embedding_status();
         Ok(structured_result(serde_json::json!({
             "node_count": stats.node_count,
             "edge_count": stats.edge_count,
             "node_labels": stats.node_labels,
             "edge_labels": stats.edge_labels,
-            "embedding": {
-                "loaded": embed.loaded,
-                "model_id": embed.model_id,
-                "dimensions": embed.dimensions,
-                "model_path": embed.model_path,
-                "error": embed.error,
-            },
         })))
     }
 

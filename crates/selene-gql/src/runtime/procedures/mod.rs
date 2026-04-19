@@ -20,7 +20,6 @@ pub mod graphrag;
 pub mod history;
 pub mod introspection;
 pub mod rdf;
-pub mod reindex;
 pub mod schema_audit;
 pub mod schema_dump;
 pub mod schema_introspect;
@@ -184,9 +183,6 @@ impl ProcedureRegistry {
         reg.register(Arc::new(schema_introspect::SchemaNodeSchema));
         // GraphRAG hybrid retriever (ai feature)
         reg.register(Arc::new(graphrag::GraphRagSearch));
-        // Embedding re-index
-        reg.register(Arc::new(reindex::Reindex));
-        reg.register(Arc::new(reindex::ReindexStatus));
         // Procedure catalog introspection (registered last so it sees all others)
         let introspect = introspection::GraphProcedures::from_registry(&reg);
         reg.register(Arc::new(introspect));

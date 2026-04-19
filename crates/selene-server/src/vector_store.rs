@@ -26,7 +26,7 @@ pub struct VectorStore {
     normalized: Vec<bool>,
     /// Free slot indices from removed vectors (reused before appending).
     free_slots: Vec<usize>,
-    /// Vector dimension (e.g., 768 for EmbeddingGemma). 0 = unset (first insert sets it).
+    /// Vector dimension (set by the first inserted vector). 0 = unset.
     dims: usize,
 }
 
