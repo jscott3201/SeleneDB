@@ -85,8 +85,9 @@ fn string_escape_double_single_quote() {
 }
 
 #[test]
-fn string_escape_bell_and_formfeed() {
-    accepts("\\b and \\f escapes", &[r"RETURN '\b\f' AS s"]);
+fn string_escape_backspace_and_formfeed() {
+    // \b is backspace (ASCII 0x08), \f is form feed (0x0C).
+    accepts("\\b backspace and \\f form feed escapes", &[r"RETURN '\b\f' AS s"]);
 }
 
 #[test]
@@ -482,6 +483,20 @@ fn merge_plain() {
     accepts(
         "MERGE without ON CREATE/ON MATCH",
         &["MERGE (n:sensor {id: 1})"],
+    );
+}
+
+#[test]
+fn merge_rejects_duplicate_clauses() {
+    // The grammar accepts at most one ON CREATE and at most one ON MATCH.
+    // Duplicating either clause must fail at parse time, not silently
+    // drop the second. Locks in the tighter rule shape.
+    rejects(
+        "MERGE with duplicated ON CREATE or ON MATCH",
+        &[
+            "MERGE (n:sensor {id: 1}) ON CREATE SET n.a = 1 ON CREATE SET n.b = 2",
+            "MERGE (n:sensor {id: 1}) ON MATCH SET n.a = 1 ON MATCH SET n.b = 2",
+        ],
     );
 }
 

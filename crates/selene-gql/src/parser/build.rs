@@ -376,9 +376,13 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                             if pd.as_rule() == Rule::param_decl {
                                 let mut parts = pd.into_inner();
                                 let pname = parts.next().map_or_else(
-                                    || IStr::new("_"),
-                                    |x| intern_name(x),
-                                );
+                                    || {
+                                        Err(GqlError::parse_error(
+                                            "CREATE PROCEDURE parameter requires a name",
+                                        ))
+                                    },
+                                    |x| Ok(intern_name(x)),
+                                )?;
                                 let ptype = parts.next().map_or_else(
                                     || {
                                         Err(GqlError::parse_error(
@@ -490,12 +494,17 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
             let mut name = IStr::new("");
             let mut match_clause = None;
             let mut return_clause = None;
-            // Extract the definition text from the match_stmt + return_stmt
-            // child spans. Using the full_text with `find(" AS ")` would
-            // miscount if the view name contained " AS " or if any property
-            // alias inside the body did — child spans are unambiguous.
-            let mut match_text: Option<String> = None;
-            let mut return_text: Option<String> = None;
+            // Capture the match_stmt start offset and return_stmt end offset
+            // so we can slice the original input between them — this preserves
+            // any whitespace / comments that sat between MATCH and RETURN.
+            // Using `format!("{m} {r}")` of the two child strings would drop
+            // that inter-clause text. Using `find(" AS ")` on the full input
+            // would mis-split if the view name or a property alias contained
+            // " AS ". Child spans are unambiguous.
+            let outer_start = inner.as_span().start();
+            let outer_str = inner.as_str();
+            let mut match_start: Option<usize> = None;
+            let mut return_end: Option<usize> = None;
 
             for p in inner.into_inner() {
                 match p.as_rule() {
@@ -503,19 +512,19 @@ fn build_ddl(pair: Pair<'_, Rule>) -> Result<GqlStatement, GqlError> {
                     Rule::if_not_exists => if_not_exists = true,
                     Rule::ident => name = intern_name(p),
                     Rule::match_stmt => {
-                        match_text = Some(p.as_str().to_string());
+                        match_start = Some(p.as_span().start() - outer_start);
                         match_clause = Some(build_match(p)?);
                     }
                     Rule::return_stmt => {
-                        return_text = Some(p.as_str().to_string());
+                        return_end = Some(p.as_span().end() - outer_start);
                         return_clause = Some(build_return(p)?);
                     }
                     _ => {}
                 }
             }
 
-            let definition_text = match (match_text, return_text) {
-                (Some(m), Some(r)) => format!("{m} {r}"),
+            let definition_text = match (match_start, return_end) {
+                (Some(s), Some(e)) => outer_str[s..e].to_string(),
                 _ => {
                     return Err(GqlError::parse_error(
                         "CREATE MATERIALIZED VIEW requires both MATCH and RETURN clauses",
