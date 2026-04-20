@@ -19,6 +19,39 @@ pub enum SchemaRegisterOutcome {
     AlreadyExistsEqual,
 }
 
+/// Apply the same inheritance resolution that
+/// [`selene_graph::SchemaValidator::register_node_schema`] performs at
+/// registration time: prepend parent properties (child wins on name
+/// collisions) and inherit `valid_edge_labels` when the child leaves
+/// them empty. This lets the idempotent-create equality check compare
+/// the proposal against the stored schema on equal footing — without
+/// this, any proposal with a `parent` would look different from what's
+/// stored and trigger a spurious "different shape" conflict.
+fn resolve_node_schema_inheritance(
+    schema_reader: &selene_graph::SchemaValidator,
+    schema: &NodeSchema,
+) -> NodeSchema {
+    let mut resolved = schema.clone();
+    if let Some(ref parent_label) = resolved.parent
+        && let Some(parent) = schema_reader.node_schema(parent_label)
+    {
+        let child_names: std::collections::HashSet<&str> =
+            resolved.properties.iter().map(|p| p.name.as_ref()).collect();
+        let mut merged: Vec<_> = parent
+            .properties
+            .iter()
+            .filter(|p| !child_names.contains(p.name.as_ref()))
+            .cloned()
+            .collect();
+        merged.append(&mut resolved.properties);
+        resolved.properties = merged;
+        if resolved.valid_edge_labels.is_empty() {
+            resolved.valid_edge_labels = parent.valid_edge_labels.clone();
+        }
+    }
+    resolved
+}
+
 /// List all registered node schemas.
 pub fn list_node_schemas(
     state: &ServerState,
@@ -118,15 +151,22 @@ pub fn register_node_schema(
             )));
         }
         // Structural-equality check against any existing schema with the
-        // same label. serde_json round-trips both through the same JSON
-        // shape we already use on the wire, which makes this comparison
-        // track exactly what callers would observe via get_schema.
+        // same label. Resolve inheritance on the proposal first so the
+        // comparison matches like-for-like — the stored schema has had
+        // parent properties merged in at registration time, so a raw
+        // proposal with a `parent` field would otherwise look different
+        // from its own registered form.
         if let Some(existing) = guard.schema().node_schema(&schema.label) {
+            let resolved_proposal = resolve_node_schema_inheritance(guard.schema(), &schema);
             let a = serde_json::to_value(existing).map_err(|e| {
-                OpError::InvalidRequest(format!("failed to serialize existing schema: {e}"))
+                OpError::Internal(format!(
+                    "failed to serialize existing node schema '{label}' for comparison: {e}"
+                ))
             })?;
-            let b = serde_json::to_value(&schema).map_err(|e| {
-                OpError::InvalidRequest(format!("failed to serialize proposed schema: {e}"))
+            let b = serde_json::to_value(&resolved_proposal).map_err(|e| {
+                OpError::Internal(format!(
+                    "failed to serialize proposed node schema '{label}' for comparison: {e}"
+                ))
             })?;
             if a == b {
                 tracing::debug!(label, "create_schema no-op: proposed shape equals existing");
@@ -213,11 +253,16 @@ pub fn register_edge_schema(
     let outcome = {
         let mut guard = state.graph.inner().write();
         if let Some(existing) = guard.schema().edge_schema(&schema.label) {
+            // Edge schemas don't inherit, so no resolution step needed.
             let a = serde_json::to_value(existing).map_err(|e| {
-                OpError::InvalidRequest(format!("failed to serialize existing schema: {e}"))
+                OpError::Internal(format!(
+                    "failed to serialize existing edge schema '{label}' for comparison: {e}"
+                ))
             })?;
             let b = serde_json::to_value(&schema).map_err(|e| {
-                OpError::InvalidRequest(format!("failed to serialize proposed schema: {e}"))
+                OpError::Internal(format!(
+                    "failed to serialize proposed edge schema '{label}' for comparison: {e}"
+                ))
             })?;
             if a == b {
                 tracing::debug!(
@@ -226,9 +271,11 @@ pub fn register_edge_schema(
                 );
                 return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
             }
+            // There is no `update_edge_schema` MCP tool; point operators
+            // at the delete + recreate path instead of a dead-end hint.
             return Err(OpError::InvalidRequest(format!(
                 "edge schema '{label}' already exists with a different shape -- \
-                 call update_schema to change it, or delete_schema first"
+                 use delete_edge_schema and create_edge_schema to replace it"
             )));
         }
         let is_new = guard
