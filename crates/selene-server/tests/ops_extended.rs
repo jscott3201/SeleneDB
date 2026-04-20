@@ -701,7 +701,12 @@ async fn schema_get_node_not_found() {
 }
 
 #[tokio::test]
-async fn schema_duplicate_registration_rejected() {
+async fn schema_duplicate_registration_equal_is_noop() {
+    // `create_schema` is idempotent: a byte-equal duplicate returns
+    // `AlreadyExistsEqual` instead of the legacy "use force=true"
+    // error. Agents that pre-call create_schema defensively (common
+    // with smaller instruction-tuned models) see a clean no-op rather
+    // than a failure to reason about.
     let dir = tempfile::tempdir().unwrap();
     let state = ServerState::for_testing(dir.path()).await;
 
@@ -717,11 +722,63 @@ async fn schema_duplicate_registration_rejected() {
         key_properties: vec![],
     };
 
-    ops::schema::register_node_schema(&state, &admin(), schema.clone()).unwrap();
-    let result = ops::schema::register_node_schema(&state, &admin(), schema);
-    assert!(result.is_err());
+    let first = ops::schema::register_node_schema(&state, &admin(), schema.clone()).unwrap();
+    assert_eq!(first, ops::schema::SchemaRegisterOutcome::Created);
+    let second = ops::schema::register_node_schema(&state, &admin(), schema).unwrap();
+    assert_eq!(
+        second,
+        ops::schema::SchemaRegisterOutcome::AlreadyExistsEqual
+    );
+}
+
+#[tokio::test]
+async fn schema_duplicate_registration_different_shape_errors() {
+    // A conflicting proposal (same label, different shape) still
+    // errors — otherwise we'd silently overwrite. The error text
+    // points the caller at `update_schema`, which is the explicit
+    // overwrite path.
+    let dir = tempfile::tempdir().unwrap();
+    let state = ServerState::for_testing(dir.path()).await;
+
+    let v1 = selene_core::schema::NodeSchema {
+        label: Arc::from("sensor"),
+        parent: None,
+        properties: vec![],
+        valid_edge_labels: vec![],
+        description: "v1".into(),
+        annotations: HashMap::new(),
+        version: Default::default(),
+        validation_mode: None,
+        key_properties: vec![],
+    };
+    ops::schema::register_node_schema(&state, &admin(), v1).unwrap();
+
+    let v2 = selene_core::schema::NodeSchema {
+        label: Arc::from("sensor"),
+        parent: None,
+        properties: vec![selene_core::schema::PropertyDef::simple(
+            "name",
+            selene_core::schema::ValueType::String,
+            false,
+        )],
+        valid_edge_labels: vec![],
+        description: "v2-different".into(),
+        annotations: HashMap::new(),
+        version: Default::default(),
+        validation_mode: None,
+        key_properties: vec![],
+    };
+    let result = ops::schema::register_node_schema(&state, &admin(), v2);
     let err = result.unwrap_err();
-    assert!(matches!(err, ops::OpError::InvalidRequest(_)));
+    match err {
+        ops::OpError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("different shape") && msg.contains("update_schema"),
+                "expected conflict hint pointing at update_schema, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[tokio::test]

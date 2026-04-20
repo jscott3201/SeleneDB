@@ -7,6 +7,18 @@ use crate::auth::engine::Action;
 use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 
+/// Outcome of an idempotent schema registration. Lets callers distinguish
+/// a fresh create from a no-op on an already-equal schema, and from a
+/// conflict (same label, different shape) without throwing — the last case
+/// is still a soft error but structured enough for an agent to recover from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaRegisterOutcome {
+    /// Schema did not exist; has been registered.
+    Created,
+    /// Schema already exists and is byte-equal to the proposed one.
+    AlreadyExistsEqual,
+}
+
 /// List all registered node schemas.
 pub fn list_node_schemas(
     state: &ServerState,
@@ -71,13 +83,24 @@ pub fn get_edge_schema(
         })
 }
 
-/// Register a node schema. Rejects if a schema with the same label already exists.
-/// Use `register_node_schema_force` to overwrite.
+/// Register a node schema idempotently.
+///
+/// Agent tool flows frequently pre-call `create_schema` as a defensive
+/// step before writing nodes; rejecting that call with an error teaches
+/// models to treat a benign pre-flight as a failure and retry with
+/// increasingly wrong args. This routine collapses the benign case into
+/// [`SchemaRegisterOutcome::AlreadyExistsEqual`] when the proposed shape
+/// is byte-identical to the registered one. Genuinely conflicting
+/// proposals still return [`OpError::InvalidRequest`], pointing the
+/// caller at `update_schema` for explicit overwrites.
+///
+/// Use `register_node_schema_force` when you want unconditional
+/// overwrite (no equality check).
 pub fn register_node_schema(
     state: &ServerState,
     auth: &AuthContext,
     schema: NodeSchema,
-) -> Result<(), OpError> {
+) -> Result<SchemaRegisterOutcome, OpError> {
     if !state
         .auth_engine
         .authorize_action(auth, Action::EntityCreate)
@@ -85,8 +108,7 @@ pub fn register_node_schema(
         return Err(OpError::AuthDenied);
     }
     let label = schema.label.to_string();
-    // Cycle check + registration under a single write lock
-    {
+    let outcome = {
         let mut guard = state.graph.inner().write();
         if let Some(ref parent) = schema.parent
             && guard.schema().has_inheritance_cycle(&schema.label, parent)
@@ -95,21 +117,41 @@ pub fn register_node_schema(
                 "inheritance cycle: '{label}' → ... → '{label}'"
             )));
         }
+        // Structural-equality check against any existing schema with the
+        // same label. serde_json round-trips both through the same JSON
+        // shape we already use on the wire, which makes this comparison
+        // track exactly what callers would observe via get_schema.
+        if let Some(existing) = guard.schema().node_schema(&schema.label) {
+            let a = serde_json::to_value(existing).map_err(|e| {
+                OpError::InvalidRequest(format!("failed to serialize existing schema: {e}"))
+            })?;
+            let b = serde_json::to_value(&schema).map_err(|e| {
+                OpError::InvalidRequest(format!("failed to serialize proposed schema: {e}"))
+            })?;
+            if a == b {
+                tracing::debug!(label, "create_schema no-op: proposed shape equals existing");
+                return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
+            }
+            return Err(OpError::InvalidRequest(format!(
+                "node schema '{label}' already exists with a different shape -- \
+                 call update_schema to change it, or delete_schema first"
+            )));
+        }
         let is_new = guard
             .schema_mut()
             .register_node_schema_if_new(schema)
             .map_err(|e| OpError::InvalidRequest(e.to_string()))?;
-        if !is_new {
-            return Err(OpError::InvalidRequest(format!(
-                "node schema '{label}' already exists -- use force=true to overwrite or delete it first"
-            )));
-        }
+        debug_assert!(
+            is_new,
+            "schema_mut reported duplicate after equality branch"
+        );
         guard.build_property_indexes();
         guard.build_composite_indexes();
-    }
+        SchemaRegisterOutcome::Created
+    };
     state.graph.publish_snapshot();
     tracing::info!(label, "node schema registered");
-    Ok(())
+    Ok(outcome)
 }
 
 /// Register a node schema, replacing any existing one with the same label.
@@ -152,12 +194,15 @@ pub fn register_node_schema_force(
     Ok(replaced)
 }
 
-/// Register an edge schema. Rejects if already exists.
+/// Register an edge schema idempotently. Mirrors the policy in
+/// [`register_node_schema`]: byte-equal duplicates return
+/// [`SchemaRegisterOutcome::AlreadyExistsEqual`], a different-shape
+/// duplicate errors and points at `update_schema`.
 pub fn register_edge_schema(
     state: &ServerState,
     auth: &AuthContext,
     schema: EdgeSchema,
-) -> Result<(), OpError> {
+) -> Result<SchemaRegisterOutcome, OpError> {
     if !state
         .auth_engine
         .authorize_action(auth, Action::EntityCreate)
@@ -165,21 +210,40 @@ pub fn register_edge_schema(
         return Err(OpError::AuthDenied);
     }
     let label = schema.label.to_string();
-    let is_new = state
-        .graph
-        .inner()
-        .write()
-        .schema_mut()
-        .register_edge_schema_if_new(schema)
-        .map_err(|e| OpError::InvalidRequest(e.to_string()))?;
-    if !is_new {
-        return Err(OpError::InvalidRequest(format!(
-            "edge schema '{label}' already exists"
-        )));
-    }
+    let outcome = {
+        let mut guard = state.graph.inner().write();
+        if let Some(existing) = guard.schema().edge_schema(&schema.label) {
+            let a = serde_json::to_value(existing).map_err(|e| {
+                OpError::InvalidRequest(format!("failed to serialize existing schema: {e}"))
+            })?;
+            let b = serde_json::to_value(&schema).map_err(|e| {
+                OpError::InvalidRequest(format!("failed to serialize proposed schema: {e}"))
+            })?;
+            if a == b {
+                tracing::debug!(
+                    label,
+                    "create_schema no-op: edge proposed shape equals existing"
+                );
+                return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
+            }
+            return Err(OpError::InvalidRequest(format!(
+                "edge schema '{label}' already exists with a different shape -- \
+                 call update_schema to change it, or delete_schema first"
+            )));
+        }
+        let is_new = guard
+            .schema_mut()
+            .register_edge_schema_if_new(schema)
+            .map_err(|e| OpError::InvalidRequest(e.to_string()))?;
+        debug_assert!(
+            is_new,
+            "schema_mut reported duplicate after equality branch"
+        );
+        SchemaRegisterOutcome::Created
+    };
     state.graph.publish_snapshot();
     tracing::info!(label, "edge schema registered");
-    Ok(())
+    Ok(outcome)
 }
 
 /// Unregister a node schema by label.
