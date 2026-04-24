@@ -37,6 +37,84 @@ pub enum UpdateError {
     Graph(#[from] selene_graph::GraphError),
     #[error("node not found: {0}")]
     NodeNotFound(u64),
+    /// A scoped principal attempted to write to a node outside its
+    /// authorization bitmap, or tried to create a new top-level node
+    /// (node creation is admin-only for 1.3.0 RDF writes).
+    #[error("scope denied: {0}")]
+    ScopeDenied(String),
+}
+
+/// Per-call authorization context for SPARQL Update / RDF import writes.
+///
+/// `None` = admin (no scope check). `Some(bitmap)` = scoped principal;
+/// every mutation must target a node whose id is in the bitmap, and new
+/// node creation is rejected (triple-level scope enforcement for new
+/// nodes requires a parent binding that SPARQL Update does not express
+/// — that scope design is out-of-scope for 1.3.0).
+#[derive(Clone, Copy)]
+pub struct WriteScope<'a> {
+    // Private so callers cannot construct an arbitrary state — only the
+    // `admin()` and `scoped()` constructors. Exposed via `as_bitmap()`
+    // when the adapter needs it (e.g., for `SeleneDataset::new_scoped`
+    // in `apply_delete_insert`).
+    bitmap: Option<&'a roaring::RoaringBitmap>,
+}
+
+impl<'a> WriteScope<'a> {
+    /// Admin / global write scope: no checks.
+    pub fn admin() -> Self {
+        Self { bitmap: None }
+    }
+
+    /// Scoped write: every mutation must target an in-scope node.
+    pub fn scoped(bitmap: &'a roaring::RoaringBitmap) -> Self {
+        Self {
+            bitmap: Some(bitmap),
+        }
+    }
+
+    /// Read access to the underlying bitmap — `None` for admin scope.
+    /// Used by callers that need to thread the bitmap into other scope-
+    /// aware APIs (e.g., the SPARQL dataset adapter).
+    pub fn as_bitmap(self) -> Option<&'a roaring::RoaringBitmap> {
+        self.bitmap
+    }
+
+    fn is_admin(self) -> bool {
+        self.bitmap.is_none()
+    }
+
+    /// Reject if `node_id` is not in scope.
+    fn check(self, node_id: selene_core::NodeId, context: &'static str) -> Result<(), UpdateError> {
+        match self.bitmap {
+            None => Ok(()),
+            Some(bm) if bm.contains(node_id.0 as u32) => Ok(()),
+            Some(_) => Err(UpdateError::ScopeDenied(format!(
+                "{context}: node {} is outside the caller's scope",
+                node_id.0
+            ))),
+        }
+    }
+
+    /// Reject new node creation for scoped principals. A scope-aware
+    /// SPARQL Update that hits an unknown subject URI would implicitly
+    /// mint a detached top-level node; there is no way to express a
+    /// parent-in-scope binding for it in the INSERT DATA syntax, so the
+    /// write is refused. The caller can pre-create the node via CRUD
+    /// (`create_node` enforces a parent-in-scope check) and then write
+    /// properties/edges against it via SPARQL Update.
+    fn check_can_create_node(self) -> Result<(), UpdateError> {
+        if self.is_admin() {
+            Ok(())
+        } else {
+            Err(UpdateError::ScopeDenied(
+                "scoped principals cannot create new nodes via SPARQL Update — \
+                 pre-create the node via CRUD with a parent_id inside scope, then \
+                 write properties/edges via SPARQL"
+                    .into(),
+            ))
+        }
+    }
 }
 
 /// Result of a SPARQL Update execution.
@@ -51,68 +129,82 @@ pub struct UpdateResult {
     pub edges_deleted: usize,
 }
 
-/// Execute a SPARQL Update against a `SharedGraph` and publish the new
-/// snapshot so subsequent reads observe the mutation.
+/// Execute a SPARQL Update against a `SharedGraph` and return both the
+/// mutation summary and the full WAL-ready changeset.
 ///
-/// # Durability caveat
+/// All apply-* helpers route through `TrackedMutation` and the returned
+/// `Vec<Change>` is the union of their individual `commit(0)` outputs,
+/// ordered by operation. Callers hand that to `persist_or_die` so the
+/// WAL, changelog, and version store observe SPARQL Update mutations
+/// with the same durability posture as GQL mutations.
 ///
-/// The returned `Vec<Change>` is currently **always empty**. The in-memory
-/// graph is updated and `publish_snapshot` makes the new state visible to
-/// all readers, but WAL / changelog / version-store consumers do **not**
-/// see these writes — and therefore SPARQL Update mutations do not
-/// replicate, do not survive a process restart, and do not appear in
-/// temporal queries. Callers that rely on `persist_or_die` for durability
-/// (as `ops::rdf::sparql_update` does) are passing an empty changeset; the
-/// call is a no-op for WAL consumers until this is addressed.
-///
-/// The fix requires re-plumbing `apply_insert_data` / `apply_delete_data`
-/// (and the compound `DELETE-INSERT-WHERE` path) to emit `Change` records
-/// through `TrackedMutation`. This is tracked as deferred work and is the
-/// last step to bring SPARQL Update to parity with GQL mutations.
-///
-/// This entry point is still strictly better than the pre-1.3.0 handler,
-/// which bypassed authz, replica checks, and the snapshot publish path —
-/// so it is safe to ship with the durability caveat documented, and
-/// `ops::rdf::sparql_update` gates it to admin-only for that reason.
+/// The `scope` argument controls per-mutation authorization. Admin
+/// callers pass `WriteScope::admin()`; scoped callers pass
+/// `WriteScope::scoped(&bitmap)` and any write outside the bitmap —
+/// including creating a new node — returns `UpdateError::ScopeDenied`
+/// before the mutation is persisted.
 pub fn execute_update_shared(
     shared: &selene_graph::SharedGraph,
     namespace: &RdfNamespace,
     update_str: &str,
+    scope: WriteScope<'_>,
 ) -> Result<(UpdateResult, Vec<selene_core::changeset::Change>), UpdateError> {
-    let result = {
+    let (result, changes) = {
         let mut inner = shared.inner().write();
-        execute_update(&mut inner, namespace, update_str)?
+        execute_update_inner(&mut inner, namespace, update_str, scope)?
     };
+    // `SharedGraph::write` normally bumps the containment generation when
+    // `[:contains]` edges move; we drive the write via
+    // `shared.inner().write()` directly so that bookkeeping has to be
+    // driven by hand. Without this, `ops::refresh_scope_if_stale` would
+    // miss scope-topology changes made through SPARQL Update.
+    shared.check_containment_generation(&changes);
     shared.publish_snapshot();
-    Ok((result, Vec::new()))
+    Ok((result, changes))
 }
 
-/// Execute a SPARQL Update against a mutable Selene graph.
+/// Execute a SPARQL Update against a mutable Selene graph (admin scope
+/// for backward compatibility; stand-alone tools and tests use this path).
 ///
-/// Supports INSERT DATA and DELETE DATA. Returns counts of mutations applied.
-/// This is the low-level entry used by [`execute_update_shared`]; server code
-/// should prefer the shared variant so WAL / changelog consumers see the
-/// write.
+/// Server code that needs scope enforcement and WAL capture should prefer
+/// [`execute_update_shared`] instead.
 pub fn execute_update(
     graph: &mut SeleneGraph,
     namespace: &RdfNamespace,
     update_str: &str,
 ) -> Result<UpdateResult, UpdateError> {
+    let (result, _changes) =
+        execute_update_inner(graph, namespace, update_str, WriteScope::admin())?;
+    Ok(result)
+}
+
+/// Shared implementation: executes a SPARQL Update, enforces `scope`
+/// at every mutation site, and returns both the summary counts and
+/// the accumulated `Vec<Change>` for downstream WAL persistence.
+fn execute_update_inner(
+    graph: &mut SeleneGraph,
+    namespace: &RdfNamespace,
+    update_str: &str,
+    scope: WriteScope<'_>,
+) -> Result<(UpdateResult, Vec<selene_core::changeset::Change>), UpdateError> {
     let update = SparqlParser::new()
         .parse_update(update_str)
         .map_err(|e| UpdateError::Parse(e.to_string()))?;
 
     let mut result = UpdateResult::default();
+    let mut changes: Vec<selene_core::changeset::Change> = Vec::new();
 
     for op in &update.operations {
         match op {
             GraphUpdateOperation::InsertData { data } => {
                 let quads: Vec<Quad> = data.iter().map(spargebra_quad_to_oxrdf).collect();
-                apply_insert_data(graph, namespace, &quads, &mut result)?;
+                let op_changes = apply_insert_data(graph, namespace, &quads, &mut result, scope)?;
+                changes.extend(op_changes);
             }
             GraphUpdateOperation::DeleteData { data } => {
                 let quads: Vec<Quad> = data.iter().map(spargebra_ground_quad_to_oxrdf).collect();
-                apply_delete_data(graph, namespace, &quads, &mut result)?;
+                let op_changes = apply_delete_data(graph, namespace, &quads, &mut result, scope)?;
+                changes.extend(op_changes);
             }
             GraphUpdateOperation::DeleteInsert {
                 delete,
@@ -120,7 +212,7 @@ pub fn execute_update(
                 using,
                 pattern,
             } => {
-                apply_delete_insert(
+                let op_changes = apply_delete_insert(
                     graph,
                     namespace,
                     delete,
@@ -128,20 +220,24 @@ pub fn execute_update(
                     using.clone(),
                     pattern,
                     &mut result,
+                    scope,
                 )?;
+                changes.extend(op_changes);
             }
             GraphUpdateOperation::Clear {
                 silent,
                 graph: target,
             } => {
-                apply_clear(graph, target, *silent, &mut result)?;
+                let op_changes = apply_clear(graph, target, *silent, &mut result, scope)?;
+                changes.extend(op_changes);
             }
             GraphUpdateOperation::Drop {
                 silent,
                 graph: target,
             } => {
                 // DROP has same semantics as CLEAR for a single-graph system.
-                apply_clear(graph, target, *silent, &mut result)?;
+                let op_changes = apply_clear(graph, target, *silent, &mut result, scope)?;
+                changes.extend(op_changes);
             }
             other => {
                 return Err(UpdateError::Unsupported(format!(
@@ -152,16 +248,24 @@ pub fn execute_update(
         }
     }
 
-    Ok(result)
+    Ok((result, changes))
 }
 
 /// Apply INSERT DATA quads as property graph mutations.
+///
+/// Every write is scope-checked: the subject node (and edge target, for
+/// relationship predicates) must be in the caller's scope bitmap.
+/// Creating new nodes is admin-only — scoped principals must pre-create
+/// via the CRUD `create_node` path that enforces a parent-in-scope
+/// check. Returns the accumulated `Vec<Change>` from the committed
+/// `TrackedMutation` so the caller can hand it to `persist_or_die`.
 fn apply_insert_data(
     graph: &mut SeleneGraph,
     ns: &RdfNamespace,
     quads: &[Quad],
     result: &mut UpdateResult,
-) -> Result<(), UpdateError> {
+    scope: WriteScope<'_>,
+) -> Result<Vec<selene_core::changeset::Change>, UpdateError> {
     let mut m = graph.mutate();
 
     for quad in quads {
@@ -192,6 +296,7 @@ fn apply_insert_data(
             };
             // Ensure node exists
             if m.graph().get_node(node_id).is_none() {
+                scope.check_can_create_node()?;
                 m.create_node(
                     selene_core::label_set::LabelSet::from_strs(&[label.as_str()]),
                     PropertyMap::new(),
@@ -200,6 +305,7 @@ fn apply_insert_data(
                 result.labels_added += 1;
                 continue;
             }
+            scope.check(node_id, "INSERT DATA label")?;
             m.add_label(node_id, label)?;
             result.labels_added += 1;
         } else if let Some(ParsedUri::Property(key)) = ns.parse(predicate_uri) {
@@ -209,11 +315,13 @@ fn apply_insert_data(
                 _ => continue,
             };
             if m.graph().get_node(node_id).is_none() {
+                scope.check_can_create_node()?;
                 m.create_node(LabelSet::new(), PropertyMap::from_pairs([(key, value)]))?;
                 result.nodes_created += 1;
                 result.properties_set += 1;
                 continue;
             }
+            scope.check(node_id, "INSERT DATA property")?;
             m.set_property(node_id, key, value)?;
             result.properties_set += 1;
         } else if let Some(ParsedUri::Relationship(label)) = ns.parse(predicate_uri) {
@@ -228,23 +336,32 @@ fn apply_insert_data(
                 }
                 _ => continue,
             };
+            // Edge writes match the RDF exporter / SSE subscriber
+            // policy: both endpoints must be in scope. A scoped
+            // principal cannot add an edge connecting their subtree to
+            // an out-of-scope entity.
+            scope.check(node_id, "INSERT DATA edge source")?;
+            scope.check(target_id, "INSERT DATA edge target")?;
             m.create_edge(node_id, label, target_id, PropertyMap::new())?;
             result.edges_created += 1;
         }
         // Other predicates (external URIs) are silently skipped.
     }
 
-    m.commit(0)?;
-    Ok(())
+    Ok(m.commit(0)?)
 }
 
 /// Apply DELETE DATA quads as property graph mutations.
+///
+/// Scope-checks every targeted node before mutating; returns the
+/// committed `Vec<Change>` so the caller can persist it via WAL.
 fn apply_delete_data(
     graph: &mut SeleneGraph,
     ns: &RdfNamespace,
     quads: &[Quad],
     result: &mut UpdateResult,
-) -> Result<(), UpdateError> {
+    scope: WriteScope<'_>,
+) -> Result<Vec<selene_core::changeset::Change>, UpdateError> {
     let mut m = graph.mutate();
 
     for quad in quads {
@@ -261,6 +378,8 @@ fn apply_delete_data(
         if m.graph().get_node(node_id).is_none() {
             continue;
         }
+
+        scope.check(node_id, "DELETE DATA subject")?;
 
         if predicate_uri == RDF_TYPE {
             // rdf:type -> remove label
@@ -292,6 +411,7 @@ fn apply_delete_data(
                 }
                 _ => continue,
             };
+            scope.check(target_id, "DELETE DATA edge target")?;
             // Find and delete matching edges.
             let edge_ids: Vec<EdgeId> = m
                 .graph()
@@ -311,8 +431,7 @@ fn apply_delete_data(
         }
     }
 
-    m.commit(0)?;
-    Ok(())
+    Ok(m.commit(0)?)
 }
 
 /// Apply CLEAR or DROP on a graph target.
@@ -326,10 +445,21 @@ fn apply_clear(
     target: &spargebra::algebra::GraphTarget,
     silent: bool,
     result: &mut UpdateResult,
-) -> Result<(), UpdateError> {
+    scope: WriteScope<'_>,
+) -> Result<Vec<selene_core::changeset::Change>, UpdateError> {
     use spargebra::algebra::GraphTarget;
     match target {
         GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
+            // CLEAR / DROP wipes the default graph. A scoped principal
+            // cannot own this operation — it deletes every node including
+            // ones outside their bitmap — so we require admin here.
+            if !scope.is_admin() {
+                return Err(UpdateError::ScopeDenied(
+                    "CLEAR / DROP requires admin: a scoped principal cannot delete \
+                     all nodes in the default graph"
+                        .into(),
+                ));
+            }
             let mut m = graph.mutate();
             // Delete all edges first (edges reference nodes).
             let edge_ids: Vec<EdgeId> = m.graph().all_edge_ids().collect();
@@ -337,22 +467,26 @@ fn apply_clear(
                 let _ = m.delete_edge(*eid);
             }
             result.edges_deleted += edge_ids.len();
-            // Delete all nodes.
+            // Delete all nodes. We don't currently track a per-operation
+            // `nodes_deleted` counter on `UpdateResult`; earlier versions
+            // reset `nodes_created` here as a stand-in, but that
+            // over-wrote counts from preceding operations in the same
+            // request. Leave the summary counts alone; the node
+            // deletions show up structurally via the snapshot diff and
+            // via the returned `Vec<Change>`.
             let node_ids: Vec<selene_core::NodeId> = m.graph().all_node_ids().collect();
             for nid in &node_ids {
                 let _ = m.delete_node(*nid);
             }
-            result.nodes_created = 0; // reset; we track deletions via edges/props
-            m.commit(0)?;
-            Ok(())
+            Ok(m.commit(0)?)
         }
         GraphTarget::NamedGraphs => {
             // No user-defined named graphs in Selene. No-op.
-            Ok(())
+            Ok(Vec::new())
         }
         GraphTarget::NamedNode(nn) => {
             if silent {
-                Ok(())
+                Ok(Vec::new())
             } else {
                 Err(UpdateError::Unsupported(format!(
                     "CLEAR/DROP on named graph <{}> (Selene only has a default graph)",
@@ -368,6 +502,7 @@ fn apply_clear(
 /// Evaluates the WHERE pattern against a read-only snapshot of the graph
 /// (via spareval), collects the resulting delete/insert quads, then applies
 /// them as mutations. Deletes are applied before inserts to avoid conflicts.
+#[allow(clippy::too_many_arguments)]
 fn apply_delete_insert(
     graph: &mut SeleneGraph,
     ns: &RdfNamespace,
@@ -376,12 +511,16 @@ fn apply_delete_insert(
     using: Option<spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
     result: &mut UpdateResult,
-) -> Result<(), UpdateError> {
+    scope: WriteScope<'_>,
+) -> Result<Vec<selene_core::changeset::Change>, UpdateError> {
     use crate::adapter::SeleneDataset;
 
-    // Phase 1: evaluate WHERE against an immutable snapshot.
+    // Phase 1: evaluate WHERE against an immutable snapshot. Scoped
+    // principals see a scope-filtered dataset so the WHERE clause cannot
+    // match rows outside their authority — this prevents a delete whose
+    // WHERE pattern enumerates out-of-scope nodes by accident.
     let csr = CsrAdjacency::build(graph);
-    let dataset = SeleneDataset::new(graph, &csr, ns, None);
+    let dataset = SeleneDataset::new_scoped(graph, &csr, ns, None, scope.as_bitmap());
 
     let evaluator = QueryEvaluator::new();
     let prepared = evaluator.prepare_delete_insert(
@@ -405,15 +544,18 @@ fn apply_delete_insert(
         }
     }
 
-    // Phase 2: apply mutations (deletes first, then inserts).
+    // Phase 2: apply mutations (deletes first, then inserts). Both
+    // arms scope-check per-quad so the WHERE-driven set still can't
+    // reach out of scope if it somehow generated a target that does.
+    let mut changes = Vec::new();
     if !deletes.is_empty() {
-        apply_delete_data(graph, ns, &deletes, result)?;
+        changes.extend(apply_delete_data(graph, ns, &deletes, result, scope)?);
     }
     if !inserts.is_empty() {
-        apply_insert_data(graph, ns, &inserts, result)?;
+        changes.extend(apply_insert_data(graph, ns, &inserts, result, scope)?);
     }
 
-    Ok(())
+    Ok(changes)
 }
 
 /// Extract subject URI string from a quad.
