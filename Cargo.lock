@@ -4638,6 +4638,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uhlc",
+ "url",
  "xxhash-rust",
  "zeroize",
 ]

@@ -69,16 +69,27 @@ impl TestServer {
         }
     }
 
+    /// Fixed bearer token that `start_with_api_key` provisions on the MCP
+    /// config so OAuth dynamic client registration works in a non-dev
+    /// production-mode harness (see `TEST_REGISTRATION_TOKEN`). Tests that
+    /// call `/oauth/register` must send this value in the
+    /// `Authorization: Bearer` header.
+    pub const TEST_REGISTRATION_TOKEN: &str = "test-registration-token";
+
     /// Boot a production-mode HTTP server (dev_mode=false) with an API key.
     /// The vault is enabled so OAuth registration and principal auth work;
     /// a deterministic passphrase is supplied so `resolve_master_key`
-    /// succeeds without a real key file on disk.
+    /// succeeds without a real key file on disk. A fixed
+    /// [`TEST_REGISTRATION_TOKEN`] is provisioned because 1.3.0 disables
+    /// dynamic client registration in non-dev mode unless the operator
+    /// explicitly configures a token (finding 11024).
     pub async fn start_with_api_key(api_key: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = SeleneConfig::dev(dir.path());
         config.dev_mode = false;
         config.mcp.enabled = true;
         config.mcp.api_key = Some(api_key.into());
+        config.mcp.registration_token = Some(Self::TEST_REGISTRATION_TOKEN.into());
         config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
         config.vault.enabled = true;
 
