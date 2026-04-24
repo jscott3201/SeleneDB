@@ -103,18 +103,45 @@ pub(super) async fn create_schema_impl(
 
     let label = p.label.clone();
     let st = Arc::clone(&tools.state);
-    tools
+    // `register_node_schema` is idempotent: a byte-equal duplicate
+    // returns `AlreadyExistsEqual` instead of erroring, so a defensive
+    // agent that pre-calls create_schema before batch_ingest gets a
+    // clean no-op rather than a failure it has to reason about.
+    let outcome = tools
         .submit_mut(move || ops::schema::register_node_schema(&st, &auth, schema))
         .await?;
     let read_auth = mcp_auth(tools)?;
     let registered =
         ops::schema::get_node_schema(&tools.state, &read_auth, &label).map_err(op_err)?;
 
-    Ok(CallToolResult::success(vec![Content::text(format!(
-        "Created schema '{}' with {} properties. Nodes with this label will be validated on write.",
-        label,
-        registered.properties.len()
-    ))]))
+    let (status, action, human) = match outcome {
+        ops::schema::SchemaRegisterOutcome::Created => {
+            let prop_count = registered.properties.len();
+            (
+                "created",
+                "registered",
+                format!(
+                    "Created schema '{label}' with {prop_count} properties. \
+                     Nodes with this label will be validated on write."
+                ),
+            )
+        }
+        ops::schema::SchemaRegisterOutcome::AlreadyExistsEqual => (
+            "already_exists",
+            "no-op",
+            format!("Schema '{label}' already exists with the proposed shape — no change made."),
+        ),
+    };
+
+    Ok(structured_text_result(
+        human,
+        serde_json::json!({
+            "status": status,
+            "action": action,
+            "label": label,
+            "schema": registered,
+        }),
+    ))
 }
 
 pub(super) async fn update_schema_impl(
