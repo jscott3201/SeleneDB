@@ -7,7 +7,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -19,6 +19,14 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::bootstrap::ServerState;
 use crate::http::auth::HttpAuth;
 use crate::http::changelog_event::lagged_payload;
+
+/// Polling cadence for `refresh_scope_if_stale` on a long-lived SSE
+/// subscriber. Matches the constant in `http::ws` so both transports
+/// react to scope changes on the same wall-clock schedule. The refresh
+/// call itself is a no-op unless the main graph's containment
+/// generation has advanced since the last refresh, so this is bounded
+/// overhead per tick.
+const SCOPE_REFRESH_INTERVAL_SECS: u64 = 60;
 
 /// Query parameters for SSE subscription filtering.
 #[derive(serde::Deserialize, Default)]
@@ -55,21 +63,29 @@ pub(in crate::http) async fn subscribe(
     Sse<impl futures::stream::Stream<Item = Result<Event, Infallible>>>,
     crate::http::error::HttpError,
 > {
-    let auth_ctx = auth.0;
-    if !state
-        .auth_engine
-        .authorize_action(&auth_ctx, crate::auth::engine::Action::ChangelogSubscribe)
-    {
+    let initial_auth = auth.0;
+    if !state.auth_engine.authorize_action(
+        &initial_auth,
+        crate::auth::engine::Action::ChangelogSubscribe,
+    ) {
         return Err(crate::http::error::HttpError(
             crate::ops::OpError::AuthDenied,
         ));
     }
 
-    let scope_bitmap = if auth_ctx.is_admin() {
-        None
-    } else {
-        Some(auth_ctx.scope.clone())
-    };
+    // Long-lived subscribers need their scope re-resolved when the main
+    // graph's containment topology changes — otherwise a principal who
+    // gains (or loses) access to a subtree through a move in the graph
+    // won't see the update until they re-subscribe. The WebSocket path
+    // does this; SSE now matches (finding 11023 follow-up).
+    //
+    // State lives inside the filter_map closure. Captured by move so
+    // each tick can mutate it:
+    //   - `auth_ctx`: the current AuthContext (role + scope bitmap +
+    //     scope generation). Refreshed in-place when stale.
+    //   - `last_refresh`: wall-clock marker for the next poll.
+    let mut auth_ctx = initial_auth;
+    let mut last_refresh = Instant::now();
     let rx = state.persistence.changelog_notify.subscribe();
 
     let label_filter: Vec<String> = q
@@ -105,6 +121,21 @@ pub(in crate::http) async fn subscribe(
     let change_stream = BroadcastStream::new(rx).filter_map(move |msg| {
         match msg {
             Ok(_seq) => {
+                // Refresh scope if the poll interval elapsed. Admin
+                // contexts skip the recompute inside the helper (their
+                // effective scope is global). No-op when containment
+                // generation has not advanced.
+                if last_refresh.elapsed().as_secs() >= SCOPE_REFRESH_INTERVAL_SECS {
+                    auth_ctx = crate::ops::refresh_scope_if_stale(&state, &auth_ctx);
+                    last_refresh = Instant::now();
+                }
+
+                let scope_bitmap = if auth_ctx.is_admin() {
+                    None
+                } else {
+                    Some(&auth_ctx.scope)
+                };
+
                 let entries = state
                     .persistence
                     .changelog
@@ -119,7 +150,7 @@ pub(in crate::http) async fn subscribe(
                 let mut events = Vec::new();
                 for entry in &entries {
                     for change in &entry.changes {
-                        if !change_in_scope(change, scope_bitmap.as_ref()) {
+                        if !change_in_scope(change, scope_bitmap) {
                             continue;
                         }
                         if !matches_filter(
@@ -383,6 +414,20 @@ mod tests {
         let outside = Change::NodeCreated { node_id: NodeId(7) };
         assert!(change_in_scope(&inside, Some(&scope)));
         assert!(!change_in_scope(&outside, Some(&scope)));
+    }
+
+    #[test]
+    fn sse_and_ws_share_scope_refresh_interval() {
+        // SSE and WS poll `refresh_scope_if_stale` on the same cadence
+        // so long-lived subscribers on either transport react to scope
+        // changes on the same wall-clock schedule. If this drifts, a
+        // client that failed over from WS to SSE could see events
+        // later than expected — the cadence is a contract, not an
+        // implementation detail.
+        assert_eq!(
+            SCOPE_REFRESH_INTERVAL_SECS,
+            crate::http::ws::SCOPE_REFRESH_INTERVAL_SECS
+        );
     }
 
     #[test]

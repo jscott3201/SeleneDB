@@ -26,7 +26,7 @@ static WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 /// connections poll `refresh_scope_if_stale` at this cadence; the call is
 /// a no-op unless the graph's containment generation has changed, so this
 /// only bounds the worst-case staleness for a sustained subscriber.
-const SCOPE_REFRESH_INTERVAL_SECS: u64 = 60;
+pub(crate) const SCOPE_REFRESH_INTERVAL_SECS: u64 = 60;
 
 /// Maximum number of label or edge-type entries in a subscription filter.
 const MAX_FILTER_ENTRIES: usize = 100;
