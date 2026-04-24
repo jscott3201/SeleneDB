@@ -119,11 +119,11 @@ fn map_sparql_update_error(e: selene_rdf::update::UpdateError) -> OpError {
 }
 
 /// RDF import is admin-only in 1.3.0. Scoped import would require the
-/// caller to bind each new node under an explicit in-scope parent; the
-/// RDF-import format does not express that binding, so the library
-/// rejects node creation for scoped principals and the majority of real
-/// imports would fail. Until a parent-binding mechanism is added, the
-/// ops layer short-circuits and returns `Forbidden` instead.
+/// caller to bind each new node under an explicit in-scope parent;
+/// `selene_rdf::import::import_rdf_with_changes` does not yet accept a
+/// `WriteScope`, so the ops layer short-circuits here with `Forbidden`
+/// until a parent-binding mechanism lands. Enforcement lives at this
+/// layer, not in the library call below.
 fn require_admin_for_rdf_import(auth: &AuthContext) -> Result<(), OpError> {
     if !auth.is_admin() {
         return Err(OpError::Forbidden(
@@ -480,10 +480,12 @@ mod tests {
 
     #[tokio::test]
     async fn sparql_update_admin_captures_wal_changes() {
-        // Closes the durability caveat from PR #72: Vec<Change> flows
-        // through execute_update_shared → persist_or_die. The easiest
-        // structural proof is that the post-update graph generation
-        // advances, indicating the mutation batcher observed writes.
+        // Closes the durability caveat from PR #72: `Vec<Change>` flows
+        // through `execute_update_shared` → `persist_or_die` → the WAL
+        // coalescer. Asserting the WAL entry count advances is a direct
+        // observable — the pre-fix behavior returned `Vec::new()`, so
+        // the WAL writer would see nothing and the counter would stay
+        // put even though the graph generation still advanced.
         let (state, _dir) = test_state().await;
         let shared = state.graph.clone();
         let (node_id, _) = shared
@@ -495,17 +497,24 @@ mod tests {
             })
             .unwrap();
 
-        let gen_before = state.graph.read(|g| g.generation());
+        // The WAL coalescer's submit() blocks until the WAL append has
+        // been confirmed (either synchronously via `flush_batch_sync` or
+        // via the group-commit done channel), so no extra wait is
+        // needed between `sparql_update` returning and reading
+        // `entry_count`.
+        let wal_before = state.persistence.wal.lock().entry_count();
+
         let admin = AuthContext::dev_admin();
         let update = format!(
             "INSERT DATA {{ <selene:/node/{}> <selene:/prop/unit> \"degC\" }}",
             node_id.0
         );
         sparql_update(&state, &admin, &update).await.unwrap();
-        let gen_after = state.graph.read(|g| g.generation());
+
+        let wal_after = state.persistence.wal.lock().entry_count();
         assert!(
-            gen_after > gen_before,
-            "SPARQL Update must advance the graph generation (pre={gen_before}, post={gen_after})"
+            wal_after > wal_before,
+            "SPARQL Update must write to the WAL (pre={wal_before}, post={wal_after})"
         );
     }
 

@@ -53,7 +53,11 @@ pub enum UpdateError {
 /// — that scope design is out-of-scope for 1.3.0).
 #[derive(Clone, Copy)]
 pub struct WriteScope<'a> {
-    pub bitmap: Option<&'a roaring::RoaringBitmap>,
+    // Private so callers cannot construct an arbitrary state — only the
+    // `admin()` and `scoped()` constructors. Exposed via `as_bitmap()`
+    // when the adapter needs it (e.g., for `SeleneDataset::new_scoped`
+    // in `apply_delete_insert`).
+    bitmap: Option<&'a roaring::RoaringBitmap>,
 }
 
 impl<'a> WriteScope<'a> {
@@ -67,6 +71,13 @@ impl<'a> WriteScope<'a> {
         Self {
             bitmap: Some(bitmap),
         }
+    }
+
+    /// Read access to the underlying bitmap — `None` for admin scope.
+    /// Used by callers that need to thread the bitmap into other scope-
+    /// aware APIs (e.g., the SPARQL dataset adapter).
+    pub fn as_bitmap(self) -> Option<&'a roaring::RoaringBitmap> {
+        self.bitmap
     }
 
     fn is_admin(self) -> bool {
@@ -85,18 +96,21 @@ impl<'a> WriteScope<'a> {
         }
     }
 
-    /// Reject new node creation for scoped principals. RDF writes that
-    /// would mint a detached top-level node via a scoped credential are
-    /// rejected; the caller must add the node via CRUD (which enforces
-    /// a parent-in-scope check) before the RDF write.
+    /// Reject new node creation for scoped principals. A scope-aware
+    /// SPARQL Update that hits an unknown subject URI would implicitly
+    /// mint a detached top-level node; there is no way to express a
+    /// parent-in-scope binding for it in the INSERT DATA syntax, so the
+    /// write is refused. The caller can pre-create the node via CRUD
+    /// (`create_node` enforces a parent-in-scope check) and then write
+    /// properties/edges against it via SPARQL Update.
     fn check_can_create_node(self) -> Result<(), UpdateError> {
         if self.is_admin() {
             Ok(())
         } else {
             Err(UpdateError::ScopeDenied(
-                "scoped principals cannot create new nodes via RDF import or SPARQL \
-                 Update in 1.3.0 — pre-create the node via CRUD with a parent_id \
-                 inside scope, then write properties/edges via RDF"
+                "scoped principals cannot create new nodes via SPARQL Update — \
+                 pre-create the node via CRUD with a parent_id inside scope, then \
+                 write properties/edges via SPARQL"
                     .into(),
             ))
         }
@@ -139,6 +153,12 @@ pub fn execute_update_shared(
         let mut inner = shared.inner().write();
         execute_update_inner(&mut inner, namespace, update_str, scope)?
     };
+    // `SharedGraph::write` normally bumps the containment generation when
+    // `[:contains]` edges move; we drive the write via
+    // `shared.inner().write()` directly so that bookkeeping has to be
+    // driven by hand. Without this, `ops::refresh_scope_if_stale` would
+    // miss scope-topology changes made through SPARQL Update.
+    shared.check_containment_generation(&changes);
     shared.publish_snapshot();
     Ok((result, changes))
 }
@@ -447,12 +467,17 @@ fn apply_clear(
                 let _ = m.delete_edge(*eid);
             }
             result.edges_deleted += edge_ids.len();
-            // Delete all nodes.
+            // Delete all nodes. We don't currently track a per-operation
+            // `nodes_deleted` counter on `UpdateResult`; earlier versions
+            // reset `nodes_created` here as a stand-in, but that
+            // over-wrote counts from preceding operations in the same
+            // request. Leave the summary counts alone; the node
+            // deletions show up structurally via the snapshot diff and
+            // via the returned `Vec<Change>`.
             let node_ids: Vec<selene_core::NodeId> = m.graph().all_node_ids().collect();
             for nid in &node_ids {
                 let _ = m.delete_node(*nid);
             }
-            result.nodes_created = 0; // reset; we track deletions via edges/props
             Ok(m.commit(0)?)
         }
         GraphTarget::NamedGraphs => {
@@ -495,7 +520,7 @@ fn apply_delete_insert(
     // match rows outside their authority — this prevents a delete whose
     // WHERE pattern enumerates out-of-scope nodes by accident.
     let csr = CsrAdjacency::build(graph);
-    let dataset = SeleneDataset::new_scoped(graph, &csr, ns, None, scope.bitmap);
+    let dataset = SeleneDataset::new_scoped(graph, &csr, ns, None, scope.as_bitmap());
 
     let evaluator = QueryEvaluator::new();
     let prepared = evaluator.prepare_delete_insert(
