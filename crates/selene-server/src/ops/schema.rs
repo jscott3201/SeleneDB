@@ -7,6 +7,32 @@ use crate::auth::engine::Action;
 use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 
+/// Synchronously persist a schema mutation to disk.
+///
+/// Closes Selene_Bug_v1 finding #9 (11026). Pre-1.3.0 schema mutations
+/// called `publish_snapshot()` — which only updates the in-memory
+/// snapshot cache — and relied on the background periodic snapshot
+/// writer to eventually flush the new schema. A crash in that window
+/// lost the schema change even though the request had already returned
+/// success.
+///
+/// Since schema operations are not representable as [`Change`] records
+/// in the current WAL format, we take a synchronous full snapshot via
+/// [`crate::tasks::take_snapshot`] after every mutation. A future
+/// optimisation can add a lighter-weight schema-only WAL encoding; for
+/// now correctness wins over throughput.
+///
+/// Errors are propagated so the caller can surface the durability
+/// failure to the client rather than silently confirming the mutation.
+fn persist_schema_change(state: &ServerState, op: &'static str) -> Result<(), OpError> {
+    crate::tasks::take_snapshot(state).map_err(|e| {
+        tracing::error!(error = %e, op, "schema snapshot failed — mutation may be lost on restart");
+        OpError::Internal(format!(
+            "schema mutation '{op}' succeeded in memory but failed to persist: {e}"
+        ))
+    })
+}
+
 /// Outcome of an idempotent schema registration. Lets callers distinguish
 /// a fresh create from a no-op on an already-equal schema, and from a
 /// conflict (same label, different shape) without throwing — the last case
@@ -193,6 +219,9 @@ pub fn register_node_schema(
         SchemaRegisterOutcome::Created
     };
     state.graph.publish_snapshot();
+    if matches!(outcome, SchemaRegisterOutcome::Created) {
+        persist_schema_change(state, "register_node_schema")?;
+    }
     tracing::info!(label, "node schema registered");
     Ok(outcome)
 }
@@ -229,6 +258,7 @@ pub fn register_node_schema_force(
         replaced
     };
     state.graph.publish_snapshot();
+    persist_schema_change(state, "register_node_schema_force")?;
     if replaced {
         tracing::info!(label, "node schema replaced");
     } else {
@@ -292,6 +322,9 @@ pub fn register_edge_schema(
         SchemaRegisterOutcome::Created
     };
     state.graph.publish_snapshot();
+    if matches!(outcome, SchemaRegisterOutcome::Created) {
+        persist_schema_change(state, "register_edge_schema")?;
+    }
     tracing::info!(label, "edge schema registered");
     Ok(outcome)
 }
@@ -316,6 +349,7 @@ pub fn unregister_node_schema(
         .unregister_node_schema(label);
     if removed.is_some() {
         state.graph.publish_snapshot();
+        persist_schema_change(state, "unregister_node_schema")?;
         tracing::info!(label, "node schema unregistered");
         Ok(())
     } else {
@@ -346,6 +380,7 @@ pub fn unregister_edge_schema(
         .unregister_edge_schema(label);
     if removed.is_some() {
         state.graph.publish_snapshot();
+        persist_schema_change(state, "unregister_edge_schema")?;
         tracing::info!(label, "edge schema unregistered");
         Ok(())
     } else {
@@ -418,6 +453,9 @@ pub fn import_pack(
         }
     } // write lock dropped
     state.graph.publish_snapshot();
+    if nodes_registered > 0 || edges_registered > 0 {
+        persist_schema_change(state, "import_pack")?;
+    }
 
     tracing::info!(
         pack = pack_name,

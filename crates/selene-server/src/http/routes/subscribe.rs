@@ -35,11 +35,41 @@ pub(in crate::http) struct SubscribeQuery {
 }
 
 /// SSE endpoint for streaming graph change events.
+///
+/// Since 1.3.0 this endpoint enforces the same authorization posture as
+/// the WebSocket subscription path:
+/// - The caller must have `Action::ChangelogSubscribe` authority (role
+///   `service` or `admin` under the default Cedar policies).
+/// - Non-admin principals see a scope-filtered stream — events whose
+///   subject node is outside the principal's scope bitmap are dropped
+///   before serialization so out-of-scope changes cannot leak via SSE.
+///
+/// Closes Selene_Bug_v1 finding #6 (11023). Pre-1.3.0 the handler took
+/// `_auth` and discarded it, so any authenticated principal could observe
+/// changelog events for the entire graph regardless of role or scope.
 pub(in crate::http) async fn subscribe(
     State(state): State<Arc<ServerState>>,
-    _auth: HttpAuth,
+    auth: HttpAuth,
     Query(q): Query<SubscribeQuery>,
-) -> Sse<impl futures::stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<
+    Sse<impl futures::stream::Stream<Item = Result<Event, Infallible>>>,
+    crate::http::error::HttpError,
+> {
+    let auth_ctx = auth.0;
+    if !state
+        .auth_engine
+        .authorize_action(&auth_ctx, crate::auth::engine::Action::ChangelogSubscribe)
+    {
+        return Err(crate::http::error::HttpError(
+            crate::ops::OpError::AuthDenied,
+        ));
+    }
+
+    let scope_bitmap = if auth_ctx.is_admin() {
+        None
+    } else {
+        Some(auth_ctx.scope.clone())
+    };
     let rx = state.persistence.changelog_notify.subscribe();
 
     let label_filter: Vec<String> = q
@@ -89,6 +119,9 @@ pub(in crate::http) async fn subscribe(
                 let mut events = Vec::new();
                 for entry in &entries {
                     for change in &entry.changes {
+                        if !change_in_scope(change, scope_bitmap.as_ref()) {
+                            continue;
+                        }
                         if !matches_filter(
                             change,
                             &label_filter,
@@ -130,7 +163,24 @@ pub(in crate::http) async fn subscribe(
         change_stream,
     );
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30))))
+}
+
+/// Return true when the change is in the caller's scope (or no scope
+/// filter applies, i.e. admin). Scope is determined by the subject node
+/// of the change; for `EdgeCreated` / `EdgeDeleted` the source endpoint
+/// stands in for the subject (matching `Change::node_id()` semantics).
+fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    let Some(nid) = change.node_id() else {
+        // Changes with no identifiable subject (structural-only events)
+        // fall through to the filter-level decisions; there's nothing to
+        // scope-check here.
+        return true;
+    };
+    scope.contains(nid as u32)
 }
 
 fn matches_filter(
@@ -270,5 +320,72 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "key": key.as_str(),
             "timestamp_ms": ts_ms,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selene_core::changeset::Change;
+    use selene_core::{IStr, LabelSet, NodeId, Value};
+
+    fn property_set(node: u64) -> Change {
+        Change::PropertySet {
+            node_id: NodeId(node),
+            key: IStr::new("x"),
+            value: Value::Int(1),
+            old_value: None,
+        }
+    }
+
+    #[test]
+    fn change_in_scope_admin_passes_everything() {
+        assert!(change_in_scope(&property_set(1), None));
+        assert!(change_in_scope(&property_set(999), None));
+    }
+
+    #[test]
+    fn change_in_scope_filters_out_of_scope_nodes() {
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(1);
+        scope.insert(2);
+        assert!(change_in_scope(&property_set(1), Some(&scope)));
+        assert!(change_in_scope(&property_set(2), Some(&scope)));
+        assert!(!change_in_scope(&property_set(3), Some(&scope)));
+    }
+
+    #[test]
+    fn change_in_scope_node_created() {
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(42);
+        let inside = Change::NodeCreated {
+            node_id: NodeId(42),
+        };
+        let outside = Change::NodeCreated { node_id: NodeId(7) };
+        assert!(change_in_scope(&inside, Some(&scope)));
+        assert!(!change_in_scope(&outside, Some(&scope)));
+    }
+
+    #[test]
+    fn change_in_scope_edge_created_uses_source() {
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(10);
+        let from_in_scope = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(1),
+            source: NodeId(10),
+            target: NodeId(99),
+            label: IStr::new("rel"),
+        };
+        let from_out_of_scope = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(2),
+            source: NodeId(99),
+            target: NodeId(10),
+            label: IStr::new("rel"),
+        };
+        // `Change::node_id` returns the source for edge events; scope
+        // is keyed on the change's subject node.
+        assert!(change_in_scope(&from_in_scope, Some(&scope)));
+        assert!(!change_in_scope(&from_out_of_scope, Some(&scope)));
+        let _ = LabelSet::from_strs(&["_"]); // keep import alive across conditional cfg
     }
 }
