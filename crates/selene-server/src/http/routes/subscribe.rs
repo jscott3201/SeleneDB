@@ -213,6 +213,14 @@ pub(in crate::http) async fn subscribe(
 /// the two transports removes the transport-dependent visibility
 /// discrepancy.
 fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> bool {
+    // Schema mutations never ride the SSE data-plane stream — not for
+    // scoped principals and not for admins either. Admins observe DDL
+    // through the dedicated audit channel, not through /subscribe. This
+    // check runs *before* the admin fast-path below so schema events
+    // don't leak to admin subscribers.
+    if matches!(change, Change::SchemaMutation(_)) {
+        return false;
+    }
     let Some(scope) = scope else {
         return true;
     };
@@ -230,6 +238,8 @@ fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> b
         | Change::EdgePropertyRemoved { source, target, .. } => {
             in_scope(source.0) && in_scope(target.0)
         }
+        // Handled above — kept for exhaustiveness.
+        Change::SchemaMutation(_) => false,
     }
 }
 
@@ -287,6 +297,7 @@ fn change_type_name(change: &Change) -> &'static str {
         Change::EdgeDeleted { .. } => "EdgeDeleted",
         Change::EdgePropertySet { .. } => "EdgePropertySet",
         Change::EdgePropertyRemoved { .. } => "EdgePropertyRemoved",
+        Change::SchemaMutation(_) => "SchemaMutation",
     }
 }
 
@@ -368,6 +379,14 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "type": "EdgePropertyRemoved",
             "edge_id": edge_id.0,
             "key": key.as_str(),
+            "timestamp_ms": ts_ms,
+        }),
+        // Schema mutations are filtered out by `change_in_scope` before
+        // this point for non-admin subscribers, so this JSON shape is
+        // only reachable on an admin pass-through. Keep the payload
+        // minimal and typed so clients can dispatch on `type`.
+        Change::SchemaMutation(_) => serde_json::json!({
+            "type": "SchemaMutation",
             "timestamp_ms": ts_ms,
         }),
     }

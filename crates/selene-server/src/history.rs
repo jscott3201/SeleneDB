@@ -242,6 +242,17 @@ fn change_to_history_entry(change: &Change, timestamp_nanos: i64) -> HistoryEntr
             new_value: None,
             timestamp_nanos,
         },
+        Change::SchemaMutation(_) => HistoryEntry {
+            // Schema mutations aren't per-node events; surface them with
+            // node_id=0 so the history timeline still includes the
+            // sequence position but consumers can filter by change_type.
+            node_id: 0,
+            change_type: "SchemaMutation",
+            key: None,
+            old_value: None,
+            new_value: None,
+            timestamp_nanos,
+        },
     }
 }
 

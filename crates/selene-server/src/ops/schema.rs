@@ -7,63 +7,19 @@ use crate::auth::engine::Action;
 use crate::auth::handshake::AuthContext;
 use crate::bootstrap::ServerState;
 
-/// Synchronously persist a schema mutation to disk.
+/// Persist a schema mutation through the WAL.
 ///
-/// Closes Selene_Bug_v1 finding #9 (11026). Pre-1.3.0 schema mutations
-/// called `publish_snapshot()` — which only updates the in-memory
-/// snapshot cache — and relied on the background periodic snapshot
-/// writer to eventually flush the new schema. A crash in that window
-/// lost the schema change even though the request had already returned
-/// success.
-///
-/// Since schema operations are not representable as [`Change`] records
-/// in the current WAL format, we take a synchronous full snapshot via
-/// [`crate::tasks::take_snapshot`] after every mutation. A future
-/// optimisation can add a lighter-weight schema-only WAL encoding; for
-/// now correctness wins over throughput.
-///
-/// Errors are propagated so the caller can surface the durability
-/// failure to the client rather than silently confirming the mutation.
-/// On failure the `schema_persist_pending` flag on [`ServerState`]
-/// stays set so every subsequent schema call — including idempotent
-/// early-return paths — will retry the snapshot before reporting
-/// success.
-fn persist_schema_change(state: &ServerState, op: &'static str) -> Result<(), OpError> {
-    state
-        .schema_persist_pending
-        .store(true, std::sync::atomic::Ordering::Release);
-    match crate::tasks::take_snapshot(state) {
-        Ok(()) => {
-            state
-                .schema_persist_pending
-                .store(false, std::sync::atomic::Ordering::Release);
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!(error = %e, op, "schema snapshot failed — mutation may be lost on restart");
-            Err(OpError::Internal(format!(
-                "schema mutation '{op}' succeeded in memory but failed to persist: {e}"
-            )))
-        }
-    }
-}
-
-/// Drain any pending schema persistence before an idempotent early-return
-/// path reports success. When a previous schema mutation's snapshot
-/// failed, the `schema_persist_pending` flag stays set until a later call
-/// either retries the snapshot here or performs a fresh mutation that
-/// itself successfully persists. Without this drain, a caller who retries
-/// a registration that looks like `AlreadyExistsEqual` (or an
-/// unregistration that looks like `NotFound`) would get `Ok(...)` while
-/// the schema state is still only in memory.
-fn drain_pending_schema_persistence(state: &ServerState) -> Result<(), OpError> {
-    if state
-        .schema_persist_pending
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        persist_schema_change(state, "drain_pending")?;
-    }
-    Ok(())
+/// Since 1.3.0, schema mutations are first-class `Change::SchemaMutation`
+/// records that flow through the same WAL coalescer as node and edge
+/// mutations. `persist_or_die` blocks until the WAL append is confirmed,
+/// so when this function returns the mutation is durable — no more full
+/// `take_snapshot` per schema write, and no more `schema_persist_pending`
+/// flag to track partial failures. The function is infallible for the
+/// same reason `persist_or_die` is: a WAL append failure aborts the
+/// process rather than being surfaced to the caller. Recovery replays
+/// these records via `change_applier::apply_schema_mutation`.
+fn persist_schema_change(state: &ServerState, op: selene_core::changeset::SchemaMutation) {
+    super::persist_or_die(state, &[selene_core::changeset::Change::SchemaMutation(op)]);
 }
 
 /// Outcome of an idempotent schema registration. Lets callers distinguish
@@ -203,6 +159,7 @@ pub fn register_node_schema(
         return Err(OpError::AuthDenied);
     }
     let label = schema.label.to_string();
+    let schema_for_wal = schema.clone();
     let outcome = {
         let mut guard = state.graph.inner().write();
         if let Some(ref parent) = schema.parent
@@ -232,8 +189,6 @@ pub fn register_node_schema(
             })?;
             if a == b {
                 tracing::debug!(label, "create_schema no-op: proposed shape equals existing");
-                drop(guard);
-                drain_pending_schema_persistence(state)?;
                 return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
             }
             return Err(OpError::InvalidRequest(format!(
@@ -255,7 +210,10 @@ pub fn register_node_schema(
     };
     state.graph.publish_snapshot();
     if matches!(outcome, SchemaRegisterOutcome::Created) {
-        persist_schema_change(state, "register_node_schema")?;
+        persist_schema_change(
+            state,
+            selene_core::changeset::SchemaMutation::RegisterNode(Box::new(schema_for_wal)),
+        );
     }
     tracing::info!(label, "node schema registered");
     Ok(outcome)
@@ -274,6 +232,7 @@ pub fn register_node_schema_force(
         return Err(OpError::AuthDenied);
     }
     let label = schema.label.to_string();
+    let schema_for_wal = schema.clone();
     // Cycle check + registration under a single write lock
     let replaced = {
         let mut guard = state.graph.inner().write();
@@ -293,7 +252,10 @@ pub fn register_node_schema_force(
         replaced
     };
     state.graph.publish_snapshot();
-    persist_schema_change(state, "register_node_schema_force")?;
+    persist_schema_change(
+        state,
+        selene_core::changeset::SchemaMutation::RegisterNodeForce(Box::new(schema_for_wal)),
+    );
     if replaced {
         tracing::info!(label, "node schema replaced");
     } else {
@@ -318,6 +280,7 @@ pub fn register_edge_schema(
         return Err(OpError::AuthDenied);
     }
     let label = schema.label.to_string();
+    let schema_for_wal = schema.clone();
     let outcome = {
         let mut guard = state.graph.inner().write();
         if let Some(existing) = guard.schema().edge_schema(&schema.label) {
@@ -337,8 +300,6 @@ pub fn register_edge_schema(
                     label,
                     "create_schema no-op: edge proposed shape equals existing"
                 );
-                drop(guard);
-                drain_pending_schema_persistence(state)?;
                 return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
             }
             // There is no `update_edge_schema` MCP tool; point operators
@@ -360,7 +321,10 @@ pub fn register_edge_schema(
     };
     state.graph.publish_snapshot();
     if matches!(outcome, SchemaRegisterOutcome::Created) {
-        persist_schema_change(state, "register_edge_schema")?;
+        persist_schema_change(
+            state,
+            selene_core::changeset::SchemaMutation::RegisterEdge(Box::new(schema_for_wal)),
+        );
     }
     tracing::info!(label, "edge schema registered");
     Ok(outcome)
@@ -386,14 +350,13 @@ pub fn unregister_node_schema(
         .unregister_node_schema(label);
     if removed.is_some() {
         state.graph.publish_snapshot();
-        persist_schema_change(state, "unregister_node_schema")?;
+        persist_schema_change(
+            state,
+            selene_core::changeset::SchemaMutation::UnregisterNode(selene_core::IStr::new(label)),
+        );
         tracing::info!(label, "node schema unregistered");
         Ok(())
     } else {
-        // Idempotent "not found" path still has to drain pending
-        // persistence so a retry of an earlier-failed unregister cannot
-        // mask a missing snapshot.
-        drain_pending_schema_persistence(state)?;
         Err(OpError::NotFound {
             entity: "node_schema",
             id: 0,
@@ -421,11 +384,13 @@ pub fn unregister_edge_schema(
         .unregister_edge_schema(label);
     if removed.is_some() {
         state.graph.publish_snapshot();
-        persist_schema_change(state, "unregister_edge_schema")?;
+        persist_schema_change(
+            state,
+            selene_core::changeset::SchemaMutation::UnregisterEdge(selene_core::IStr::new(label)),
+        );
         tracing::info!(label, "edge schema unregistered");
         Ok(())
     } else {
-        drain_pending_schema_persistence(state)?;
         Err(OpError::NotFound {
             entity: "edge_schema",
             id: 0,
@@ -453,6 +418,11 @@ pub fn import_pack(
     let mut nodes_skipped = 0usize;
     let mut edges_registered = 0usize;
     let mut edges_skipped = 0usize;
+    // Accumulate per-successful-register WAL records so we can persist
+    // them after dropping the write lock. Each entry matches exactly
+    // one schema that was added by this call (pre-existing equal ones
+    // produce no record).
+    let mut wal_records: Vec<selene_core::changeset::SchemaMutation> = Vec::new();
 
     {
         let mut graph = state.graph.inner().write();
@@ -470,8 +440,14 @@ pub fn import_pack(
                 nodes_skipped += 1;
                 continue;
             }
+            let ns_for_wal = ns.clone();
             match schema.register_node_schema_if_new(ns) {
-                Ok(true) => nodes_registered += 1,
+                Ok(true) => {
+                    nodes_registered += 1;
+                    wal_records.push(selene_core::changeset::SchemaMutation::RegisterNode(
+                        Box::new(ns_for_wal),
+                    ));
+                }
                 Ok(false) => nodes_skipped += 1,
                 Err(e) => {
                     tracing::warn!(error = %e, "schema compat error during pack import, skipping");
@@ -480,8 +456,14 @@ pub fn import_pack(
             }
         }
         for es in pack.edges {
+            let es_for_wal = es.clone();
             match schema.register_edge_schema_if_new(es) {
-                Ok(true) => edges_registered += 1,
+                Ok(true) => {
+                    edges_registered += 1;
+                    wal_records.push(selene_core::changeset::SchemaMutation::RegisterEdge(
+                        Box::new(es_for_wal),
+                    ));
+                }
                 Ok(false) => edges_skipped += 1,
                 Err(e) => {
                     tracing::warn!(error = %e, "schema compat error during pack import, skipping");
@@ -495,13 +477,14 @@ pub fn import_pack(
         }
     } // write lock dropped
     state.graph.publish_snapshot();
-    if nodes_registered > 0 || edges_registered > 0 {
-        persist_schema_change(state, "import_pack")?;
-    } else {
-        // Pure-noop pack import (every schema already present and equal):
-        // still drain any pending persistence so a prior failed schema
-        // snapshot cannot hide behind a no-op follow-up call.
-        drain_pending_schema_persistence(state)?;
+    if !wal_records.is_empty() {
+        // persist_or_die blocks on WAL append; the pack is durable on
+        // return. Bundle all records into one changeset for efficiency.
+        let changes: Vec<selene_core::changeset::Change> = wal_records
+            .into_iter()
+            .map(selene_core::changeset::Change::SchemaMutation)
+            .collect();
+        super::persist_or_die(state, &changes);
     }
 
     tracing::info!(

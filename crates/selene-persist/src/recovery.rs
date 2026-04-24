@@ -35,6 +35,12 @@ pub struct RecoveryResult {
     pub triggers: Vec<selene_core::trigger::TriggerDef>,
     /// Extra snapshot sections (pre-deserialized bytes). Section 5 = version store.
     pub extra_sections: Vec<Vec<u8>>,
+    /// Schema mutations drained from the WAL (post-snapshot). The caller
+    /// applies these to the rebuilt graph's schema registry in WAL order
+    /// (via `selene_graph::change_applier::apply_schema_mutation`) after
+    /// loading the snapshot baseline. See `selene_server::bootstrap` for
+    /// the replay site.
+    pub schema_mutations: Vec<selene_core::changeset::SchemaMutation>,
 }
 
 /// A recovered node in owned form, ready for `SeleneGraph::load_nodes`.
@@ -91,6 +97,7 @@ pub fn recover(data_dir: &Path) -> Result<RecoveryResult, PersistError> {
                 edges: HashMap::new(),
                 next_node_id: 1,
                 next_edge_id: 1,
+                schema_mutations: Vec::new(),
             },
             0,
             crate::snapshot::SnapshotSchemas::default(),
@@ -157,6 +164,7 @@ pub fn recover(data_dir: &Path) -> Result<RecoveryResult, PersistError> {
         schemas,
         triggers,
         extra_sections,
+        schema_mutations: state.schema_mutations,
     })
 }
 
@@ -167,6 +175,11 @@ struct RecoveryState {
     edges: HashMap<u64, RecoveryEdge>,
     next_node_id: u64,
     next_edge_id: u64,
+    /// Schema mutations observed in the WAL after the snapshot seq. The
+    /// caller (bootstrap) applies these to the rebuilt graph's schema
+    /// registry in order so the final in-memory state matches what the
+    /// running server saw before the crash.
+    schema_mutations: Vec<selene_core::changeset::SchemaMutation>,
 }
 
 struct RecoveryNode {
@@ -233,6 +246,7 @@ fn snapshot_to_state_no_schemas(snap: GraphSnapshot) -> RecoveryState {
         edges,
         next_node_id: snap.next_node_id,
         next_edge_id: snap.next_edge_id,
+        schema_mutations: Vec::new(),
     }
 }
 
@@ -344,6 +358,14 @@ fn replay_changes(state: &mut RecoveryState, changes: &[Change], entry_timestamp
                 if let Some(edge) = state.edges.get_mut(&edge_id.0) {
                     edge.properties.retain(|(k, _)| k != key.as_ref());
                 }
+            }
+            Change::SchemaMutation(op) => {
+                // Schema mutations are applied to the graph after recovery
+                // rebuilds nodes/edges. We collect them here; the bootstrap
+                // consumer (`bootstrap.rs`) drains the queue and applies
+                // each op to the schema registry of the freshly-built
+                // graph, preserving WAL order.
+                state.schema_mutations.push(op.clone());
             }
         }
     }

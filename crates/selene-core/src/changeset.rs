@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::IStr;
 use crate::Value;
 use crate::entity::{EdgeId, NodeId};
+use crate::schema::{EdgeSchema, NodeSchema};
 
 /// A single change within a mutation commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +68,35 @@ pub enum Change {
         /// The value that was removed.
         old_value: Option<Value>,
     },
+    /// A schema-registry mutation — emitted by `ops::schema` so schema
+    /// changes flow through the regular WAL + changelog path alongside
+    /// graph mutations. Replaces the pre-1.3.0-final pattern of forcing
+    /// a synchronous full `take_snapshot` after every schema write.
+    ///
+    /// Kept as the last variant so postcard's variant-tagged encoding
+    /// stays backward-compatible: a WAL written by older code does not
+    /// contain this variant, and a WAL written by newer code that does
+    /// contain it can still be read by the same binary.
+    SchemaMutation(SchemaMutation),
+}
+
+/// A single schema-registry mutation, recorded in the WAL so recovery can
+/// replay it deterministically. Each variant is the exact operation the
+/// ops layer performs on `SchemaValidator`; recovery applies them in WAL
+/// order, so the replay sees the same sequence of states a live server
+/// observed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SchemaMutation {
+    /// Register a new node schema (idempotent-create path).
+    RegisterNode(Box<NodeSchema>),
+    /// Force-replace any existing node schema with this definition.
+    RegisterNodeForce(Box<NodeSchema>),
+    /// Register a new edge schema (idempotent-create path).
+    RegisterEdge(Box<EdgeSchema>),
+    /// Remove a node schema by label.
+    UnregisterNode(IStr),
+    /// Remove an edge schema by label.
+    UnregisterEdge(IStr),
 }
 
 impl Change {
@@ -86,6 +116,11 @@ impl Change {
             Change::EdgeDeleted { source, .. } => Some(source.0),
             Change::EdgePropertySet { source, .. } => Some(source.0),
             Change::EdgePropertyRemoved { source, .. } => Some(source.0),
+            // Schema mutations are graph-registry events, not per-node; the
+            // subscription/filter layers return `None` so scope bitmaps and
+            // label filters skip them naturally (admins see them via
+            // DDL-specific channels if they need to).
+            Change::SchemaMutation(_) => None,
         }
     }
 
@@ -106,6 +141,8 @@ impl Change {
             Change::EdgeDeleted { source, target, .. } => smallvec![source.0, target.0],
             Change::EdgePropertySet { source, target, .. } => smallvec![source.0, target.0],
             Change::EdgePropertyRemoved { source, target, .. } => smallvec![source.0, target.0],
+            // No per-node bookkeeping applies to schema-registry mutations.
+            Change::SchemaMutation(_) => smallvec![],
         }
     }
 }

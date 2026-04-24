@@ -105,6 +105,12 @@ impl MergeTracker {
             // Deletions
             Change::NodeDeleted { node_id, .. } => self.decide_deletion(node_id.0, incoming_hlc),
             Change::EdgeDeleted { edge_id, .. } => self.decide_deletion(edge_id.0, incoming_hlc),
+
+            // Schema mutations don't participate in LWW per-field merge
+            // (there's no per-schema HLC in this tracker). Let them
+            // through — the schema registry is the hub's responsibility
+            // and replicas apply schemas monotonically in WAL order.
+            Change::SchemaMutation(_) => MergeDecision::Apply,
         }
     }
 
@@ -140,6 +146,9 @@ impl MergeTracker {
 
                 // Creations don't need tracking (always idempotent).
                 Change::NodeCreated { .. } | Change::EdgeCreated { .. } => {}
+
+                // Schema mutations have no per-field HLC bookkeeping.
+                Change::SchemaMutation(_) => {}
             }
         }
     }
