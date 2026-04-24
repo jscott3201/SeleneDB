@@ -7,7 +7,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -19,6 +19,14 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::bootstrap::ServerState;
 use crate::http::auth::HttpAuth;
 use crate::http::changelog_event::lagged_payload;
+
+/// Polling cadence for `refresh_scope_if_stale` on a long-lived SSE
+/// subscriber. Matches the constant in `http::ws` so both transports
+/// react to scope changes on the same wall-clock schedule. The refresh
+/// call itself is a no-op unless the main graph's containment
+/// generation has advanced since the last refresh, so this is bounded
+/// overhead per tick.
+const SCOPE_REFRESH_INTERVAL_SECS: u64 = 60;
 
 /// Query parameters for SSE subscription filtering.
 #[derive(serde::Deserialize, Default)]
@@ -35,11 +43,49 @@ pub(in crate::http) struct SubscribeQuery {
 }
 
 /// SSE endpoint for streaming graph change events.
+///
+/// Since 1.3.0 this endpoint enforces the same authorization posture as
+/// the WebSocket subscription path:
+/// - The caller must have `Action::ChangelogSubscribe` authority (role
+///   `service` or `admin` under the default Cedar policies).
+/// - Non-admin principals see a scope-filtered stream — events whose
+///   subject node is outside the principal's scope bitmap are dropped
+///   before serialization so out-of-scope changes cannot leak via SSE.
+///
+/// Closes Selene_Bug_v1 finding #6 (11023). Pre-1.3.0 the handler took
+/// `_auth` and discarded it, so any authenticated principal could observe
+/// changelog events for the entire graph regardless of role or scope.
 pub(in crate::http) async fn subscribe(
     State(state): State<Arc<ServerState>>,
-    _auth: HttpAuth,
+    auth: HttpAuth,
     Query(q): Query<SubscribeQuery>,
-) -> Sse<impl futures::stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<
+    Sse<impl futures::stream::Stream<Item = Result<Event, Infallible>>>,
+    crate::http::error::HttpError,
+> {
+    let initial_auth = auth.0;
+    if !state.auth_engine.authorize_action(
+        &initial_auth,
+        crate::auth::engine::Action::ChangelogSubscribe,
+    ) {
+        return Err(crate::http::error::HttpError(
+            crate::ops::OpError::AuthDenied,
+        ));
+    }
+
+    // Long-lived subscribers need their scope re-resolved when the main
+    // graph's containment topology changes — otherwise a principal who
+    // gains (or loses) access to a subtree through a move in the graph
+    // won't see the update until they re-subscribe. The WebSocket path
+    // does this; SSE now matches (finding 11023 follow-up).
+    //
+    // State lives inside the filter_map closure. Captured by move so
+    // each tick can mutate it:
+    //   - `auth_ctx`: the current AuthContext (role + scope bitmap +
+    //     scope generation). Refreshed in-place when stale.
+    //   - `last_refresh`: wall-clock marker for the next poll.
+    let mut auth_ctx = initial_auth;
+    let mut last_refresh = Instant::now();
     let rx = state.persistence.changelog_notify.subscribe();
 
     let label_filter: Vec<String> = q
@@ -75,6 +121,21 @@ pub(in crate::http) async fn subscribe(
     let change_stream = BroadcastStream::new(rx).filter_map(move |msg| {
         match msg {
             Ok(_seq) => {
+                // Refresh scope if the poll interval elapsed. Admin
+                // contexts skip the recompute inside the helper (their
+                // effective scope is global). No-op when containment
+                // generation has not advanced.
+                if last_refresh.elapsed().as_secs() >= SCOPE_REFRESH_INTERVAL_SECS {
+                    auth_ctx = crate::ops::refresh_scope_if_stale(&state, &auth_ctx);
+                    last_refresh = Instant::now();
+                }
+
+                let scope_bitmap = if auth_ctx.is_admin() {
+                    None
+                } else {
+                    Some(&auth_ctx.scope)
+                };
+
                 let entries = state
                     .persistence
                     .changelog
@@ -89,6 +150,9 @@ pub(in crate::http) async fn subscribe(
                 let mut events = Vec::new();
                 for entry in &entries {
                     for change in &entry.changes {
+                        if !change_in_scope(change, scope_bitmap) {
+                            continue;
+                        }
                         if !matches_filter(
                             change,
                             &label_filter,
@@ -130,7 +194,53 @@ pub(in crate::http) async fn subscribe(
         change_stream,
     );
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30))))
+}
+
+/// Return true when the change is in the caller's scope (or no scope
+/// filter applies, i.e. admin).
+///
+/// Node events (`NodeCreated`, `NodeDeleted`, `Property*`, `Label*`) are
+/// in-scope iff their subject node is in the bitmap.
+///
+/// Edge events (`EdgeCreated`, `EdgeDeleted`, `EdgeProperty*`) require
+/// **both** endpoints in scope. This is the same policy the RDF
+/// scope-filtered exporter applies (see
+/// `selene_rdf::mapping::graph_to_quads_scoped`) and tightens the
+/// WebSocket subscription path to match — pre-1.3.0 the WS variant
+/// accepted edges where either endpoint was in scope, which leaked
+/// out-of-scope node identifiers via relationship visibility. Aligning
+/// the two transports removes the transport-dependent visibility
+/// discrepancy.
+fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> bool {
+    // Schema mutations never ride the SSE data-plane stream — not for
+    // scoped principals and not for admins either. Admins observe DDL
+    // through the dedicated audit channel, not through /subscribe. This
+    // check runs *before* the admin fast-path below so schema events
+    // don't leak to admin subscribers.
+    if matches!(change, Change::SchemaMutation(_)) {
+        return false;
+    }
+    let Some(scope) = scope else {
+        return true;
+    };
+    let in_scope = |nid: u64| scope.contains(nid as u32);
+    match change {
+        Change::NodeCreated { node_id }
+        | Change::NodeDeleted { node_id, .. }
+        | Change::PropertySet { node_id, .. }
+        | Change::PropertyRemoved { node_id, .. }
+        | Change::LabelAdded { node_id, .. }
+        | Change::LabelRemoved { node_id, .. } => in_scope(node_id.0),
+        Change::EdgeCreated { source, target, .. }
+        | Change::EdgeDeleted { source, target, .. }
+        | Change::EdgePropertySet { source, target, .. }
+        | Change::EdgePropertyRemoved { source, target, .. } => {
+            in_scope(source.0) && in_scope(target.0)
+        }
+        // Handled above — kept for exhaustiveness.
+        Change::SchemaMutation(_) => false,
+    }
 }
 
 fn matches_filter(
@@ -187,6 +297,7 @@ fn change_type_name(change: &Change) -> &'static str {
         Change::EdgeDeleted { .. } => "EdgeDeleted",
         Change::EdgePropertySet { .. } => "EdgePropertySet",
         Change::EdgePropertyRemoved { .. } => "EdgePropertyRemoved",
+        Change::SchemaMutation(_) => "SchemaMutation",
     }
 }
 
@@ -270,5 +381,111 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "key": key.as_str(),
             "timestamp_ms": ts_ms,
         }),
+        // Schema mutations are filtered out by `change_in_scope` before
+        // this point for non-admin subscribers, so this JSON shape is
+        // only reachable on an admin pass-through. Keep the payload
+        // minimal and typed so clients can dispatch on `type`.
+        Change::SchemaMutation(_) => serde_json::json!({
+            "type": "SchemaMutation",
+            "timestamp_ms": ts_ms,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selene_core::changeset::Change;
+    use selene_core::{IStr, NodeId, Value};
+
+    fn property_set(node: u64) -> Change {
+        Change::PropertySet {
+            node_id: NodeId(node),
+            key: IStr::new("x"),
+            value: Value::Int(1),
+            old_value: None,
+        }
+    }
+
+    #[test]
+    fn change_in_scope_admin_passes_everything() {
+        assert!(change_in_scope(&property_set(1), None));
+        assert!(change_in_scope(&property_set(999), None));
+    }
+
+    #[test]
+    fn change_in_scope_filters_out_of_scope_nodes() {
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(1);
+        scope.insert(2);
+        assert!(change_in_scope(&property_set(1), Some(&scope)));
+        assert!(change_in_scope(&property_set(2), Some(&scope)));
+        assert!(!change_in_scope(&property_set(3), Some(&scope)));
+    }
+
+    #[test]
+    fn change_in_scope_node_created() {
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(42);
+        let inside = Change::NodeCreated {
+            node_id: NodeId(42),
+        };
+        let outside = Change::NodeCreated { node_id: NodeId(7) };
+        assert!(change_in_scope(&inside, Some(&scope)));
+        assert!(!change_in_scope(&outside, Some(&scope)));
+    }
+
+    #[test]
+    fn sse_and_ws_share_scope_refresh_interval() {
+        // SSE and WS poll `refresh_scope_if_stale` on the same cadence
+        // so long-lived subscribers on either transport react to scope
+        // changes on the same wall-clock schedule. If this drifts, a
+        // client that failed over from WS to SSE could see events
+        // later than expected — the cadence is a contract, not an
+        // implementation detail.
+        assert_eq!(
+            SCOPE_REFRESH_INTERVAL_SECS,
+            crate::http::ws::SCOPE_REFRESH_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn change_in_scope_edge_requires_both_endpoints() {
+        // 1.3.0 policy: an edge event is in-scope iff BOTH endpoints
+        // are in the bitmap. Pre-1.3.0 WS accepted "either endpoint"
+        // and SSE accepted "source only"; both transports were
+        // tightened and aligned to this stricter rule (matches the
+        // RDF scope-filtered exporter).
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(10);
+        scope.insert(20);
+        let both_in = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(1),
+            source: NodeId(10),
+            target: NodeId(20),
+            label: IStr::new("rel"),
+        };
+        let source_in_only = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(2),
+            source: NodeId(10),
+            target: NodeId(99),
+            label: IStr::new("rel"),
+        };
+        let target_in_only = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(3),
+            source: NodeId(99),
+            target: NodeId(10),
+            label: IStr::new("rel"),
+        };
+        let neither = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(4),
+            source: NodeId(98),
+            target: NodeId(99),
+            label: IStr::new("rel"),
+        };
+        assert!(change_in_scope(&both_in, Some(&scope)));
+        assert!(!change_in_scope(&source_in_only, Some(&scope)));
+        assert!(!change_in_scope(&target_in_only, Some(&scope)));
+        assert!(!change_in_scope(&neither, Some(&scope)));
     }
 }

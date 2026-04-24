@@ -226,6 +226,12 @@ pub fn handle_sync_subscribe(
                     | Change::EdgePropertyRemoved { source, target, .. } => {
                         bitmap.contains(source.0 as u32) && bitmap.contains(target.0 as u32)
                     }
+                    // This branch filters the initial snapshot for
+                    // non-admin sync peers (role != Admin is the
+                    // enclosing condition). Schema mutations are DDL
+                    // events — never replicated to scoped peers — so
+                    // they drop out here.
+                    Change::SchemaMutation(_) => false,
                 })
                 .collect()
         }

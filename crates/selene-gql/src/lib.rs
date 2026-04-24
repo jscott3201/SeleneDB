@@ -80,3 +80,10 @@ pub use types::value::{GqlValue, ZonedDateTime};
 pub use ast::statement::GqlStatement;
 pub use parser::parse_statement;
 pub use planner::{plan_mutation, plan_query};
+
+// ── Mutation AST re-exports for server-side policy scanning ──
+// Exposed so server code can walk a parsed mutation pipeline to enforce
+// out-of-band policies (e.g., reserved-label reservation) without re-parsing.
+pub use ast::mutation::{
+    InsertElement, InsertGraphPattern, InsertPathPattern, MutationOp, MutationPipeline,
+};

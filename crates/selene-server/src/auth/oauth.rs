@@ -13,7 +13,6 @@ use parking_lot::RwLock;
 use selene_core::{NodeId, Value};
 use selene_graph::SharedGraph;
 
-use super::engine::AuthEngine;
 use super::handshake::{AuthContext, AuthError};
 
 /// Maximum number of outstanding refresh tokens. Prevents memory exhaustion
@@ -288,9 +287,21 @@ impl OAuthTokenService {
 
     /// Validate an access token and return a full `AuthContext`.
     ///
-    /// Performs: signature verification, expiry check (via `jsonwebtoken`),
-    /// deny-list lookup, principal graph lookup, and scope resolution.
-    pub fn validate(&self, token: &str, graph: &SharedGraph) -> Result<AuthContext, OAuthError> {
+    /// Performs: signature verification, expiry check, deny-list lookup,
+    /// vault-graph principal lookup (cache-accelerated), and main-graph
+    /// scope expansion.
+    ///
+    /// Since 1.3.0 principals live in the vault graph; the principal cache
+    /// is keyed on the vault generation (which changes when identity, role,
+    /// enabled, or scope metadata is rewritten), while scope is always
+    /// recomputed against the current main-graph containment so role changes
+    /// and topology changes both take effect on the next validation.
+    pub fn validate(
+        &self,
+        token: &str,
+        vault_graph: &SharedGraph,
+        main_graph: &SharedGraph,
+    ) -> Result<AuthContext, OAuthError> {
         // 1+2. Decode and verify HMAC signature + expiry (pre-built Validation).
         // Tries the active key first, then retired keys still within grace period.
         let token_data = self
@@ -310,36 +321,46 @@ impl OAuthTokenService {
             }
         }
 
-        // 4. Look up principal in graph (cache-accelerated).
-        let current_gen = graph.containment_generation();
+        // 4. Look up principal in the vault (cache-accelerated).
+        //
+        // Two generations are in play: `vault_gen` keys the principal-id
+        // cache (invalidates on identity/role/enabled/scope rewrites), while
+        // `main_gen` — the main graph containment generation — is the value
+        // stamped into `AuthContext::scope_generation` so
+        // `ops::refresh_scope_if_stale` can detect containment drift. Mixing
+        // them (using vault_gen as scope_generation) would make every op
+        // look perpetually stale to refresh_scope_if_stale and cause
+        // unnecessary scope recomputation.
+        let vault_gen = vault_graph.read(|g| g.generation());
+        let main_gen = main_graph.containment_generation();
 
-        // Try cache first to avoid O(P) label scan.
         let cached = self.principal_cache.read().get(&claims.sub).copied();
         if let Some((cached_id, cached_gen)) = cached
-            && cached_gen == current_gen
+            && cached_gen == vault_gen
         {
-            // Cache hit: verify the node is still enabled before using it.
-            let still_enabled = graph.read(|g| {
+            let still_enabled = vault_graph.read(|g| {
                 g.get_node(cached_id).is_some_and(|n| {
                     n.property("enabled")
                         .is_some_and(|v| matches!(v, Value::Bool(true)))
                 })
             });
             if still_enabled {
-                return graph.read(|g| build_auth_context(g, cached_id, &claims.sub, current_gen));
+                return build_auth_context(
+                    vault_graph,
+                    main_graph,
+                    cached_id,
+                    &claims.sub,
+                    main_gen,
+                );
             }
-            // Enabled check failed: evict stale entry, fall through to full scan.
             self.principal_cache.write().remove(&claims.sub);
         }
 
-        // Cache miss or stale generation: full label scan.
-        graph.read(|g| {
-            let principal_id = find_enabled_principal(g, &claims.sub)?;
-            self.principal_cache
-                .write()
-                .insert(claims.sub.clone(), (principal_id, current_gen));
-            build_auth_context(g, principal_id, &claims.sub, current_gen)
-        })
+        let principal_id = vault_graph.read(|g| find_enabled_principal(g, &claims.sub))?;
+        self.principal_cache
+            .write()
+            .insert(claims.sub.clone(), (principal_id, vault_gen));
+        build_auth_context(vault_graph, main_graph, principal_id, &claims.sub, main_gen)
     }
 
     /// Validate a JWT without a graph lookup.
@@ -374,11 +395,13 @@ impl OAuthTokenService {
     /// Exchange a refresh token for a new (access JWT, refresh token) pair.
     ///
     /// The incoming refresh token is consumed (single-use). The principal is
-    /// re-validated against the graph to ensure it is still enabled.
+    /// re-validated against the vault to ensure it is still enabled, and the
+    /// live role from the vault is written into the new access token so role
+    /// changes take effect on the next refresh.
     pub fn refresh(
         &self,
         refresh_token: &str,
-        graph: &SharedGraph,
+        vault_graph: &SharedGraph,
     ) -> Result<(String, String), OAuthError> {
         // 1. Remove from store (single-use).
         let record = {
@@ -393,8 +416,8 @@ impl OAuthTokenService {
             return Err(OAuthError::InvalidRefreshToken);
         }
 
-        // 3. Re-validate principal and read current role from graph.
-        let role_str = graph.read(|g| -> Result<String, OAuthError> {
+        // 3. Re-validate principal and read current role from the vault.
+        let role_str = vault_graph.read(|g| -> Result<String, OAuthError> {
             let principal_id = find_enabled_principal(g, &record.principal)?;
             let node = g
                 .get_node(principal_id)
@@ -575,27 +598,38 @@ impl OAuthTokenService {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build an `AuthContext` from a known-valid principal node.
+/// Build an `AuthContext` from a known-valid vault principal node.
 ///
-/// Reads the live role from the graph (not the JWT claim) so that role
-/// changes take effect immediately, then resolves the scope bitmap.
+/// Reads the live role from the vault (not the JWT claim) so that role
+/// changes take effect immediately, then expands scope against the main
+/// graph containment tree. `scope_gen` must be the **main graph**
+/// `containment_generation()` — not the vault generation — so that
+/// `ops::refresh_scope_if_stale` (which compares against the main graph's
+/// current containment generation) can detect topology drift and recompute
+/// the scope. Passing the vault generation here would make every op look
+/// perpetually stale and cause redundant scope recomputation.
 fn build_auth_context(
-    g: &selene_graph::SeleneGraph,
+    vault_graph: &SharedGraph,
+    main_graph: &SharedGraph,
     principal_id: NodeId,
     identity: &str,
     scope_gen: u64,
 ) -> Result<AuthContext, OAuthError> {
-    let node = g
-        .get_node(principal_id)
-        .ok_or_else(|| AuthError::PrincipalNotFound(identity.to_string()))?;
-    let role_str = node
-        .property("role")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| AuthError::MissingRole(identity.to_string()))?;
-    let role: super::Role = role_str
-        .parse()
-        .map_err(|_| AuthError::InvalidRole(role_str))?;
-    let scope = AuthEngine::resolve_scope(g, principal_id, role).unwrap_or_default();
+    let role: super::Role = vault_graph.read(|g| -> Result<super::Role, AuthError> {
+        let node = g
+            .get_node(principal_id)
+            .ok_or_else(|| AuthError::PrincipalNotFound(identity.to_string()))?;
+        let role_str = node
+            .property("role")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .ok_or_else(|| AuthError::MissingRole(identity.to_string()))?;
+        role_str
+            .parse()
+            .map_err(|_| AuthError::InvalidRole(role_str))
+    })?;
+
+    let scope =
+        super::handshake::resolve_scope_two_graphs(vault_graph, main_graph, principal_id, role);
 
     Ok(AuthContext {
         principal_node_id: principal_id,

@@ -281,6 +281,9 @@ fn change_node_ids(change: &Change) -> Vec<NodeId> {
         | Change::EdgeDeleted { source, target, .. }
         | Change::EdgePropertySet { source, target, .. }
         | Change::EdgePropertyRemoved { source, target, .. } => vec![*source, *target],
+        // Schema mutations aren't per-node; the scope filter callers
+        // above fall through to "no match" when this returns empty.
+        Change::SchemaMutation(_) => Vec::new(),
     }
 }
 

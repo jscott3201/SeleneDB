@@ -83,6 +83,9 @@ csv = "1"
 # SPARQL form-encoded POST support
 form_urlencoded = "1"
 
+# OAuth redirect_uri structural validation (host/port/scheme parsing)
+url = "2"
+
 # Metrics
 prometheus = "0.14"
 

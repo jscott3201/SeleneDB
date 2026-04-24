@@ -173,12 +173,19 @@ impl AuthEngine {
         response.decision() == Decision::Allow
     }
 
-    /// Resolve the scope for a principal from the graph.
+    /// Resolve the scope bitmap for a principal.
     ///
-    /// For admins, returns None (global scope).
-    /// For everyone else, walks the containment tree from scoped_to targets.
+    /// Two-graph resolution since 1.3.0: principal + `scope_root_ids` live in
+    /// the vault graph, containment (`[:contains]*`) lives in the main graph.
+    /// Admins return `None` (global scope); everyone else gets a bitmap of
+    /// every main-graph node reachable from the declared scope roots.
+    ///
+    /// A principal with no `scope_root_ids` property resolves to an empty
+    /// bitmap — i.e. access denied to everything. That is the correct
+    /// default: an unconfigured principal should not see anything.
     pub fn resolve_scope(
-        graph: &SeleneGraph,
+        vault_graph: &SeleneGraph,
+        main_graph: &SeleneGraph,
         principal_id: NodeId,
         role: Role,
     ) -> Option<roaring::RoaringBitmap> {
@@ -186,8 +193,8 @@ impl AuthEngine {
             return None;
         }
 
-        let roots = projection::scope_roots(graph, principal_id);
-        Some(projection::resolve_scope(graph, &roots))
+        let roots = projection::scope_roots(vault_graph, principal_id);
+        Some(projection::resolve_scope(main_graph, &roots))
     }
 }
 

@@ -791,6 +791,10 @@ impl<'g> TrackedMutation<'g> {
                 }
                 // Deleted nodes/edges don't need validation.
                 Change::NodeDeleted { .. } | Change::EdgeDeleted { .. } => {}
+                // Schema mutations don't flow through TrackedMutation —
+                // they're emitted by the server's ops::schema path and
+                // written directly to the WAL. Nothing to validate here.
+                Change::SchemaMutation(_) => {}
             }
         }
 

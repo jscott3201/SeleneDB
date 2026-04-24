@@ -231,6 +231,76 @@ fn e2e_multi_match_insert_edge_between_existing_nodes() {
 }
 
 #[test]
+fn e2e_match_miss_insert_is_noop() {
+    // Regression for MATCH-miss phantom mutations: when a multi-MATCH binds
+    // both endpoints and the right side has no rows, INSERT must not fire.
+    // Prior behavior silently wrote labelless orphan nodes + an edge between
+    // them and reported non-zero nodes_created/edges_created, corrupting the
+    // graph and any caller that relied on the mutation counts as a write
+    // confirmation.
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("INSERT (:eval_run {run_id: 'r1'})")
+        .execute(&shared)
+        .unwrap();
+    let (nodes_before, edges_before) = shared.read(|g| (g.node_count(), g.edge_count()));
+
+    let result = MutationBuilder::new(
+        "MATCH (e:eval_run), (c:tool_contract) \
+         FILTER e.run_id = 'r1' AND c.contract_id = 'missing' \
+         INSERT (e)-[:evaluatedBaseline]->(c)",
+    )
+    .execute(&shared)
+    .unwrap();
+
+    assert_eq!(result.row_count(), 0, "empty MATCH → empty result set");
+    assert_eq!(
+        result.mutations.nodes_created, 0,
+        "MATCH-miss must not create nodes"
+    );
+    assert_eq!(
+        result.mutations.edges_created, 0,
+        "MATCH-miss must not create edges"
+    );
+    let (nodes_after, edges_after) = shared.read(|g| (g.node_count(), g.edge_count()));
+    assert_eq!(nodes_after, nodes_before, "no phantom nodes written");
+    assert_eq!(edges_after, edges_before, "no phantom edges written");
+}
+
+#[test]
+fn e2e_match_miss_insert_in_transaction_is_noop() {
+    // Transaction-path variant of the phantom-mutation regression. The
+    // transaction executor walks the INSERT pattern using `bindings.first()`
+    // as a context row, so an empty binding set previously produced fresh
+    // unbound-variable nodes inside the open transaction — visible to the
+    // caller before commit, and persisted on commit.
+    let shared = SharedGraph::new(SeleneGraph::new());
+    MutationBuilder::new("INSERT (:eval_run {run_id: 'r1'})")
+        .execute(&shared)
+        .unwrap();
+    let (nodes_before, edges_before) = shared.read(|g| (g.node_count(), g.edge_count()));
+
+    let mut txn = shared.begin_transaction();
+    let result = MutationBuilder::new(
+        "MATCH (e:eval_run), (c:tool_contract) \
+         FILTER e.run_id = 'r1' AND c.contract_id = 'missing' \
+         INSERT (e)-[:evaluatedBaseline]->(c)",
+    )
+    .execute_in_transaction(&mut txn)
+    .unwrap();
+
+    assert_eq!(result.row_count(), 0, "empty MATCH → empty result set");
+    assert_eq!(result.mutations.nodes_created, 0);
+    assert_eq!(result.mutations.edges_created, 0);
+    assert_eq!(txn.graph().node_count(), nodes_before);
+    assert_eq!(txn.graph().edge_count(), edges_before);
+    txn.commit();
+
+    let (nodes_after, edges_after) = shared.read(|g| (g.node_count(), g.edge_count()));
+    assert_eq!(nodes_after, nodes_before);
+    assert_eq!(edges_after, edges_before);
+}
+
+#[test]
 fn e2e_plain_delete_succeeds_without_edges() {
     let shared = SharedGraph::new(SeleneGraph::new());
     MutationBuilder::new("INSERT (:sensor {name: 'S1'})")

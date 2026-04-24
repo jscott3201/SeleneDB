@@ -266,6 +266,9 @@ impl SubscriptionFilter {
                 self.scope_bitmap.contains(Self::bitmap_id(*source))
                     && self.scope_bitmap.contains(Self::bitmap_id(*target))
             }
+            // Schema mutations are DDL events — not part of scoped data
+            // subscriptions.
+            Change::SchemaMutation(_) => false,
         }
     }
 
