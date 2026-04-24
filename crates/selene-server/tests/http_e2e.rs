@@ -706,10 +706,11 @@ async fn oauth_client_credentials_flow() {
     // Register a new OAuth client.
     let reg_resp = c
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "test-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await
@@ -764,10 +765,11 @@ async fn oauth_token_refresh() {
     // Register + get initial tokens.
     let reg: serde_json::Value = c
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "refresh-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await
@@ -879,10 +881,11 @@ async fn oauth_authorization_code_pkce_flow() {
     // 1. Register a client.
     let reg: serde_json::Value = client()
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "pkce-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await
@@ -982,10 +985,11 @@ async fn oauth_auth_code_reuse_rejected() {
     // 1. Register a client.
     let reg: serde_json::Value = client()
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "reuse-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await
@@ -1074,10 +1078,11 @@ async fn oauth_wrong_pkce_verifier_rejected() {
     // 1. Register.
     let reg: serde_json::Value = client()
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "pkce-bad-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await
@@ -1150,10 +1155,11 @@ async fn oauth_wrong_client_secret_rejected() {
     // Register a client.
     let reg: serde_json::Value = c
         .post(format!("{base}/oauth/register"))
+        .bearer_auth(support::TestServer::TEST_REGISTRATION_TOKEN)
         .json(&serde_json::json!({
             "client_name": "secret-test-agent",
             "redirect_uris": ["http://localhost/callback"],
-            "scope": "service"
+            "scope": "reader"
         }))
         .send()
         .await

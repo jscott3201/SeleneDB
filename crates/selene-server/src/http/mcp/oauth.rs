@@ -344,35 +344,107 @@ struct RegisterResponse {
     redirect_uris: Vec<String>,
 }
 
+/// Validate a redirect URI for OAuth 2.1 dynamic client registration.
+///
+/// Closes finding 11025. The pre-1.3.0 check was a plain `starts_with`
+/// comparison: `"http://localhost"` would accept `http://localhost.attacker.tld/cb`
+/// because that string literally starts with `http://localhost`. This
+/// function uses a URL parser to extract the scheme / host / port
+/// structurally and enforces:
+///
+/// - `https://` is always allowed (with any host).
+/// - `http://` is only allowed when the host is **exactly** `localhost`,
+///   `127.0.0.1`, or `[::1]`. Subdomains like `localhost.attacker.tld`
+///   fail this equality check. Port is permitted but not required.
+/// - Any other scheme (ftp, javascript, file, custom schemes) is rejected.
+/// - URIs that fail to parse are rejected.
+fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
+    let parsed = url::Url::parse(uri).map_err(|_| "redirect_uri is not a valid absolute URL")?;
+
+    // RFC 6749 §3.1.2: redirect URIs MUST NOT include a fragment. The authz
+    // server appends the authorization code via `{redirect}?code=...` string
+    // concatenation (see `oauth_authorize`), so a fragment in the stored URI
+    // would place the query inside the fragment component
+    // (`https://cb#x?code=...`), silently breaking the callback and
+    // potentially sending the code to the wrong place.
+    if parsed.fragment().is_some() {
+        return Err("redirect_uri must not contain a fragment (RFC 6749 §3.1.2)");
+    }
+
+    match parsed.scheme() {
+        "https" => {
+            if parsed.host_str().is_some() {
+                Ok(())
+            } else {
+                Err("https redirect_uri must include a host")
+            }
+        }
+        "http" => match parsed.host_str() {
+            Some("localhost" | "127.0.0.1" | "[::1]" | "::1") => Ok(()),
+            _ => Err(
+                "http redirect_uri is only permitted for exact loopback hosts \
+                 (localhost / 127.0.0.1 / [::1])",
+            ),
+        },
+        _ => Err("redirect_uri must use https:// (or http:// with a loopback host)"),
+    }
+}
+
 pub async fn oauth_register(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
-    // Gate registration behind a static bearer token when configured.
-    if let Some(ref expected) = state.config.mcp.registration_token {
-        let provided = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "));
-        match provided {
-            Some(token) => {
-                use subtle::ConstantTimeEq;
-                if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
+    // Closes finding 11024: pre-1.3.0, registration was OPEN whenever
+    // `registration_token` was unset — which is the default. Any caller
+    // that could reach `/oauth/register` on a production deployment could
+    // self-register an OAuth client, combine it with the "highest
+    // requested scope wins" logic below, and mint an admin-role client.
+    //
+    // Policy (1.3.0):
+    // - Dev mode: registration open if no token is configured. Intended
+    //   for local loopback testing where the operator explicitly opts in
+    //   by running with --dev.
+    // - Non-dev mode: registration is *always* gated by a bearer token.
+    //   If the operator has not configured one, we reject rather than
+    //   silently defaulting to open registration.
+    match (&state.config.mcp.registration_token, state.config.dev_mode) {
+        (Some(expected), _) => {
+            let provided = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "));
+            match provided {
+                Some(token) => {
+                    use subtle::ConstantTimeEq;
+                    if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
+                        return oauth_error(
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_token",
+                            "invalid registration token",
+                        );
+                    }
+                }
+                None => {
                     return oauth_error(
                         StatusCode::UNAUTHORIZED,
                         "invalid_token",
-                        "invalid registration token",
+                        "registration requires Authorization: Bearer <registration_token>",
                     );
                 }
             }
-            None => {
-                return oauth_error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "registration requires Authorization: Bearer <registration_token>",
-                );
-            }
+        }
+        (None, true) => {
+            // Dev mode + no token: open, matches prior behaviour.
+        }
+        (None, false) => {
+            // Production + no token: refuse registration outright rather
+            // than silently defaulting to an open endpoint.
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "dynamic client registration is disabled: set [mcp] registration_token in config to enable",
+            );
         }
     }
 
@@ -399,42 +471,37 @@ pub async fn oauth_register(
                 "each redirect_uri must be 2048 characters or fewer",
             );
         }
-        if !uri.starts_with("https://")
-            && !uri.starts_with("http://localhost")
-            && !uri.starts_with("http://127.0.0.1")
-        {
-            return oauth_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "redirect_uri must use https:// (or http://localhost / http://127.0.0.1 for development)",
-            );
+        if let Err(msg) = validate_redirect_uri(uri) {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", msg);
         }
     }
 
-    // Validate scope: OAuth 2.0 (RFC 6749 §3.3) uses space-delimited scope
-    // tokens. Each token must be a recognized role. When multiple roles are
-    // requested, the highest-privilege role is selected (SeleneDB uses
-    // single-role authorization).
+    // Closes finding 11024 (role capping): OAuth 2.1 dynamic client
+    // registration should never be able to self-issue elevated roles. The
+    // maximum issuable role for a dynamically-registered client is
+    // `reader` — admins issue service/operator/admin clients through the
+    // dedicated admin API (`create_principal`). Rejecting an elevated
+    // request beats silently downgrading: the client gets a clear
+    // `invalid_scope` error and can ask an admin for a credential that
+    // matches its needs.
     let scope = if req.scope.is_empty() {
         "reader".to_owned()
     } else {
-        let role_priority = |r: &crate::auth::Role| match r {
-            crate::auth::Role::Admin => 4,
-            crate::auth::Role::Service => 3,
-            crate::auth::Role::Operator => 2,
-            crate::auth::Role::Reader => 1,
-            crate::auth::Role::Device => 0,
-        };
         let mut best: Option<crate::auth::Role> = None;
         for token in req.scope.split_whitespace() {
             match token.parse::<crate::auth::Role>() {
-                Ok(role) => {
-                    if best
-                        .as_ref()
-                        .is_none_or(|b| role_priority(&role) > role_priority(b))
-                    {
-                        best = Some(role);
-                    }
+                Ok(crate::auth::Role::Reader) => {
+                    best = Some(crate::auth::Role::Reader);
+                }
+                Ok(other) => {
+                    return oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_scope",
+                        &format!(
+                            "dynamic client registration may only request 'reader' scope; \
+                             requested '{other}' requires an admin-issued credential"
+                        ),
+                    );
                 }
                 Err(_) => {
                     return oauth_error(
@@ -1258,6 +1325,62 @@ fn handle_refresh_token_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirect_uri_accepts_https_with_any_host() {
+        assert!(validate_redirect_uri("https://example.com/cb").is_ok());
+        assert!(validate_redirect_uri("https://app.example.com:8443/oauth/cb").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_accepts_http_loopback_only() {
+        assert!(validate_redirect_uri("http://localhost/cb").is_ok());
+        assert!(validate_redirect_uri("http://localhost:8080/cb").is_ok());
+        assert!(validate_redirect_uri("http://127.0.0.1/cb").is_ok());
+        assert!(validate_redirect_uri("http://127.0.0.1:3000/cb").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_localhost_prefix_attack() {
+        // Closes finding 11025: the pre-1.3.0 `starts_with` check would
+        // have accepted these because they literally begin with
+        // `http://localhost` / `http://127.0.0.1`.
+        assert!(validate_redirect_uri("http://localhost.attacker.tld/cb").is_err());
+        assert!(validate_redirect_uri("http://localhost-evil.example/cb").is_err());
+        assert!(validate_redirect_uri("http://127.0.0.1.attacker.tld/cb").is_err());
+        assert!(validate_redirect_uri("http://localhost@attacker.tld/cb").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_non_loopback_http() {
+        assert!(validate_redirect_uri("http://example.com/cb").is_err());
+        assert!(validate_redirect_uri("http://10.0.0.1/cb").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_non_http_schemes() {
+        assert!(validate_redirect_uri("ftp://example.com/").is_err());
+        assert!(validate_redirect_uri("javascript:alert(1)").is_err());
+        assert!(validate_redirect_uri("file:///etc/passwd").is_err());
+        assert!(validate_redirect_uri("custom-app://callback").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_malformed() {
+        assert!(validate_redirect_uri("not a url").is_err());
+        assert!(validate_redirect_uri("").is_err());
+        assert!(validate_redirect_uri("://bad").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_fragment() {
+        // RFC 6749 §3.1.2 — fragment would be poisoned by the `?code=...`
+        // that the authz endpoint appends via string concatenation, sending
+        // the auth code to the wrong component of the URL.
+        assert!(validate_redirect_uri("https://example.com/cb#frag").is_err());
+        assert!(validate_redirect_uri("http://localhost/cb#x").is_err());
+        assert!(validate_redirect_uri("https://example.com/cb#").is_err());
+    }
 
     #[test]
     fn pkce_s256_roundtrip() {
