@@ -74,11 +74,7 @@ impl<'a> WriteScope<'a> {
     }
 
     /// Reject if `node_id` is not in scope.
-    fn check(
-        self,
-        node_id: selene_core::NodeId,
-        context: &'static str,
-    ) -> Result<(), UpdateError> {
+    fn check(self, node_id: selene_core::NodeId, context: &'static str) -> Result<(), UpdateError> {
         match self.bitmap {
             None => Ok(()),
             Some(bm) if bm.contains(node_id.0 as u32) => Ok(()),
