@@ -244,6 +244,14 @@ fn txn_insert_pattern(
     use crate::ast::mutation::InsertElement;
     use crate::ast::pattern::EdgeDirection;
 
+    // A pure INSERT (no MATCH) reaches here with a single unit binding
+    // supplied by the pattern phase, so empty bindings always mean a MATCH
+    // that returned no rows. Running INSERT would silently materialise
+    // labelless orphan nodes for any unbound pattern variables.
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
     let mut var_map: HashMap<IStr, NodeId> = HashMap::new();
     let mut edge_var_map: HashMap<IStr, EdgeId> = HashMap::new();
 

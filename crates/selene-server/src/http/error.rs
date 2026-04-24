@@ -15,6 +15,7 @@ impl IntoResponse for HttpError {
                 (StatusCode::NOT_FOUND, format!("{entity} {id} not found"))
             }
             OpError::AuthDenied => (StatusCode::FORBIDDEN, "access denied".into()),
+            OpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             OpError::SchemaViolation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
             OpError::InvalidRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             OpError::QueryError(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

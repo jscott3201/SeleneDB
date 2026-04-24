@@ -5,6 +5,7 @@ use selene_wire::dto::entity::NodeDto;
 
 use super::{OpError, graph_err, node_to_dto, persist_or_die, require_in_scope};
 use crate::auth::handshake::AuthContext;
+use crate::auth::reserved::{reject_reserved_label_istrs, reject_reserved_labels};
 use crate::bootstrap::ServerState;
 
 /// Fetch a node's labels and promote dictionary-encoded string properties.
@@ -54,6 +55,8 @@ pub fn create_node(
 ) -> Result<NodeDto, OpError> {
     let auth = super::refresh_scope_if_stale(state, auth);
 
+    reject_reserved_labels(&labels)?;
+
     // Non-admin must provide parent_id for containment placement
     if !auth.is_admin() && parent_id.is_none() {
         return Err(OpError::InvalidRequest(
@@ -98,6 +101,8 @@ pub fn modify_node(
     let auth = super::refresh_scope_if_stale(state, auth);
     let node_id = NodeId(id);
     require_in_scope(&auth, node_id)?;
+
+    reject_reserved_label_istrs(&add_labels)?;
 
     let ((), changes) = state
         .graph

@@ -74,6 +74,15 @@ pub struct ServerState {
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
     /// Projection catalog for graph algorithms (persists across requests).
     pub(crate) projection_catalog: selene_gql::runtime::procedures::algorithms::SharedCatalog,
+    /// Set when a schema mutation has been applied in memory but its
+    /// corresponding durable snapshot has failed. Subsequent schema
+    /// operations will retry the snapshot before allowing any idempotent
+    /// early-return path (`AlreadyExistsEqual`, `NotFound` on unregister)
+    /// to report success. This closes the durability window flagged in
+    /// the 2026-04-24 review for finding 11026: without the flag a
+    /// retry of a schema call could hit the idempotent path and return
+    /// success while the schema change is still not on disk.
+    pub(crate) schema_persist_pending: std::sync::atomic::AtomicBool,
 }
 
 // ── Accessors (pub for embedder/test API, pub(crate) for internal) ─
@@ -715,6 +724,21 @@ pub async fn bootstrap(
         services.register(crate::vault::VaultService::new(v, mk));
     }
 
+    // Migrate any legacy main-graph `:principal` nodes into the vault.
+    // Pre-1.3.0 deployments wrote principals to the main graph (via OAuth
+    // dynamic registration and, in some clusters, manual admin setup); since
+    // 1.3.0 the vault is the sole source of truth. Migration is idempotent:
+    // a principal already present in the vault with the same identity is
+    // skipped and the main-graph node is deleted anyway. After migration we
+    // verify that no `:principal` nodes remain in the main graph — if any do
+    // (e.g. the vault is not configured or a write failed), startup is aborted
+    // rather than silently shipping a deployment with a split identity store.
+    if let Err(e) = migrate_main_graph_principals_to_vault(&shared_graph, &services) {
+        return Err(anyhow::anyhow!(
+            "fatal: principal migration to vault failed: {e}"
+        ));
+    }
+
     // Register stats collector (always-on: rebuild from graph, then incremental via changelog)
     {
         let collector = crate::stats_subscriber::StatsCollector::new();
@@ -922,6 +946,7 @@ pub async fn bootstrap(
         rdf_namespace,
         csr_cache,
         projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+        schema_persist_pending: std::sync::atomic::AtomicBool::new(false),
     };
 
     // Sweep any orphaned snapshot temp files left from previous runs.
@@ -942,6 +967,213 @@ pub async fn bootstrap(
 /// best-effort sweep covers the recovery case. Errors are logged but
 /// never block startup — losing a few KB to a missed cleanup is far
 /// preferable to refusing to start.
+/// Move any legacy `:principal` nodes from the main graph into the vault.
+///
+/// Called exactly once at bootstrap, immediately after the vault service is
+/// registered. Pre-1.3.0 `:principal` nodes in the main graph are copied
+/// into the vault (preserving identity, role, credential_hash, enabled
+/// state, OAuth metadata, and any `[:scoped_to]` edge targets — these last
+/// become a `scope_root_ids` property) and deleted from the main graph.
+/// A main-graph principal whose identity already exists in the vault is
+/// treated as stale and deleted without overwriting the vault record.
+///
+/// After migration we re-scan the main graph and bail if any `:principal`
+/// node still exists. That guarantees the startup postcondition the rest
+/// of the auth stack relies on: the main graph contains zero principals.
+fn migrate_main_graph_principals_to_vault(
+    shared_graph: &selene_graph::SharedGraph,
+    services: &crate::service_registry::ServiceRegistry,
+) -> anyhow::Result<()> {
+    use selene_core::{IStr, Value};
+
+    // Collect legacy principal records from the main graph without holding
+    // the read lock while we enter the vault write path.
+    struct LegacyPrincipal {
+        node_id: selene_core::NodeId,
+        identity: Option<String>,
+        role: Option<String>,
+        credential_hash: Option<String>,
+        enabled: Option<bool>,
+        client_name: Option<String>,
+        redirect_uri: Option<String>,
+        scope_roots: Vec<u64>,
+    }
+
+    fn string_prop(node: &selene_graph::NodeRef<'_>, key: &str) -> Option<String> {
+        node.property(key)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
+
+    let legacy: Vec<LegacyPrincipal> = shared_graph.read(|g| {
+        g.nodes_by_label("principal")
+            .filter_map(|nid| {
+                let node = g.get_node(nid)?;
+                let enabled = match node.property("enabled") {
+                    Some(Value::Bool(b)) => Some(*b),
+                    _ => None,
+                };
+                let scope_roots: Vec<u64> = g
+                    .outgoing(nid)
+                    .iter()
+                    .filter_map(|&eid| {
+                        let edge = g.get_edge(eid)?;
+                        if edge.label.as_str() == "scoped_to" {
+                            Some(edge.target.0)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Some(LegacyPrincipal {
+                    node_id: nid,
+                    identity: string_prop(&node, "identity"),
+                    role: string_prop(&node, "role"),
+                    credential_hash: string_prop(&node, "credential_hash"),
+                    enabled,
+                    client_name: string_prop(&node, "client_name"),
+                    redirect_uri: string_prop(&node, "redirect_uri"),
+                    scope_roots,
+                })
+            })
+            .collect()
+    });
+
+    if legacy.is_empty() {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        count = legacy.len(),
+        "migrating legacy `:principal` nodes from main graph to vault"
+    );
+
+    let Some(vault_svc) = services.get::<crate::vault::VaultService>() else {
+        anyhow::bail!(
+            "{} legacy main-graph `:principal` node(s) found but vault service is not configured; \
+             refusing to start — configure a vault or manually purge the stale principal nodes",
+            legacy.len()
+        );
+    };
+    let vault = &vault_svc.handle;
+
+    for p in &legacy {
+        let Some(identity) = p.identity.clone() else {
+            tracing::warn!(
+                node_id = p.node_id.0,
+                "skipping principal without identity during migration"
+            );
+            continue;
+        };
+
+        // Skip migration if vault already knows this identity — treat the
+        // main-graph record as stale and let the subsequent delete sweep it.
+        let already_in_vault = vault.graph.read(|g| {
+            g.nodes_by_label("principal").any(|nid| {
+                g.get_node(nid).is_some_and(|n| {
+                    n.property("identity")
+                        .is_some_and(|v| v.as_str() == Some(identity.as_str()))
+                })
+            })
+        });
+
+        if already_in_vault {
+            tracing::warn!(
+                identity = %identity,
+                "principal already present in vault — dropping stale main-graph record"
+            );
+            continue;
+        }
+
+        let mut props = vec![(IStr::new("identity"), Value::str(&identity))];
+        if let Some(ref role) = p.role {
+            props.push((IStr::new("role"), Value::str(role)));
+        }
+        if let Some(ref hash) = p.credential_hash {
+            props.push((IStr::new("credential_hash"), Value::str(hash)));
+        }
+        props.push((IStr::new("enabled"), Value::Bool(p.enabled.unwrap_or(true))));
+        if let Some(ref name) = p.client_name {
+            props.push((IStr::new("client_name"), Value::str(name)));
+        }
+        if let Some(ref uri) = p.redirect_uri {
+            props.push((IStr::new("redirect_uri"), Value::str(uri)));
+        }
+        if !p.scope_roots.is_empty() {
+            // Stored as UInt because NodeId is u64; casting to i64 via `as`
+            // would silently wrap for ids above i64::MAX and the reader
+            // (`projection::scope_roots`) drops negative items, corrupting
+            // migrated scope data.
+            let values: Arc<[Value]> = p
+                .scope_roots
+                .iter()
+                .map(|id| Value::UInt(*id))
+                .collect::<Vec<_>>()
+                .into();
+            props.push((IStr::new("scope_root_ids"), Value::List(values)));
+        }
+
+        vault
+            .graph
+            .write(|m| {
+                m.create_node(
+                    selene_core::LabelSet::from_strs(&["principal"]),
+                    selene_core::PropertyMap::from_pairs(props),
+                )
+            })
+            .map_err(|e| anyhow::anyhow!("vault write during migration failed: {e}"))?;
+
+        tracing::info!(identity = %identity, "migrated principal into vault");
+    }
+
+    vault
+        .flush(&vault_svc.master_key)
+        .map_err(|e| anyhow::anyhow!("vault flush during migration failed: {e}"))?;
+
+    // Collect every edge incident to a legacy principal up-front (the
+    // mutation view does not expose adjacency). `delete_node` refuses to
+    // drop a node with incident edges, so edges go first. We merge into a
+    // HashSet because the same edge may appear in both endpoints' lists.
+    let ids: Vec<selene_core::NodeId> = legacy.iter().map(|p| p.node_id).collect();
+    let edges_to_drop: Vec<selene_core::EdgeId> = shared_graph.read(|g| {
+        let mut set = std::collections::HashSet::new();
+        for nid in &ids {
+            for &eid in g.outgoing(*nid) {
+                set.insert(eid);
+            }
+            for &eid in g.incoming(*nid) {
+                set.insert(eid);
+            }
+        }
+        set.into_iter().collect()
+    });
+
+    shared_graph
+        .write(|m| {
+            for eid in &edges_to_drop {
+                // Ignore errors — an edge may already be gone if it was
+                // shared between two principals we just processed, which is
+                // fine.
+                let _ = m.delete_edge(*eid);
+            }
+            for nid in &ids {
+                m.delete_node(*nid)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!("main-graph principal deletion failed: {e}"))?;
+
+    // Postcondition: zero `:principal` nodes in the main graph. Anything
+    // else is a silent failure we refuse to ship with.
+    let remaining: usize = shared_graph.read(|g| g.nodes_by_label("principal").count());
+    if remaining > 0 {
+        anyhow::bail!(
+            "principal migration incomplete: {remaining} `:principal` node(s) still present in main graph"
+        );
+    }
+
+    Ok(())
+}
+
 fn sweep_orphan_snapshot_temps(data_dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(data_dir) else {
         return;
@@ -1071,6 +1303,7 @@ impl ServerState {
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
             projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+            schema_persist_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

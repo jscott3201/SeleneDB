@@ -984,11 +984,16 @@ async fn csv_import_and_export_nodes() {
 // a graceful "vault not available" error rather than panicking.
 
 #[tokio::test]
-async fn principal_tools_require_vault() {
+async fn principal_tools_operate_on_vault() {
+    // Since 1.3.0 the vault is the single source of truth for principals.
+    // The test harness always provisions a vault, so principal management
+    // tools should succeed against it: list surfaces the seeded admin,
+    // get returns 404 for an unknown identity, and create + list observes
+    // the new principal in the vault without any main-graph writes.
     let (base, _server) = start_server().await;
     let sid = initialize(&base).await;
 
-    // list_principals
+    // list_principals — the seeded admin should be present.
     let result = session_request(
         &base,
         &sid,
@@ -999,11 +1004,12 @@ async fn principal_tools_require_vault() {
     .await;
     let text = result.to_string();
     assert!(
-        text.contains("vault") || text.contains("error"),
-        "list_principals without vault should fail gracefully: {text}"
+        text.contains("\"identity\":\"admin\""),
+        "list_principals should include the bootstrap admin: {text}"
     );
 
-    // get_principal
+    // get_principal for an unknown identity — surface an error (either
+    // transport-level isError or a 'not found' message).
     let result = session_request(
         &base,
         &sid,
@@ -1014,11 +1020,11 @@ async fn principal_tools_require_vault() {
     .await;
     let text = result.to_string();
     assert!(
-        text.contains("vault") || text.contains("error"),
-        "get_principal without vault should fail gracefully: {text}"
+        text.contains("not found") || text.contains("isError") || text.contains("error"),
+        "get_principal for unknown id should error: {text}"
     );
 
-    // create_principal
+    // create_principal — writes to the vault. Subsequent list should see it.
     let result = session_request(
         &base,
         &sid,
@@ -1032,8 +1038,22 @@ async fn principal_tools_require_vault() {
     .await;
     let text = result.to_string();
     assert!(
-        text.contains("vault") || text.contains("error"),
-        "create_principal without vault should fail gracefully: {text}"
+        text.contains("\"identity\":\"test-op\""),
+        "create_principal should return the created DTO: {text}"
+    );
+
+    let result = session_request(
+        &base,
+        &sid,
+        5,
+        "tools/call",
+        serde_json::json!({"name": "list_principals", "arguments": {}}),
+    )
+    .await;
+    let text = result.to_string();
+    assert!(
+        text.contains("\"identity\":\"test-op\""),
+        "newly created principal should appear in list_principals: {text}"
     );
 }
 

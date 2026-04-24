@@ -1,4 +1,8 @@
-//! Connection handshake — authenticates a QUIC connection.
+//! Connection handshake — authenticates a connection against the vault.
+//!
+//! Since 1.3.0 all principals live in the vault graph; the main graph holds
+//! only the containment tree used for scope expansion. `authenticate` takes
+//! both graph handles and never consults the main graph for identity data.
 
 use roaring::RoaringBitmap;
 use selene_core::{NodeId, Value};
@@ -10,14 +14,14 @@ use super::engine::AuthEngine;
 /// Per-connection authorization context, established at handshake.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    /// The principal's node ID in the graph.
+    /// The principal's node ID in the vault graph.
     pub principal_node_id: NodeId,
     /// The principal's role.
     pub role: Role,
-    /// Bitmap of node IDs this principal can access.
+    /// Bitmap of main-graph node IDs this principal can access.
     /// Empty for admin (global access checked separately).
     pub scope: RoaringBitmap,
-    /// Generation counter at scope resolution time.
+    /// Main-graph containment generation at scope resolution time.
     pub scope_generation: u64,
 }
 
@@ -45,10 +49,14 @@ impl AuthContext {
 
 /// Authenticate a connection using the handshake credentials.
 ///
-/// Looks up the principal node by identity, validates it's enabled,
-/// resolves the role and scope.
+/// Principals are resolved from the vault graph; scope is expanded against
+/// the main graph. Both arguments are required — passing the main graph in
+/// place of the vault (as the pre-1.3.0 code did) would silently deny every
+/// login, because post-unification the main graph contains no `:principal`
+/// nodes by design.
 pub fn authenticate(
-    graph: &SharedGraph,
+    vault_graph: &SharedGraph,
+    main_graph: &SharedGraph,
     auth_type: &str,
     identity: &str,
     credentials: &str,
@@ -61,37 +69,46 @@ pub fn authenticate(
                     "dev auth_type is not allowed in production mode".into(),
                 ));
             }
-            authenticate_dev(graph, identity)
+            authenticate_dev(vault_graph, main_graph, identity)
         }
-        "token" | "psk" => authenticate_by_credential(graph, identity, credentials),
+        "token" | "psk" => {
+            authenticate_by_credential(vault_graph, main_graph, identity, credentials)
+        }
         other => Err(AuthError::UnsupportedAuthType(other.to_string())),
     }
 }
 
-fn authenticate_dev(graph: &SharedGraph, identity: &str) -> Result<AuthContext, AuthError> {
+fn authenticate_dev(
+    vault_graph: &SharedGraph,
+    main_graph: &SharedGraph,
+    identity: &str,
+) -> Result<AuthContext, AuthError> {
     // In dev mode, if identity is empty or "admin", return admin context
     if identity.is_empty() || identity == "admin" {
         return Ok(AuthContext::dev_admin());
     }
 
-    let scope_gen = graph.containment_generation();
-    graph.read(|g| {
-        let principal_id = find_principal_by_identity(g, identity)?;
+    let scope_gen = main_graph.containment_generation();
+    let principal_id = vault_graph.read(|g| find_principal_by_identity(g, identity))?;
+
+    let role = vault_graph.read(|g| {
         let node = g
             .get_node(principal_id)
             .ok_or_else(|| AuthError::PrincipalNotFound(identity.to_string()))?;
-        let role = extract_role(node, identity)?;
-        let scope = AuthEngine::resolve_scope(g, principal_id, role).unwrap_or_default();
-        Ok(AuthContext {
-            principal_node_id: principal_id,
-            role,
-            scope,
-            scope_generation: scope_gen,
-        })
+        extract_role(node, identity)
+    })?;
+
+    let scope = resolve_scope_two_graphs(vault_graph, main_graph, principal_id, role);
+
+    Ok(AuthContext {
+        principal_node_id: principal_id,
+        role,
+        scope,
+        scope_generation: scope_gen,
     })
 }
 
-/// Find a principal node by its identity property.
+/// Find a principal node in the vault graph by its `identity` property.
 pub(super) fn find_principal_by_identity(
     g: &selene_graph::SeleneGraph,
     identity: &str,
@@ -118,54 +135,71 @@ fn extract_role(node: selene_graph::NodeRef<'_>, identity: &str) -> Result<Role,
         .map_err(|_| AuthError::InvalidRole(role_str))
 }
 
-/// Authenticate by identity (lookup) + credential (verification).
+/// Orchestrate scope resolution across the two graphs under read locks.
+pub(crate) fn resolve_scope_two_graphs(
+    vault_graph: &SharedGraph,
+    main_graph: &SharedGraph,
+    principal_id: NodeId,
+    role: Role,
+) -> RoaringBitmap {
+    vault_graph.read(|vg| {
+        main_graph
+            .read(|mg| AuthEngine::resolve_scope(vg, mg, principal_id, role).unwrap_or_default())
+    })
+}
+
+/// Authenticate by identity (vault lookup) + credential (argon2id verify).
 ///
-/// 1. Find principal node by `identity` property
-/// 2. Check `enabled == true`
-/// 3. Verify `credentials` against `credential_hash` (argon2id)
-/// 4. Extract role, resolve scope
+/// 1. Find principal node in vault by `identity`.
+/// 2. Check `enabled == true`.
+/// 3. Verify `credentials` against `credential_hash`.
+/// 4. Extract role; expand scope against the main graph.
 fn authenticate_by_credential(
-    graph: &SharedGraph,
+    vault_graph: &SharedGraph,
+    main_graph: &SharedGraph,
     identity: &str,
     credentials: &str,
 ) -> Result<AuthContext, AuthError> {
-    let scope_gen = graph.containment_generation();
-    graph.read(|g| {
+    let scope_gen = main_graph.containment_generation();
+
+    let (principal_id, role, credential_hash, enabled) = vault_graph.read(|g| {
         let principal_id = find_principal_by_identity(g, identity)?;
         let node = g
             .get_node(principal_id)
             .ok_or_else(|| AuthError::PrincipalNotFound(identity.to_string()))?;
 
-        // Check enabled
         let enabled = node
             .property("enabled")
             .is_some_and(|v| matches!(v, Value::Bool(true)));
-        if !enabled {
-            return Err(AuthError::PrincipalDisabled(identity.to_string()));
-        }
 
-        // Verify credential against stored argon2 hash
         let credential_hash = node
             .property("credential_hash")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .ok_or_else(|| AuthError::CredentialNotConfigured(identity.to_string()))?;
 
-        let valid = super::credential::verify_credential(credentials, &credential_hash)
-            .map_err(|e| AuthError::CredentialVerifyFailed(e.to_string()))?;
-
-        if !valid {
-            return Err(AuthError::InvalidCredential(identity.to_string()));
-        }
-
         let role = extract_role(node, identity)?;
-        let scope = AuthEngine::resolve_scope(g, principal_id, role).unwrap_or_default();
 
-        Ok(AuthContext {
-            principal_node_id: principal_id,
-            role,
-            scope,
-            scope_generation: scope_gen,
-        })
+        Ok::<_, AuthError>((principal_id, role, credential_hash, enabled))
+    })?;
+
+    if !enabled {
+        return Err(AuthError::PrincipalDisabled(identity.to_string()));
+    }
+
+    let valid = super::credential::verify_credential(credentials, &credential_hash)
+        .map_err(|e| AuthError::CredentialVerifyFailed(e.to_string()))?;
+
+    if !valid {
+        return Err(AuthError::InvalidCredential(identity.to_string()));
+    }
+
+    let scope = resolve_scope_two_graphs(vault_graph, main_graph, principal_id, role);
+
+    Ok(AuthContext {
+        principal_node_id: principal_id,
+        role,
+        scope,
+        scope_generation: scope_gen,
     })
 }
 
@@ -188,6 +222,8 @@ pub enum AuthError {
     CredentialVerifyFailed(String),
     #[error("unsupported auth type: {0}")]
     UnsupportedAuthType(String),
+    #[error("vault unavailable: {0}")]
+    VaultUnavailable(String),
 }
 
 #[cfg(test)]

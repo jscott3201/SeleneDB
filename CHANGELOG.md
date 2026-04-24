@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **GQL `MATCH … INSERT` on MATCH-miss is now a true no-op.** Previously,
+  `MATCH (a:foo), (b:bar) INSERT (a)-[:rel]->(b)` with zero matches on either
+  side returned `status = 00000` with non-zero `nodes_created` /
+  `edges_created` in the mutation stats and silently wrote labelless orphan
+  nodes + an edge between them. The write path now skips INSERT entirely when
+  pattern bindings are empty; counts reflect what was actually written. The
+  same fix applies to the transaction (`execute_in_transaction`) path.
+  Callers that treated a successful status as a write confirmation without
+  inspecting row or mutation counts were exposed to graph corruption.
+
 ## [1.2.0] - 2026-04-19
 
 v1.2.0 is a single-theme breaking release. The agent-memory abstraction —

@@ -350,26 +350,16 @@ pub(super) fn execute_mutations_write(
                 match mutation {
                     MutationOp::InsertPattern(pattern) => {
                         // Each MATCH row produces its own INSERT (ISO GQL semantics).
-                        // For INSERT without MATCH, bindings is empty; run once.
-                        let rows: Vec<&Binding> = if bindings_snapshot.is_empty() {
-                            vec![]
-                        } else {
-                            bindings_snapshot.iter().collect()
-                        };
-                        let run_once = rows.is_empty();
-                        let iter_rows: Box<dyn Iterator<Item = Option<&Binding>>> = if run_once {
-                            Box::new(std::iter::once(None))
-                        } else {
-                            Box::new(rows.into_iter().map(Some))
-                        };
-
-                        for opt_binding in iter_rows {
+                        // A pure INSERT (no MATCH) reaches here with a single unit
+                        // binding supplied by the pattern phase, so an empty
+                        // bindings_snapshot always means MATCH-miss and INSERT
+                        // must not fire — otherwise unbound pattern variables are
+                        // materialised as labelless orphan nodes.
+                        for binding in &bindings_snapshot {
                             let mut row_node_map: HashMap<IStr, NodeId> = HashMap::new();
-                            if let Some(binding) = opt_binding {
-                                for (key, val) in binding.iter() {
-                                    if let BoundValue::Node(nid) = val {
-                                        row_node_map.insert(*key, *nid);
-                                    }
+                            for (key, val) in binding.iter() {
+                                if let BoundValue::Node(nid) = val {
+                                    row_node_map.insert(*key, *nid);
                                 }
                             }
 
@@ -379,7 +369,7 @@ pub(super) fn execute_mutations_write(
 
                             walk_insert_paths(
                                 &pattern.paths,
-                                opt_binding,
+                                Some(binding),
                                 graph,
                                 &mut row_node_map,
                                 &mut edge_var_map,

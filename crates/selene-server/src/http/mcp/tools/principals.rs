@@ -41,6 +41,7 @@ pub(super) async fn create_principal_impl(
         &p.identity,
         &p.role,
         p.password.as_deref(),
+        &p.scope_root_ids,
     )
     .map_err(op_err)?;
     Ok(structured_result(
@@ -59,6 +60,7 @@ pub(super) async fn update_principal_impl(
         &p.identity,
         p.role.as_deref(),
         p.enabled,
+        p.scope_root_ids.as_deref(),
     )
     .map_err(op_err)?;
     Ok(structured_result(

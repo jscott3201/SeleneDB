@@ -10,6 +10,7 @@ description = "RDF import/export and SPARQL query adapter for Selene"
 [dependencies]
 selene-core.workspace = true
 selene-graph.workspace = true
+roaring.workspace = true
 oxrdf = "0.3.3"
 oxttl = "0.2.3"
 rustc-hash.workspace = true

@@ -228,6 +228,7 @@ pub(crate) fn op_err(e: ops::OpError) -> McpError {
         // the more accurate JSON-RPC class.
         ops::OpError::NotFound { .. } => ErrorCode::INVALID_REQUEST,
         ops::OpError::AuthDenied => ErrorCode::INVALID_REQUEST,
+        ops::OpError::Forbidden(_) => ErrorCode::INVALID_REQUEST,
         ops::OpError::InvalidRequest(_) => ErrorCode::INVALID_PARAMS,
         ops::OpError::SchemaViolation(_) => ErrorCode::INVALID_PARAMS,
         ops::OpError::QueryError(_) | ops::OpError::Internal(_) => ErrorCode::INTERNAL_ERROR,
@@ -247,6 +248,7 @@ fn error_data(e: &ops::OpError) -> serde_json::Value {
     let kind = match e {
         ops::OpError::NotFound { .. } => "not_found",
         ops::OpError::AuthDenied => "auth_denied",
+        ops::OpError::Forbidden(_) => "forbidden",
         ops::OpError::SchemaViolation(_) => "schema_violation",
         ops::OpError::InvalidRequest(_) => "invalid_request",
         ops::OpError::QueryError(_) => "query_error",
