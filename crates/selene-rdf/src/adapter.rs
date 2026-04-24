@@ -110,19 +110,20 @@ impl<'a> QueryableDataset<'a> for SeleneDataset<'a> {
         // Each branch collects into a Vec internally (the underlying graph
         // accessors are snapshot-based), but the Box<dyn Iterator> dispatch
         // avoids an extra top-level Vec when we can short-circuit early.
-        let iter: Box<dyn Iterator<Item = InternalQuad<SeleneRdfTerm>>> = match graph_name {
+        // The SeleneDataset borrows `scope: &'a RoaringBitmap`, so the
+        // filter closure below can capture that reference directly — no
+        // per-query clone of the bitmap. The returned iterator inherits
+        // the `'a` lifetime through the `use<'a>` capture declaration.
+        let iter: Box<dyn Iterator<Item = InternalQuad<SeleneRdfTerm>> + 'a> = match graph_name {
             Some(None) => {
                 // Default graph: instance data from the property graph.
                 // Scope filtering applies here — default-graph quads carry
                 // instance-level node references.
                 let raw = self.collect_default_graph(subject, predicate, object);
                 if let Some(scope) = self.scope {
-                    let scope_cloned = scope.clone();
                     Box::new(raw.filter(move |q| {
-                        // Equivalent to quad_out_of_scope but uses the owned
-                        // bitmap so we don't borrow self across the iterator.
                         let term_out = |t: &SeleneRdfTerm| match t {
-                            SeleneRdfTerm::Node(id) => !scope_cloned.contains(id.0 as u32),
+                            SeleneRdfTerm::Node(id) => !scope.contains(id.0 as u32),
                             _ => false,
                         };
                         !(term_out(&q.subject) || term_out(&q.object))

@@ -265,10 +265,7 @@ pub(in crate::http) async fn import_rdf(
     let result =
         crate::ops::rdf::rdf_import(&state, &auth.0, format, params.graph.clone(), body).await?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::to_value(&result).unwrap()),
-    ))
+    Ok((StatusCode::CREATED, Json(result)))
 }
 
 // -- SPARQL Protocol endpoint ------------------------------------------------
@@ -329,21 +326,25 @@ fn resolve_sparql_format(
 /// per the W3C SPARQL 1.1 Service Description spec.
 pub(in crate::http) async fn sparql_get(
     State(state): State<Arc<ServerState>>,
-    auth: HttpAuth,
+    auth: crate::http::auth::OptionalHttpAuth,
     headers: axum::http::HeaderMap,
     Query(params): Query<SparqlQueryParams>,
 ) -> Result<axum::response::Response, HttpError> {
-    // Service Description needs no auth — it describes the endpoint, not data.
+    // Service Description needs no auth — it describes the endpoint, not
+    // data — so we accept an optional auth extractor here. Queries still
+    // require a bound AuthContext (same shape as the pre-1.3.0 handler).
     if params.query.is_none() {
         return Ok(sparql_service_description(&state));
     }
+
+    let auth_ctx = auth.0.ok_or(HttpError(OpError::AuthDenied))?;
 
     let query_str = params.query.as_deref().unwrap();
     let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let format = resolve_sparql_format(params.format.as_deref(), accept);
-    execute_sparql_handler(&state, &auth.0, query_str, format)
+    execute_sparql_handler(&state, &auth_ctx, query_str, format)
 }
 
 /// `POST /sparql`

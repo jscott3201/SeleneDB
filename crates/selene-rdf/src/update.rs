@@ -54,19 +54,26 @@ pub struct UpdateResult {
 /// Execute a SPARQL Update against a `SharedGraph` and publish the new
 /// snapshot so subsequent reads observe the mutation.
 ///
-/// This is the entry point server code should use; it drives the update
-/// under the `SharedGraph` inner write lock and then calls
-/// `publish_snapshot` so `load_snapshot` and the CSR cache re-emit the
-/// updated state. The returned `Vec<Change>` is currently empty because
-/// SPARQL Update's compound operations (`DELETE-INSERT-WHERE`, edge
-/// reifier fixups) do not round-trip through `TrackedMutation` — capturing
-/// them requires re-plumbing `apply_insert_data`/`apply_delete_data` to
-/// emit `Change` records, which is a non-trivial follow-up tracked in the
-/// deferred-work list. Until then the caller gets the updated snapshot
-/// (visible to all readers) but the WAL does not see the individual
-/// triples; this is strictly better than the pre-1.3.0 state, which also
-/// bypassed WAL and additionally had no authz, no replica check, and no
-/// snapshot publish path guarantees.
+/// # Durability caveat
+///
+/// The returned `Vec<Change>` is currently **always empty**. The in-memory
+/// graph is updated and `publish_snapshot` makes the new state visible to
+/// all readers, but WAL / changelog / version-store consumers do **not**
+/// see these writes — and therefore SPARQL Update mutations do not
+/// replicate, do not survive a process restart, and do not appear in
+/// temporal queries. Callers that rely on `persist_or_die` for durability
+/// (as `ops::rdf::sparql_update` does) are passing an empty changeset; the
+/// call is a no-op for WAL consumers until this is addressed.
+///
+/// The fix requires re-plumbing `apply_insert_data` / `apply_delete_data`
+/// (and the compound `DELETE-INSERT-WHERE` path) to emit `Change` records
+/// through `TrackedMutation`. This is tracked as deferred work and is the
+/// last step to bring SPARQL Update to parity with GQL mutations.
+///
+/// This entry point is still strictly better than the pre-1.3.0 handler,
+/// which bypassed authz, replica checks, and the snapshot publish path —
+/// so it is safe to ship with the durability caveat documented, and
+/// `ops::rdf::sparql_update` gates it to admin-only for that reason.
 pub fn execute_update_shared(
     shared: &selene_graph::SharedGraph,
     namespace: &RdfNamespace,

@@ -97,20 +97,29 @@ pub fn edge_to_quads(graph: &SeleneGraph, edge_id: EdgeId, ns: &RdfNamespace) ->
     let Some(edge) = graph.get_edge(edge_id) else {
         return Vec::new();
     };
+    let mut quads = Vec::new();
+    emit_edge_quads(&mut quads, edge, ns);
+    quads
+}
 
+/// Emit a single edge's quads into an existing buffer using an already-
+/// fetched [`selene_graph::EdgeRef`]. Factored out so callers that
+/// pre-fetch the edge (scope filtering, bulk iteration) avoid the double
+/// `get_edge` lookup the old `edge_to_quads` path incurred.
+fn emit_edge_quads(quads: &mut Vec<Quad>, edge: selene_graph::EdgeRef<'_>, ns: &RdfNamespace) {
     let source_uri = ns.node_uri(edge.source);
     let target_uri = ns.node_uri(edge.target);
     let label_str = edge.label.as_str();
     let rel_uri = ns.rel_uri(label_str);
-    let edge_uri = ns.edge_uri(edge_id);
+    let edge_uri = ns.edge_uri(edge.id);
 
     // Base relationship triple (always emitted).
-    let mut quads = vec![Quad::new(
+    quads.push(Quad::new(
         source_uri.clone(),
         rel_uri.clone(),
         target_uri.clone(),
         GraphName::DefaultGraph,
-    )];
+    ));
 
     // Edge identity + property quads only when the edge carries properties.
     if !edge.properties.is_empty() {
@@ -134,11 +143,9 @@ pub fn edge_to_quads(graph: &SeleneGraph, edge_id: EdgeId, ns: &RdfNamespace) ->
         ));
 
         for (key, value) in edge.properties.iter() {
-            emit_property_quads(&mut quads, &edge_uri, &ns.prop_uri(key.as_str()), value);
+            emit_property_quads(quads, &edge_uri, &ns.prop_uri(key.as_str()), value);
         }
     }
-
-    quads
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +189,16 @@ pub fn graph_to_quads_scoped(
         quads.extend(node_to_quads(graph, node_id, ns));
     }
 
+    // Fetch each edge once via `get_edge`, check scope, then emit quads
+    // from the borrowed ref — avoids the pre-fix pattern where we called
+    // `get_edge` for the scope check and then `edge_to_quads` looked the
+    // same edge up again.
     for edge_id in graph.all_edge_ids() {
-        if let Some(edge) = graph.get_edge(edge_id)
-            && in_scope(edge.source)
-            && in_scope(edge.target)
-        {
-            quads.extend(edge_to_quads(graph, edge_id, ns));
+        let Some(edge) = graph.get_edge(edge_id) else {
+            continue;
+        };
+        if in_scope(edge.source) && in_scope(edge.target) {
+            emit_edge_quads(&mut quads, edge, ns);
         }
     }
 

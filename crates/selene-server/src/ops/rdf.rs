@@ -77,6 +77,46 @@ fn reject_if_replica(state: &ServerState) -> Result<(), OpError> {
     }
 }
 
+/// Translate an `RdfError` into an `OpError` with the right classification.
+///
+/// Client-caused failures (syntax, oversize body, unknown format / namespace)
+/// surface as 4xx via `InvalidRequest` / `ResourcesExhausted`; only genuinely
+/// unexpected failures flow through `Internal` (HTTP 500). The previous path
+/// bucketed everything through `GraphError::Other` + `graph_err` which
+/// turned every error into 500, hiding client-side problems.
+fn map_rdf_error(e: selene_rdf::RdfError) -> OpError {
+    use selene_rdf::RdfError;
+    match e {
+        RdfError::Parse(msg) => OpError::InvalidRequest(format!("RDF parse error: {msg}")),
+        RdfError::Namespace(msg) => OpError::InvalidRequest(format!("RDF namespace: {msg}")),
+        RdfError::Unsupported(msg) => OpError::InvalidRequest(format!("RDF unsupported: {msg}")),
+        RdfError::TooManyQuads(limit) => {
+            OpError::ResourcesExhausted(format!("RDF import exceeds limit of {limit} quads"))
+        }
+        RdfError::Graph(ge) => super::graph_err(ge),
+        RdfError::Serialize(msg) => OpError::Internal(format!("RDF serialize: {msg}")),
+    }
+}
+
+/// Translate a SPARQL Update `UpdateError` into an `OpError` with the
+/// appropriate classification. Parse / unsupported / invalid-quad errors are
+/// client-caused; `NodeNotFound` is a 404; `Graph` falls through the shared
+/// graph-error mapper.
+fn map_sparql_update_error(e: selene_rdf::update::UpdateError) -> OpError {
+    use selene_rdf::update::UpdateError;
+    match e {
+        UpdateError::Parse(msg) => OpError::QueryError(format!("SPARQL parse error: {msg}")),
+        UpdateError::Unsupported(msg) => {
+            OpError::InvalidRequest(format!("SPARQL unsupported: {msg}"))
+        }
+        UpdateError::InvalidQuad(msg) => {
+            OpError::InvalidRequest(format!("SPARQL invalid quad: {msg}"))
+        }
+        UpdateError::NodeNotFound(id) => OpError::NotFound { entity: "node", id },
+        UpdateError::Graph(ge) => super::graph_err(ge),
+    }
+}
+
 fn require_admin_for_write(auth: &AuthContext) -> Result<(), OpError> {
     if !auth.is_admin() {
         // Scoped RDF writes require triple-level mutation filtering which
@@ -196,10 +236,7 @@ pub async fn rdf_import(
     let (import_result, changes) = st
         .mutation_batcher
         .submit(
-            move || -> Result<
-                (selene_rdf::RdfImportResult, Vec<Change>),
-                selene_graph::GraphError,
-            > {
+            move || -> Result<(selene_rdf::RdfImportResult, Vec<Change>), OpError> {
                 let mut ontology = ontology_arc.write();
                 selene_rdf::import::import_rdf_with_changes(
                     &body,
@@ -209,12 +246,11 @@ pub async fn rdf_import(
                     &ns,
                     &mut ontology,
                 )
-                .map_err(|e| selene_graph::error::GraphError::Other(e.to_string()))
+                .map_err(map_rdf_error)
             },
         )
         .await
-        .map_err(super::graph_err)?
-        .map_err(super::graph_err)?;
+        .map_err(super::graph_err)??;
 
     persist_or_die(state, &changes);
 
@@ -247,17 +283,13 @@ pub async fn sparql_update(
     let (result, changes) = st
         .mutation_batcher
         .submit(
-            move || -> Result<
-                (selene_rdf::update::UpdateResult, Vec<Change>),
-                selene_graph::GraphError,
-            > {
+            move || -> Result<(selene_rdf::update::UpdateResult, Vec<Change>), OpError> {
                 selene_rdf::update::execute_update_shared(&graph, &ns, &update_owned)
-                    .map_err(|e| selene_graph::error::GraphError::Other(e.to_string()))
+                    .map_err(map_sparql_update_error)
             },
         )
         .await
-        .map_err(super::graph_err)?
-        .map_err(super::graph_err)?;
+        .map_err(super::graph_err)??;
 
     // See execute_update_shared: the returned Vec<Change> is currently
     // empty because SPARQL Update's compound ops don't round-trip through
