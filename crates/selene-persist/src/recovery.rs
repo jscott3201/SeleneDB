@@ -36,8 +36,10 @@ pub struct RecoveryResult {
     /// Extra snapshot sections (pre-deserialized bytes). Section 5 = version store.
     pub extra_sections: Vec<Vec<u8>>,
     /// Schema mutations drained from the WAL (post-snapshot). The caller
-    /// applies these to the rebuilt graph's schema registry in order —
-    /// see `bootstrap::apply_recovered_schema_mutations`.
+    /// applies these to the rebuilt graph's schema registry in WAL order
+    /// (via `selene_graph::change_applier::apply_schema_mutation`) after
+    /// loading the snapshot baseline. See `selene_server::bootstrap` for
+    /// the replay site.
     pub schema_mutations: Vec<selene_core::changeset::SchemaMutation>,
 }
 

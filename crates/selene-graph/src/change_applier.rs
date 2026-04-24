@@ -90,31 +90,59 @@ pub fn apply_changes(graph: &mut SeleneGraph, changes: &[Change], _origin: Origi
 /// WAL-replay mismatch (e.g. a schema that was already registered
 /// before the WAL's replay window) is not a hard failure; the goal is
 /// eventual convergence with the live state.
+///
+/// Node schema registration rebuilds property + composite indexes on
+/// success, matching `selene_server::ops::schema::register_node_schema`.
+/// Without this, a replica (or a recovery replay) could end up with a
+/// schema that declares an indexed property but no index rows for
+/// existing nodes until the next snapshot restore. Edge schema changes
+/// and unregistrations don't need an index rebuild — the property/
+/// composite indexes are keyed by node label, not edge label.
 pub fn apply_schema_mutation(graph: &mut SeleneGraph, op: &selene_core::changeset::SchemaMutation) {
     use selene_core::changeset::SchemaMutation;
-    let schema = graph.schema_mut();
-    match op {
-        SchemaMutation::RegisterNode(ns) => {
-            if let Err(e) = schema.register_node_schema_if_new((**ns).clone()) {
-                tracing::warn!(error = %e, "schema replay: register_node_schema_if_new failed");
+    let mut rebuild_node_indexes = false;
+    {
+        let schema = graph.schema_mut();
+        match op {
+            SchemaMutation::RegisterNode(ns) => {
+                match schema.register_node_schema_if_new((**ns).clone()) {
+                    Ok(true) => rebuild_node_indexes = true,
+                    Ok(false) => {} // already present, nothing to rebuild
+                    Err(e) => {
+                        tracing::warn!(error = %e, "schema replay: register_node_schema_if_new failed");
+                    }
+                }
+            }
+            SchemaMutation::RegisterNodeForce(ns) => {
+                match schema.register_node_schema((**ns).clone()) {
+                    Ok(_replaced) => rebuild_node_indexes = true,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "schema replay: register_node_schema (force) failed");
+                    }
+                }
+            }
+            SchemaMutation::RegisterEdge(es) => {
+                if let Err(e) = schema.register_edge_schema_if_new((**es).clone()) {
+                    tracing::warn!(error = %e, "schema replay: register_edge_schema_if_new failed");
+                }
+            }
+            SchemaMutation::UnregisterNode(label) => {
+                // Unregistering a node schema can invalidate property
+                // index rows keyed to that schema's dictionary-encoded
+                // columns; rebuild to stay consistent with the live
+                // server's behavior in `ops::schema::unregister_*`.
+                if schema.unregister_node_schema(label.as_str()).is_some() {
+                    rebuild_node_indexes = true;
+                }
+            }
+            SchemaMutation::UnregisterEdge(label) => {
+                schema.unregister_edge_schema(label.as_str());
             }
         }
-        SchemaMutation::RegisterNodeForce(ns) => {
-            if let Err(e) = schema.register_node_schema((**ns).clone()) {
-                tracing::warn!(error = %e, "schema replay: register_node_schema (force) failed");
-            }
-        }
-        SchemaMutation::RegisterEdge(es) => {
-            if let Err(e) = schema.register_edge_schema_if_new((**es).clone()) {
-                tracing::warn!(error = %e, "schema replay: register_edge_schema_if_new failed");
-            }
-        }
-        SchemaMutation::UnregisterNode(label) => {
-            schema.unregister_node_schema(label.as_str());
-        }
-        SchemaMutation::UnregisterEdge(label) => {
-            schema.unregister_edge_schema(label.as_str());
-        }
+    }
+    if rebuild_node_indexes {
+        graph.build_property_indexes();
+        graph.build_composite_indexes();
     }
 }
 

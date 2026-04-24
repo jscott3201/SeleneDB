@@ -12,10 +12,12 @@ use crate::bootstrap::ServerState;
 /// Since 1.3.0, schema mutations are first-class `Change::SchemaMutation`
 /// records that flow through the same WAL coalescer as node and edge
 /// mutations. `persist_or_die` blocks until the WAL append is confirmed,
-/// so when this function returns `Ok` the mutation is durable — no more
-/// full `take_snapshot` per schema write, and no more
-/// `schema_persist_pending` flag to track partial failures. Recovery
-/// replays these records via `change_applier::apply_schema_mutation`.
+/// so when this function returns the mutation is durable — no more full
+/// `take_snapshot` per schema write, and no more `schema_persist_pending`
+/// flag to track partial failures. The function is infallible for the
+/// same reason `persist_or_die` is: a WAL append failure aborts the
+/// process rather than being surfaced to the caller. Recovery replays
+/// these records via `change_applier::apply_schema_mutation`.
 fn persist_schema_change(state: &ServerState, op: selene_core::changeset::SchemaMutation) {
     super::persist_or_die(state, &[selene_core::changeset::Change::SchemaMutation(op)]);
 }

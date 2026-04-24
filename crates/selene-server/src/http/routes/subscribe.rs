@@ -213,6 +213,14 @@ pub(in crate::http) async fn subscribe(
 /// the two transports removes the transport-dependent visibility
 /// discrepancy.
 fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> bool {
+    // Schema mutations never ride the SSE data-plane stream — not for
+    // scoped principals and not for admins either. Admins observe DDL
+    // through the dedicated audit channel, not through /subscribe. This
+    // check runs *before* the admin fast-path below so schema events
+    // don't leak to admin subscribers.
+    if matches!(change, Change::SchemaMutation(_)) {
+        return false;
+    }
     let Some(scope) = scope else {
         return true;
     };
@@ -230,9 +238,7 @@ fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> b
         | Change::EdgePropertyRemoved { source, target, .. } => {
             in_scope(source.0) && in_scope(target.0)
         }
-        // Schema mutations are DDL events — not visible to scoped
-        // principals. Admins see them through the DDL audit path, not
-        // through data-plane subscriptions.
+        // Handled above — kept for exhaustiveness.
         Change::SchemaMutation(_) => false,
     }
 }
