@@ -102,11 +102,16 @@ fn validate_mcp_bearer(
     };
 
     // 1. Try JWT validation via OAuthTokenService (returns per-principal AuthContext).
+    //    Needs the vault graph for the principal lookup + main graph for scope.
     if let Some(oauth_svc) = state
         .services
         .get::<crate::http::mcp::oauth::OAuthService>()
+        && let Ok(vault_graph) = crate::auth::vault_graph_for_auth(state)
     {
-        match oauth_svc.token_service.validate(bearer_token, &state.graph) {
+        match oauth_svc
+            .token_service
+            .validate(bearer_token, vault_graph, &state.graph)
+        {
             Ok(auth_ctx) => return Ok(auth_ctx),
             Err(crate::auth::oauth::OAuthError::TokenExpired) => {
                 return Err(AuthFailure::Expired);

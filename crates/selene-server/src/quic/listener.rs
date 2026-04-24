@@ -161,7 +161,12 @@ async fn perform_handshake(
     let req: HandshakeRequest = deserialize_payload(&frame.payload, frame.flags)
         .map_err(|e| anyhow::anyhow!("handshake deserialize: {e}"))?;
 
+    let vault_graph = crate::auth::vault_graph_for_auth(&state).map_err(|e| {
+        tracing::warn!("authentication failed: vault unavailable: {e}");
+        anyhow::anyhow!("authentication failed: {e}")
+    })?;
     let auth_ctx = handshake::authenticate(
+        vault_graph,
         &state.graph,
         &req.auth_type,
         &req.identity,

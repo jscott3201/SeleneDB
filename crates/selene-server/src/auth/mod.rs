@@ -17,6 +17,26 @@ pub use engine::AuthEngine;
 pub use handshake::AuthContext;
 pub use oauth::{OAuthError, OAuthTokenService};
 
+/// Borrow the vault's graph for principal lookup during authentication.
+///
+/// Since 1.3.0 all non-admin authentication resolves principals out of the
+/// vault graph (see `auth::reserved` for the escalation path this closes).
+/// Returning `VaultUnavailable` keeps the caller fail-closed: a production
+/// deployment without a vault cannot authenticate non-admin users at all.
+pub(crate) fn vault_graph_for_auth(
+    state: &crate::bootstrap::ServerState,
+) -> Result<&selene_graph::SharedGraph, handshake::AuthError> {
+    state
+        .services
+        .get::<crate::vault::VaultService>()
+        .map(|svc| &svc.handle.graph)
+        .ok_or_else(|| {
+            handshake::AuthError::VaultUnavailable(
+                "vault not configured; non-admin authentication requires a vault".into(),
+            )
+        })
+}
+
 /// Roles recognized by the default Cedar policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Role {

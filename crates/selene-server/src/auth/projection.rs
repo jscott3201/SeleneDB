@@ -72,18 +72,43 @@ pub fn resolve_scope(graph: &SeleneGraph, roots: &[NodeId]) -> RoaringBitmap {
     scope
 }
 
-/// Find all `scoped_to` targets for a principal node.
-pub fn scope_roots(graph: &SeleneGraph, principal_id: NodeId) -> Vec<NodeId> {
-    graph
-        .outgoing(principal_id)
+/// Read a principal's scope roots from its `scope_root_ids` property.
+///
+/// Scope roots are stored as a `List<Int>` property on the principal node
+/// in the vault graph. Each integer is a main-graph `NodeId` that acts as
+/// the containment root for this principal's authority; the caller then
+/// passes the returned `Vec<NodeId>` into [`resolve_scope`] against the
+/// main graph to expand into a full access bitmap.
+///
+/// Prior to 1.3.0, scope roots were represented by `[:scoped_to]` edges
+/// inside the main graph from the principal node to each root. That model
+/// allowed any writer with `entity:create` on an in-scope node to forge a
+/// principal + scoped_to edge and escalate; moving the data to a property
+/// on a vault-only principal closes that escalation. See finding 11018.
+///
+/// Returns an empty `Vec` if the principal has no `scope_root_ids`, if the
+/// node is missing, or if the property exists but is not a list of integers
+/// (treated as "no scope" rather than erroring — the caller will surface
+/// an empty scope as access denied at enforcement time).
+pub fn scope_roots(vault_graph: &SeleneGraph, principal_id: NodeId) -> Vec<NodeId> {
+    use selene_core::Value;
+
+    let Some(node) = vault_graph.get_node(principal_id) else {
+        return Vec::new();
+    };
+    let Some(prop) = node.property("scope_root_ids") else {
+        return Vec::new();
+    };
+    let Value::List(items) = prop else {
+        return Vec::new();
+    };
+
+    items
         .iter()
-        .filter_map(|&edge_id| {
-            let edge = graph.get_edge(edge_id)?;
-            if edge.label.as_str() == "scoped_to" {
-                Some(edge.target)
-            } else {
-                None
-            }
+        .filter_map(|v| match v {
+            Value::Int(i) if *i >= 0 => Some(NodeId(*i as u64)),
+            Value::UInt(u) => Some(NodeId(*u)),
+            _ => None,
         })
         .collect()
 }

@@ -1011,7 +1011,19 @@ fn handle_auth_code_grant(
     }
 
     // Authenticate the client.
+    let vault_graph = match crate::auth::vault_graph_for_auth(state) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(client_id = %req.client_id, error = %e, "OAuth auth_code authentication failed: vault unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authentication service unavailable",
+            );
+        }
+    };
     let auth = match handshake::authenticate(
+        vault_graph,
         &state.graph,
         "token",
         &req.client_id,
@@ -1086,7 +1098,19 @@ fn handle_client_credentials_grant(
         );
     }
 
+    let vault_graph = match crate::auth::vault_graph_for_auth(state) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(client_id = %req.client_id, error = %e, "OAuth client_credentials authentication failed: vault unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authentication service unavailable",
+            );
+        }
+    };
     let auth = match handshake::authenticate(
+        vault_graph,
         &state.graph,
         "token",
         &req.client_id,
@@ -1205,7 +1229,19 @@ fn handle_refresh_token_grant(
     }
 
     // Authenticate client before allowing refresh.
+    let vault_graph = match crate::auth::vault_graph_for_auth(state) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(client_id = %req.client_id, error = %e, "OAuth refresh_token authentication failed: vault unavailable");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "authentication service unavailable",
+            );
+        }
+    };
     match handshake::authenticate(
+        vault_graph,
         &state.graph,
         "token",
         &req.client_id,
@@ -1226,7 +1262,7 @@ fn handle_refresh_token_grant(
         }
     }
 
-    match token_svc.refresh(&req.refresh_token, &state.graph) {
+    match token_svc.refresh(&req.refresh_token, vault_graph) {
         Ok((access_token, refresh_token)) => (
             StatusCode::OK,
             Json(TokenResponse {

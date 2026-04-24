@@ -151,7 +151,17 @@ where
                     return Err(AuthRejection::RateLimited(wait_secs));
                 }
 
+                let vault_graph = match crate::auth::vault_graph_for_auth(&state) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(identity = %identity, error = %e, "auth failed: vault unavailable");
+                        return Err(AuthRejection::AuthFailed(
+                            "authentication unavailable".to_string(),
+                        ));
+                    }
+                };
                 match handshake::authenticate(
+                    vault_graph,
                     &state.graph,
                     "token",
                     identity,
