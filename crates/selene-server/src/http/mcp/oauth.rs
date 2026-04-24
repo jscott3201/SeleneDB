@@ -361,6 +361,16 @@ struct RegisterResponse {
 fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
     let parsed = url::Url::parse(uri).map_err(|_| "redirect_uri is not a valid absolute URL")?;
 
+    // RFC 6749 §3.1.2: redirect URIs MUST NOT include a fragment. The authz
+    // server appends the authorization code via `{redirect}?code=...` string
+    // concatenation (see `oauth_authorize`), so a fragment in the stored URI
+    // would place the query inside the fragment component
+    // (`https://cb#x?code=...`), silently breaking the callback and
+    // potentially sending the code to the wrong place.
+    if parsed.fragment().is_some() {
+        return Err("redirect_uri must not contain a fragment (RFC 6749 §3.1.2)");
+    }
+
     match parsed.scheme() {
         "https" => {
             if parsed.host_str().is_some() {
@@ -1360,6 +1370,16 @@ mod tests {
         assert!(validate_redirect_uri("not a url").is_err());
         assert!(validate_redirect_uri("").is_err());
         assert!(validate_redirect_uri("://bad").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_fragment() {
+        // RFC 6749 §3.1.2 — fragment would be poisoned by the `?code=...`
+        // that the authz endpoint appends via string concatenation, sending
+        // the auth code to the wrong component of the URL.
+        assert!(validate_redirect_uri("https://example.com/cb#frag").is_err());
+        assert!(validate_redirect_uri("http://localhost/cb#x").is_err());
+        assert!(validate_redirect_uri("https://example.com/cb#").is_err());
     }
 
     #[test]
