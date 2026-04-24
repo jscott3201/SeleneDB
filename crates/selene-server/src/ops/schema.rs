@@ -24,13 +24,46 @@ use crate::bootstrap::ServerState;
 ///
 /// Errors are propagated so the caller can surface the durability
 /// failure to the client rather than silently confirming the mutation.
+/// On failure the `schema_persist_pending` flag on [`ServerState`]
+/// stays set so every subsequent schema call — including idempotent
+/// early-return paths — will retry the snapshot before reporting
+/// success.
 fn persist_schema_change(state: &ServerState, op: &'static str) -> Result<(), OpError> {
-    crate::tasks::take_snapshot(state).map_err(|e| {
-        tracing::error!(error = %e, op, "schema snapshot failed — mutation may be lost on restart");
-        OpError::Internal(format!(
-            "schema mutation '{op}' succeeded in memory but failed to persist: {e}"
-        ))
-    })
+    state
+        .schema_persist_pending
+        .store(true, std::sync::atomic::Ordering::Release);
+    match crate::tasks::take_snapshot(state) {
+        Ok(()) => {
+            state
+                .schema_persist_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, op, "schema snapshot failed — mutation may be lost on restart");
+            Err(OpError::Internal(format!(
+                "schema mutation '{op}' succeeded in memory but failed to persist: {e}"
+            )))
+        }
+    }
+}
+
+/// Drain any pending schema persistence before an idempotent early-return
+/// path reports success. When a previous schema mutation's snapshot
+/// failed, the `schema_persist_pending` flag stays set until a later call
+/// either retries the snapshot here or performs a fresh mutation that
+/// itself successfully persists. Without this drain, a caller who retries
+/// a registration that looks like `AlreadyExistsEqual` (or an
+/// unregistration that looks like `NotFound`) would get `Ok(...)` while
+/// the schema state is still only in memory.
+fn drain_pending_schema_persistence(state: &ServerState) -> Result<(), OpError> {
+    if state
+        .schema_persist_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        persist_schema_change(state, "drain_pending")?;
+    }
+    Ok(())
 }
 
 /// Outcome of an idempotent schema registration. Lets callers distinguish
@@ -199,6 +232,8 @@ pub fn register_node_schema(
             })?;
             if a == b {
                 tracing::debug!(label, "create_schema no-op: proposed shape equals existing");
+                drop(guard);
+                drain_pending_schema_persistence(state)?;
                 return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
             }
             return Err(OpError::InvalidRequest(format!(
@@ -302,6 +337,8 @@ pub fn register_edge_schema(
                     label,
                     "create_schema no-op: edge proposed shape equals existing"
                 );
+                drop(guard);
+                drain_pending_schema_persistence(state)?;
                 return Ok(SchemaRegisterOutcome::AlreadyExistsEqual);
             }
             // There is no `update_edge_schema` MCP tool; point operators
@@ -353,6 +390,10 @@ pub fn unregister_node_schema(
         tracing::info!(label, "node schema unregistered");
         Ok(())
     } else {
+        // Idempotent "not found" path still has to drain pending
+        // persistence so a retry of an earlier-failed unregister cannot
+        // mask a missing snapshot.
+        drain_pending_schema_persistence(state)?;
         Err(OpError::NotFound {
             entity: "node_schema",
             id: 0,
@@ -384,6 +425,7 @@ pub fn unregister_edge_schema(
         tracing::info!(label, "edge schema unregistered");
         Ok(())
     } else {
+        drain_pending_schema_persistence(state)?;
         Err(OpError::NotFound {
             entity: "edge_schema",
             id: 0,
@@ -455,6 +497,11 @@ pub fn import_pack(
     state.graph.publish_snapshot();
     if nodes_registered > 0 || edges_registered > 0 {
         persist_schema_change(state, "import_pack")?;
+    } else {
+        // Pure-noop pack import (every schema already present and equal):
+        // still drain any pending persistence so a prior failed schema
+        // snapshot cannot hide behind a no-op follow-up call.
+        drain_pending_schema_persistence(state)?;
     }
 
     tracing::info!(

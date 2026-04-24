@@ -167,20 +167,39 @@ pub(in crate::http) async fn subscribe(
 }
 
 /// Return true when the change is in the caller's scope (or no scope
-/// filter applies, i.e. admin). Scope is determined by the subject node
-/// of the change; for `EdgeCreated` / `EdgeDeleted` the source endpoint
-/// stands in for the subject (matching `Change::node_id()` semantics).
+/// filter applies, i.e. admin).
+///
+/// Node events (`NodeCreated`, `NodeDeleted`, `Property*`, `Label*`) are
+/// in-scope iff their subject node is in the bitmap.
+///
+/// Edge events (`EdgeCreated`, `EdgeDeleted`, `EdgeProperty*`) require
+/// **both** endpoints in scope. This is the same policy the RDF
+/// scope-filtered exporter applies (see
+/// `selene_rdf::mapping::graph_to_quads_scoped`) and tightens the
+/// WebSocket subscription path to match — pre-1.3.0 the WS variant
+/// accepted edges where either endpoint was in scope, which leaked
+/// out-of-scope node identifiers via relationship visibility. Aligning
+/// the two transports removes the transport-dependent visibility
+/// discrepancy.
 fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> bool {
     let Some(scope) = scope else {
         return true;
     };
-    let Some(nid) = change.node_id() else {
-        // Changes with no identifiable subject (structural-only events)
-        // fall through to the filter-level decisions; there's nothing to
-        // scope-check here.
-        return true;
-    };
-    scope.contains(nid as u32)
+    let in_scope = |nid: u64| scope.contains(nid as u32);
+    match change {
+        Change::NodeCreated { node_id }
+        | Change::NodeDeleted { node_id, .. }
+        | Change::PropertySet { node_id, .. }
+        | Change::PropertyRemoved { node_id, .. }
+        | Change::LabelAdded { node_id, .. }
+        | Change::LabelRemoved { node_id, .. } => in_scope(node_id.0),
+        Change::EdgeCreated { source, target, .. }
+        | Change::EdgeDeleted { source, target, .. }
+        | Change::EdgePropertySet { source, target, .. }
+        | Change::EdgePropertyRemoved { source, target, .. } => {
+            in_scope(source.0) && in_scope(target.0)
+        }
+    }
 }
 
 fn matches_filter(
@@ -327,7 +346,7 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
 mod tests {
     use super::*;
     use selene_core::changeset::Change;
-    use selene_core::{IStr, LabelSet, NodeId, Value};
+    use selene_core::{IStr, NodeId, Value};
 
     fn property_set(node: u64) -> Change {
         Change::PropertySet {
@@ -367,25 +386,42 @@ mod tests {
     }
 
     #[test]
-    fn change_in_scope_edge_created_uses_source() {
+    fn change_in_scope_edge_requires_both_endpoints() {
+        // 1.3.0 policy: an edge event is in-scope iff BOTH endpoints
+        // are in the bitmap. Pre-1.3.0 WS accepted "either endpoint"
+        // and SSE accepted "source only"; both transports were
+        // tightened and aligned to this stricter rule (matches the
+        // RDF scope-filtered exporter).
         let mut scope = roaring::RoaringBitmap::new();
         scope.insert(10);
-        let from_in_scope = Change::EdgeCreated {
+        scope.insert(20);
+        let both_in = Change::EdgeCreated {
             edge_id: selene_core::EdgeId(1),
+            source: NodeId(10),
+            target: NodeId(20),
+            label: IStr::new("rel"),
+        };
+        let source_in_only = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(2),
             source: NodeId(10),
             target: NodeId(99),
             label: IStr::new("rel"),
         };
-        let from_out_of_scope = Change::EdgeCreated {
-            edge_id: selene_core::EdgeId(2),
+        let target_in_only = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(3),
             source: NodeId(99),
             target: NodeId(10),
             label: IStr::new("rel"),
         };
-        // `Change::node_id` returns the source for edge events; scope
-        // is keyed on the change's subject node.
-        assert!(change_in_scope(&from_in_scope, Some(&scope)));
-        assert!(!change_in_scope(&from_out_of_scope, Some(&scope)));
-        let _ = LabelSet::from_strs(&["_"]); // keep import alive across conditional cfg
+        let neither = Change::EdgeCreated {
+            edge_id: selene_core::EdgeId(4),
+            source: NodeId(98),
+            target: NodeId(99),
+            label: IStr::new("rel"),
+        };
+        assert!(change_in_scope(&both_in, Some(&scope)));
+        assert!(!change_in_scope(&source_in_only, Some(&scope)));
+        assert!(!change_in_scope(&target_in_only, Some(&scope)));
+        assert!(!change_in_scope(&neither, Some(&scope)));
     }
 }

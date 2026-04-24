@@ -338,7 +338,11 @@ fn filter_changes(
                 source,
                 target,
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                // Both endpoints must be in scope (aligns with SSE +
+                // RDF exporter). Pre-1.3.0 this accepted "either
+                // endpoint in scope", which leaked out-of-scope node
+                // identifiers via relationship visibility.
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 if let Some(ref wanted) = filter.edge_types
@@ -359,7 +363,7 @@ fn filter_changes(
                 source,
                 target,
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 if let Some(ref wanted) = filter.edge_types
@@ -386,7 +390,7 @@ fn filter_changes(
                 target,
                 ..
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 result.push(ChangeEntry {
