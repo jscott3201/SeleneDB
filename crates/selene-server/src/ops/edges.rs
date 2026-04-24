@@ -5,6 +5,7 @@ use selene_wire::dto::entity::EdgeDto;
 
 use super::{OpError, edge_to_dto, graph_err, persist_or_die, require_in_scope};
 use crate::auth::handshake::AuthContext;
+use crate::auth::reserved::reject_reserved_edge_label;
 use crate::bootstrap::ServerState;
 
 /// Fetch an edge's label and promote dictionary-encoded string properties.
@@ -52,6 +53,7 @@ pub fn create_edge(
     upsert: bool,
 ) -> Result<EdgeDto, OpError> {
     let auth = super::refresh_scope_if_stale(state, auth);
+    reject_reserved_edge_label(label.as_str())?;
     require_in_scope(&auth, NodeId(source))?;
     require_in_scope(&auth, NodeId(target))?;
 

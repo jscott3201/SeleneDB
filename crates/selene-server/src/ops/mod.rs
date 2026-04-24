@@ -52,6 +52,15 @@ pub enum OpError {
     #[error("access denied")]
     AuthDenied,
 
+    /// The caller is authenticated but the operation is forbidden with a
+    /// specific reason (e.g., reserved label/edge reservation). Maps to
+    /// HTTP 403 with the message preserved, and to GQLSTATUS `42501` in
+    /// the GQL surface. Distinct from `AuthDenied` (unit variant, no
+    /// message) so reserved-label rejections can surface their specific
+    /// cause while still signalling "forbidden" at the transport layer.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("schema violation: {0}")]
     SchemaViolation(String),
 
@@ -131,8 +140,14 @@ pub(crate) fn archive_old_values(
 
 /// Refresh the auth scope if the containment hierarchy has changed.
 ///
-/// Compares the graph's containment_generation against the auth context's
-/// scope_generation. Recomputes scope only when containment edges changed.
+/// Compares the main graph's containment_generation against the auth
+/// context's scope_generation. When stale, re-reads the principal's
+/// `scope_root_ids` from the vault and re-expands against the main graph.
+///
+/// Non-admin principals require a vault. If no vault is registered we log
+/// once and return the auth context unchanged — with an empty scope this
+/// fails closed at the next `require_in_scope` check rather than silently
+/// widening access.
 pub(crate) fn refresh_scope_if_stale(state: &ServerState, auth: &AuthContext) -> AuthContext {
     if auth.is_admin() {
         return auth.clone();
@@ -150,16 +165,39 @@ pub(crate) fn refresh_scope_if_stale(state: &ServerState, auth: &AuthContext) ->
         "refreshing stale auth scope"
     );
 
-    state.graph.read(|g| {
-        let roots = crate::auth::projection::scope_roots(g, auth.principal_node_id);
-        let scope = crate::auth::projection::resolve_scope(g, &roots);
-        AuthContext {
+    let Some(vault_svc) = state.services.get::<crate::vault::VaultService>() else {
+        // Fail closed: the previous implementation returned the prior
+        // AuthContext unchanged, which preserved whatever scope bitmap
+        // the principal last had and let subsequent ops succeed against
+        // a now-detached identity store. Drop the scope to empty and
+        // stamp the current containment generation so the next refresh
+        // still runs, and enforcement (`require_in_scope`) denies.
+        tracing::warn!(
+            principal = auth.principal_node_id.0,
+            "scope refresh requested for non-admin principal but vault is not configured; \
+             dropping scope to empty (fail-closed)"
+        );
+        return AuthContext {
             principal_node_id: auth.principal_node_id,
             role: auth.role,
-            scope,
+            scope: roaring::RoaringBitmap::new(),
             scope_generation: current_gen,
-        }
-    })
+        };
+    };
+
+    let scope = crate::auth::handshake::resolve_scope_two_graphs(
+        &vault_svc.handle.graph,
+        &state.graph,
+        auth.principal_node_id,
+        auth.role,
+    );
+
+    AuthContext {
+        principal_node_id: auth.principal_node_id,
+        role: auth.role,
+        scope,
+        scope_generation: current_gen,
+    }
 }
 
 /// Check that the target node is within the principal's authorization scope.
