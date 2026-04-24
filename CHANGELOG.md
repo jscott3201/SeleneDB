@@ -7,17 +7,197 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-24
+
+v1.3.0 is a **security + durability release**. A 2026-04-24 deep-dive review
+surfaced ten findings (four S1-critical, three S2-high, two S3-medium, one
+S4-low) that this release closes end-to-end, plus four follow-up items that
+bring the same level of rigor to the RDF / SPARQL / SSE / WAL paths. Eleven
+PRs (#70 — the MATCH-miss fix that originally lived in Unreleased — through
+#77) ship together.
+
+Upgrading in-place from 1.2.0 is supported. The boot-time migration moves
+legacy main-graph `:principal` nodes into the vault automatically and will
+**abort startup** if any remain — see "Identity & authentication" below.
+Check the per-section breaking notes for anything that touches your
+deployment.
+
+### Security — identity & authentication (PR #71, findings 11018 + 11019)
+
+- **Vault is the single source of truth for principals.** Pre-1.3.0
+  authentication resolved `:principal` nodes from the main graph while
+  admin management wrote them to the vault — the two stores drifted.
+  `auth::handshake::authenticate`, `OAuthTokenService::validate` / `refresh`,
+  and OAuth dynamic registration all now read and write the vault; scope
+  expands against the main-graph containment tree via a new
+  `handshake::resolve_scope_two_graphs` orchestrator.
+- **`scope_root_ids` property replaces `[:scoped_to]` edges.** Scope roots
+  are stored as a `List<UInt>` property on the vault principal. Main graph
+  no longer carries principal↔scope edges.
+- **Reserved labels / edges in the main graph.** `principal`, `api_key`,
+  `revoked_token`, `signing_key`, `audit_log` labels and the `scoped_to`
+  edge label are rejected unconditionally by `ops::nodes`, `ops::edges`,
+  and the GQL mutation AST scanner. This closes the privilege-escalation
+  path where a scoped operator could `INSERT (:principal {role: 'admin'})`
+  through generic CRUD or GQL.
+- **Boot-time migration.** Legacy main-graph `:principal` nodes are copied
+  into the vault (including any `[:scoped_to]` edges, translated into
+  `scope_root_ids`). Post-migration the main graph is verified to contain
+  zero `:principal` nodes — if any remain, startup aborts rather than
+  silently ship a split identity store.
+- **`OpError::Forbidden(String)`** new variant for "authenticated but this
+  resource is forbidden" cases (reserved-label rejection, scoped RDF
+  writes, etc.) — 403 with a preserved reason, distinct from the
+  reason-less `AuthDenied`.
+
+### Security — RDF / SPARQL (PR #72 + PR #76, findings 11020 / 11021 / 11022)
+
+- **Authz everywhere.** `/graph/rdf` and `/sparql` handlers previously
+  accepted `HttpAuth` and discarded it with `let _ = auth.0`. They now
+  route through `ops::rdf::{rdf_export, rdf_import, sparql_query,
+  sparql_update}` which enforce Cedar actions, scope filtering, replica
+  rejection on writes, and mutation-batcher persistence.
+- **Scope-filtered reads.** `selene_rdf::mapping::graph_to_quads_scoped`,
+  `export::export_graph_scoped`, and `sparql::execute_sparql_scoped` drop
+  quads whose subject or object refers to an out-of-scope node before the
+  serializer / SPARQL evaluator sees them. Ontology (schema metadata)
+  quads are shared and unfiltered — they describe types, not instance
+  data.
+- **Scoped SPARQL Update (PR #76).** SPARQL Update drops the 1.3.0 interim
+  admin-only gate. A new `selene_rdf::update::WriteScope` threads
+  per-mutation authorization; every write is checked before the mutation
+  is persisted. Out-of-scope writes return `Forbidden`. Creating new
+  top-level nodes via `INSERT DATA` and `CLEAR` / `DROP` remain admin-only
+  because the RDF model can't express a parent-in-scope binding for a new
+  subject.
+- **WAL-captured SPARQL Update mutations (PR #76).** `execute_update_shared`
+  now returns the real `Vec<Change>` from every `apply_*` function's
+  `TrackedMutation::commit` output; `ops::sparql_update` hands it to
+  `persist_or_die` so WAL, changelog, and version store see the writes
+  (pre-PR #76 the returned `Vec` was always empty and durability was by
+  snapshot only). `SharedGraph::check_containment_generation` is called
+  before publish so `[:contains]` edges via SPARQL still bump the scope
+  staleness counter.
+- **RDF import remains admin-only.** Scope-aware RDF import needs a
+  parent-binding mechanism in the RDF data model that this release does
+  not introduce; tracked as follow-up for 1.4.0.
+
+### Security — OAuth hardening (PR #73, findings 11024 + 11025)
+
+- **Dynamic registration is no longer open by default in production.** If
+  `dev_mode = false` and `[mcp] registration_token` is unset,
+  `/oauth/register` returns `503 temporarily_unavailable` — operators
+  must explicitly configure a token to enable registration. Dev mode
+  keeps the open-by-default behavior for loopback testing.
+- **Role cap: reader.** Dynamic registration can only issue `reader`
+  scope. Requests for `service` / `operator` / `admin` / `device` return
+  `400 invalid_scope` — elevated credentials have to come from an admin
+  via `create_principal`.
+- **Structural redirect_uri validation.** A new `validate_redirect_uri`
+  (backed by the `url` crate) enforces: https with any host OK, http only
+  with exact loopback hosts (`localhost`, `127.0.0.1`, `[::1]`, `::1`),
+  no fragments (RFC 6749 §3.1.2), no other schemes. Closes the
+  `http://localhost.attacker.tld/cb` prefix-confusion attack.
+- **`url = "2"`** promoted to a direct dep on `selene-server` (was
+  transitive).
+
+### Security — SSE / WS / schema durability / WS cap (PR #74 + PR #75)
+
+- **SSE `/subscribe` authz (finding 11023, PR #74).** The handler now
+  requires `Action::ChangelogSubscribe` and scope-filters emitted
+  events. Pre-1.3.0 any authenticated principal could observe the entire
+  changelog.
+- **WS cap race (finding 11027, PR #74).** The old
+  `load → compare → fetch_add` pattern could over-provision under
+  concurrent upgrades. Atomic `fetch_update(AcqRel, Acquire, ...)`
+  reserves a slot conditionally; strict enforcement verified by a
+  64-way contention test.
+- **Edge-event scope alignment.** SSE, WS, and the RDF exporter all
+  require **both** endpoints in scope for edge events (PR #74 + PR #76).
+  Pre-1.3.0 SSE used source only and WS admitted edges with either
+  endpoint, so the same principal saw different events on the two
+  transports.
+- **SSE periodic scope refresh (PR #75).** Long-lived SSE subscribers
+  poll `refresh_scope_if_stale` every 60 s so main-graph containment
+  changes take effect without reconnecting — matches the WebSocket
+  behavior. `http::ws::SCOPE_REFRESH_INTERVAL_SECS` is now crate-public
+  and a cross-module equality test guards against cadence drift.
+- **Schema durability via WAL records (finding 11026, PR #74 → PR #77).**
+  Schema mutations first shipped in 1.3.0 under a synchronous
+  `take_snapshot` per call (PR #74). PR #77 replaces that with first-class
+  `Change::SchemaMutation` WAL records that flow through the same
+  coalescer as node/edge mutations — `persist_or_die` gives per-call
+  durability with no snapshot cost and no dirty-flag retry. Recovery
+  replays schema records from the WAL via
+  `selene_graph::change_applier::apply_schema_mutation`, which rebuilds
+  property and composite indexes on register/unregister so replicas
+  match the live server's post-schema-change state.
+
 ### Fixed
 
-- **GQL `MATCH … INSERT` on MATCH-miss is now a true no-op.** Previously,
-  `MATCH (a:foo), (b:bar) INSERT (a)-[:rel]->(b)` with zero matches on either
-  side returned `status = 00000` with non-zero `nodes_created` /
-  `edges_created` in the mutation stats and silently wrote labelless orphan
-  nodes + an edge between them. The write path now skips INSERT entirely when
-  pattern bindings are empty; counts reflect what was actually written. The
-  same fix applies to the transaction (`execute_in_transaction`) path.
-  Callers that treated a successful status as a write confirmation without
-  inspecting row or mutation counts were exposed to graph corruption.
+- **GQL `MATCH … INSERT` on MATCH-miss is now a true no-op (PR #70).**
+  `MATCH (a:foo), (b:bar) INSERT (a)-[:rel]->(b)` with zero matches on
+  either side previously returned `status = 00000` with non-zero
+  `nodes_created` / `edges_created` and silently wrote labelless orphan
+  nodes + an edge between them. The write path now skips `INSERT` entirely
+  when pattern bindings are empty; counts reflect what was actually
+  written. Same fix applies to the transaction path.
+
+### Added (non-breaking)
+
+- `selene_gql` re-exports `MutationPipeline`, `MutationOp`,
+  `InsertElement`, `InsertPathPattern`, `InsertGraphPattern` at the
+  crate root so server-side policy scans can walk a parsed mutation
+  without reaching into non-public ast modules.
+- `selene_core::changeset::Change::SchemaMutation(SchemaMutation)` new
+  variant — kept last in the enum so postcard's variant-tagged encoding
+  stays backward-compatible with WAL files written by older binaries.
+- `selene_rdf::update::WriteScope` public type bundling the scope
+  bitmap + new-node-creation policy for SPARQL Update callers.
+- `ops::principals::oauth_register_principal` — dedicated entry point
+  for OAuth dynamic registration writes (vault-backed, admin-gated at
+  the HTTP layer).
+- `scope_root_ids` parameter on `create_principal` / `update_principal`
+  (MCP + ops API).
+- `TestServer::TEST_REGISTRATION_TOKEN` — fixed bearer token the test
+  harness provisions so production-mode e2e tests can exercise dynamic
+  registration in 1.3.0's stricter default.
+
+### Breaking changes (upgrade notes)
+
+- **Vault required for non-dev authentication.** Production deployments
+  that previously ran without a vault will hit `VaultUnavailable` on
+  any non-admin login. Set `[vault] enabled = true` and configure a
+  master-key source (`SELENE_VAULT_KEY_FILE`, `SELENE_VAULT_PASSPHRASE`,
+  or `[vault] master_key_file`) before upgrading.
+- **Reserved labels reject generic writes.** Any 1.2 tooling that wrote
+  `(:principal)`, `(:api_key)`, `(:revoked_token)`, `(:signing_key)`, or
+  `(:audit_log)` through `/nodes`, `/edges`, or GQL `INSERT` now returns
+  `Forbidden`. Migrate to the dedicated admin ops (`create_principal`,
+  `create_api_key`, etc.) or the vault graph (`USE secure; INSERT …`).
+- **OAuth dynamic registration disabled in production by default.** Set
+  `[mcp] registration_token = "…"` to enable, or run with `--dev` for
+  loopback testing.
+- **OAuth-registered clients cap at `reader`.** If an existing workflow
+  relied on dynamic registration to issue elevated scopes, switch to
+  `create_principal` (admin-gated) for service/operator clients.
+- **SSE `/subscribe` requires `Action::ChangelogSubscribe`.** Reader-role
+  principals no longer observe the changelog — grant service / admin
+  roles to subscribers that need it.
+- **Edge-event visibility tightened.** Clients that relied on seeing
+  "edge connects in-scope node to out-of-scope node" events on WS must
+  reconfigure scope to include the other endpoint or drop the expectation.
+- **`ServerState.schema_persist_pending`** removed (no longer needed
+  with WAL-backed schema durability). Embedders consuming that field
+  directly need to drop the reference.
+
+### Non-breaking infrastructure
+
+- `selene-rdf` depends on `roaring` (for scope bitmap threading).
+- `selene-server` gains a direct `url` dependency (for OAuth redirect
+  validation).
+- New `selene-server` modules: `auth::reserved`, `ops::rdf`. New public
+  API: `http::ws::SCOPE_REFRESH_INTERVAL_SECS`.
 
 ## [1.2.0] - 2026-04-19
 

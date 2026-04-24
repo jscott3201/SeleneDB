@@ -4406,7 +4406,7 @@ dependencies = [
 
 [[package]]
 name = "selene-algorithms"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "criterion",
  "parking_lot",
@@ -4419,7 +4419,7 @@ dependencies = [
 
 [[package]]
 name = "selene-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4435,7 +4435,7 @@ dependencies = [
 
 [[package]]
 name = "selene-client"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytes",
  "quinn",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "selene-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "geo-types",
  "geojson",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "selene-gql"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "arrow",
  "criterion",
@@ -4500,7 +4500,7 @@ dependencies = [
 
 [[package]]
 name = "selene-graph"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "arc-swap",
  "criterion",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "selene-packs"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "selene-core",
  "serde",
@@ -4537,7 +4537,7 @@ dependencies = [
 
 [[package]]
 name = "selene-persist"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "criterion",
  "postcard",
@@ -4556,7 +4556,7 @@ dependencies = [
 
 [[package]]
 name = "selene-rdf"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "base64",
  "criterion",
@@ -4576,7 +4576,7 @@ dependencies = [
 
 [[package]]
 name = "selene-server"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4645,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "selene-testing"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "criterion",
  "quinn",
@@ -4662,7 +4662,7 @@ dependencies = [
 
 [[package]]
 name = "selene-ts"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "arrow",
  "criterion",
@@ -4685,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "selene-wire"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bitflags",
  "bytes",
