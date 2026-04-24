@@ -1089,10 +1089,14 @@ fn migrate_main_graph_principals_to_vault(
             props.push((IStr::new("redirect_uri"), Value::str(uri)));
         }
         if !p.scope_roots.is_empty() {
+            // Stored as UInt because NodeId is u64; casting to i64 via `as`
+            // would silently wrap for ids above i64::MAX and the reader
+            // (`projection::scope_roots`) drops negative items, corrupting
+            // migrated scope data.
             let values: Arc<[Value]> = p
                 .scope_roots
                 .iter()
-                .map(|id| Value::Int(*id as i64))
+                .map(|id| Value::UInt(*id))
                 .collect::<Vec<_>>()
                 .into();
             props.push((IStr::new("scope_root_ids"), Value::List(values)));

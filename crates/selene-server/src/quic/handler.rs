@@ -318,6 +318,11 @@ fn to_wire(e: OpError) -> ErrorResponse {
             message: "access denied".into(),
             suggestion: None,
         },
+        OpError::Forbidden(msg) => ErrorResponse {
+            code: codes::AUTHORIZATION_DENIED,
+            message: msg,
+            suggestion: None,
+        },
         OpError::SchemaViolation(msg) => ErrorResponse {
             code: codes::SCHEMA_VIOLATION,
             message: msg,

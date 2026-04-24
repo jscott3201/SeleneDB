@@ -32,22 +32,27 @@ pub const RESERVED_NODE_LABELS: &[&str] = &[
 /// this edge label has no legitimate main-graph use.
 pub const RESERVED_EDGE_LABELS: &[&str] = &["scoped_to"];
 
-/// Return `Err(OpError::AuthDenied)` if `label` is reserved. Otherwise `Ok`.
+/// Return `Err(OpError::Forbidden)` if `label` is reserved. Otherwise `Ok`.
 ///
-/// Use when the caller passes a single label by value (e.g., `create_edge`).
+/// `Forbidden` (vs `InvalidRequest`) is deliberate: reserved-label rejection
+/// is an authorization outcome (the operation would have been valid for a
+/// caller with the right authority, but the label itself is forbidden to
+/// the main graph entirely), so it should surface as HTTP 403 and GQLSTATUS
+/// `42501` rather than HTTP 400. Use when the caller passes a single label
+/// by value (e.g., `create_edge`).
 pub fn reject_reserved_node_label(label: &str) -> Result<(), OpError> {
     if RESERVED_NODE_LABELS.contains(&label) {
-        return Err(OpError::InvalidRequest(format!(
+        return Err(OpError::Forbidden(format!(
             "label '{label}' is reserved — use the dedicated admin API or vault graph"
         )));
     }
     Ok(())
 }
 
-/// Return `Err` if `label` is a reserved edge label.
+/// Return `Err(OpError::Forbidden)` if `label` is a reserved edge label.
 pub fn reject_reserved_edge_label(label: &str) -> Result<(), OpError> {
     if RESERVED_EDGE_LABELS.contains(&label) {
-        return Err(OpError::InvalidRequest(format!(
+        return Err(OpError::Forbidden(format!(
             "edge label '{label}' is reserved — use the dedicated admin API"
         )));
     }

@@ -52,6 +52,15 @@ pub enum OpError {
     #[error("access denied")]
     AuthDenied,
 
+    /// The caller is authenticated but the operation is forbidden with a
+    /// specific reason (e.g., reserved label/edge reservation). Maps to
+    /// HTTP 403 with the message preserved, and to GQLSTATUS `42501` in
+    /// the GQL surface. Distinct from `AuthDenied` (unit variant, no
+    /// message) so reserved-label rejections can surface their specific
+    /// cause while still signalling "forbidden" at the transport layer.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("schema violation: {0}")]
     SchemaViolation(String),
 
@@ -157,12 +166,23 @@ pub(crate) fn refresh_scope_if_stale(state: &ServerState, auth: &AuthContext) ->
     );
 
     let Some(vault_svc) = state.services.get::<crate::vault::VaultService>() else {
+        // Fail closed: the previous implementation returned the prior
+        // AuthContext unchanged, which preserved whatever scope bitmap
+        // the principal last had and let subsequent ops succeed against
+        // a now-detached identity store. Drop the scope to empty and
+        // stamp the current containment generation so the next refresh
+        // still runs, and enforcement (`require_in_scope`) denies.
         tracing::warn!(
             principal = auth.principal_node_id.0,
             "scope refresh requested for non-admin principal but vault is not configured; \
-             returning prior scope unchanged (fail-closed at enforcement)"
+             dropping scope to empty (fail-closed)"
         );
-        return auth.clone();
+        return AuthContext {
+            principal_node_id: auth.principal_node_id,
+            role: auth.role,
+            scope: roaring::RoaringBitmap::new(),
+            scope_generation: current_gen,
+        };
     };
 
     let scope = crate::auth::handshake::resolve_scope_two_graphs(

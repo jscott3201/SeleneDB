@@ -78,12 +78,16 @@ fn node_to_dto(g: &selene_graph::SeleneGraph, nid: selene_core::NodeId) -> Optio
 }
 
 /// Encode a list of main-graph NodeId values into the property representation
-/// used on the vault principal. Stored as `Value::List` of `Value::Int`.
+/// used on the vault principal. Stored as `Value::List` of `Value::UInt`
+/// because `NodeId` is a `u64`; earlier versions used `Value::Int(id as i64)`
+/// which silently wrapped negative for ids above `i64::MAX` and then got
+/// filtered out at read time by `projection::scope_roots`. `scope_roots`
+/// still accepts both `Int` and `UInt` for forward/backward compatibility.
 fn encode_scope_root_ids(ids: &[u64]) -> selene_core::Value {
     use std::sync::Arc;
     let values: Arc<[selene_core::Value]> = ids
         .iter()
-        .map(|id| selene_core::Value::Int(*id as i64))
+        .map(|id| selene_core::Value::UInt(*id))
         .collect::<Vec<_>>()
         .into();
     selene_core::Value::List(values)

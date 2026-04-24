@@ -322,7 +322,17 @@ impl OAuthTokenService {
         }
 
         // 4. Look up principal in the vault (cache-accelerated).
+        //
+        // Two generations are in play: `vault_gen` keys the principal-id
+        // cache (invalidates on identity/role/enabled/scope rewrites), while
+        // `main_gen` — the main graph containment generation — is the value
+        // stamped into `AuthContext::scope_generation` so
+        // `ops::refresh_scope_if_stale` can detect containment drift. Mixing
+        // them (using vault_gen as scope_generation) would make every op
+        // look perpetually stale to refresh_scope_if_stale and cause
+        // unnecessary scope recomputation.
         let vault_gen = vault_graph.read(|g| g.generation());
+        let main_gen = main_graph.containment_generation();
 
         let cached = self.principal_cache.read().get(&claims.sub).copied();
         if let Some((cached_id, cached_gen)) = cached
@@ -340,7 +350,7 @@ impl OAuthTokenService {
                     main_graph,
                     cached_id,
                     &claims.sub,
-                    vault_gen,
+                    main_gen,
                 );
             }
             self.principal_cache.write().remove(&claims.sub);
@@ -350,13 +360,7 @@ impl OAuthTokenService {
         self.principal_cache
             .write()
             .insert(claims.sub.clone(), (principal_id, vault_gen));
-        build_auth_context(
-            vault_graph,
-            main_graph,
-            principal_id,
-            &claims.sub,
-            vault_gen,
-        )
+        build_auth_context(vault_graph, main_graph, principal_id, &claims.sub, main_gen)
     }
 
     /// Validate a JWT without a graph lookup.
@@ -598,10 +602,12 @@ impl OAuthTokenService {
 ///
 /// Reads the live role from the vault (not the JWT claim) so that role
 /// changes take effect immediately, then expands scope against the main
-/// graph containment tree. `scope_gen` is the vault generation at the
-/// moment the principal was resolved; the caller should propagate it into
-/// `AuthContext::scope_generation` so that `refresh_scope_if_stale` can
-/// detect when containment has since moved on.
+/// graph containment tree. `scope_gen` must be the **main graph**
+/// `containment_generation()` — not the vault generation — so that
+/// `ops::refresh_scope_if_stale` (which compares against the main graph's
+/// current containment generation) can detect topology drift and recompute
+/// the scope. Passing the vault generation here would make every op look
+/// perpetually stale and cause redundant scope recomputation.
 fn build_auth_context(
     vault_graph: &SharedGraph,
     main_graph: &SharedGraph,
