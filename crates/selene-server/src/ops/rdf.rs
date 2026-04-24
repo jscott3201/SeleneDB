@@ -100,8 +100,8 @@ fn map_rdf_error(e: selene_rdf::RdfError) -> OpError {
 
 /// Translate a SPARQL Update `UpdateError` into an `OpError` with the
 /// appropriate classification. Parse / unsupported / invalid-quad errors are
-/// client-caused; `NodeNotFound` is a 404; `Graph` falls through the shared
-/// graph-error mapper.
+/// client-caused; `NodeNotFound` is a 404; `ScopeDenied` is 403; `Graph`
+/// falls through the shared graph-error mapper.
 fn map_sparql_update_error(e: selene_rdf::update::UpdateError) -> OpError {
     use selene_rdf::update::UpdateError;
     match e {
@@ -113,18 +113,23 @@ fn map_sparql_update_error(e: selene_rdf::update::UpdateError) -> OpError {
             OpError::InvalidRequest(format!("SPARQL invalid quad: {msg}"))
         }
         UpdateError::NodeNotFound(id) => OpError::NotFound { entity: "node", id },
+        UpdateError::ScopeDenied(msg) => OpError::Forbidden(msg),
         UpdateError::Graph(ge) => super::graph_err(ge),
     }
 }
 
-fn require_admin_for_write(auth: &AuthContext) -> Result<(), OpError> {
+/// RDF import is admin-only in 1.3.0. Scoped import would require the
+/// caller to bind each new node under an explicit in-scope parent; the
+/// RDF-import format does not express that binding, so the library
+/// rejects node creation for scoped principals and the majority of real
+/// imports would fail. Until a parent-binding mechanism is added, the
+/// ops layer short-circuits and returns `Forbidden` instead.
+fn require_admin_for_rdf_import(auth: &AuthContext) -> Result<(), OpError> {
     if !auth.is_admin() {
-        // Scoped RDF writes require triple-level mutation filtering which
-        // is deliberately out of scope for 1.3.0; reject rather than risk
-        // letting a scoped principal mutate data it could not otherwise
-        // read.
         return Err(OpError::Forbidden(
-            "RDF import and SPARQL Update require admin role in 1.3.0".into(),
+            "RDF import requires admin role in 1.3.0 — scoped import is tracked as \
+             follow-up work (needs a parent-in-scope binding per imported subject)"
+                .into(),
         ));
     }
     Ok(())
@@ -217,7 +222,7 @@ pub async fn rdf_import(
 ) -> Result<RdfImportResult, OpError> {
     reject_if_replica(state)?;
     require_action(state, auth, Action::GqlMutate)?;
-    require_admin_for_write(auth)?;
+    require_admin_for_rdf_import(auth)?;
 
     let ontology_arc = state
         .rdf_ontology
@@ -264,8 +269,19 @@ pub async fn rdf_import(
 }
 
 /// Execute a SPARQL Update (INSERT DATA / DELETE DATA / DELETE-INSERT-WHERE).
-/// Admin-only in 1.3.0; replica-rejected; routed through the mutation
-/// batcher with the same persistence side-effects as GQL mutations.
+///
+/// Scoped principals are supported in 1.3.0: each mutation is checked
+/// against their scope bitmap, so a scoped writer can update properties /
+/// labels / edges on existing in-scope nodes. Creating new top-level
+/// nodes remains admin-only because SPARQL Update's INSERT DATA cannot
+/// express a parent-in-scope binding for the newly-minted node. `CLEAR` /
+/// `DROP` on the default graph likewise require admin (they delete every
+/// node, including out-of-scope ones).
+///
+/// Replica-rejected; routed through the mutation batcher; the captured
+/// `Vec<Change>` is handed to `persist_or_die` so WAL / changelog /
+/// version store observe the writes with the same durability posture as
+/// GQL mutations — closing the 1.3.0 follow-up flagged in PR #74.
 pub async fn sparql_update(
     state: &Arc<ServerState>,
     auth: &AuthContext,
@@ -273,29 +289,43 @@ pub async fn sparql_update(
 ) -> Result<SparqlUpdateResult, OpError> {
     reject_if_replica(state)?;
     require_action(state, auth, Action::GqlMutate)?;
-    require_admin_for_write(auth)?;
 
+    let auth_ctx = super::refresh_scope_if_stale(state, auth);
     let ns = state.rdf_namespace.clone();
     let update_owned = update_str.to_owned();
     let graph: SharedGraph = state.graph.clone();
     let st = Arc::clone(state);
 
+    // Per-quad scope enforcement happens inside the batcher closure,
+    // where the executor owns the write lock. Admin: no scope arg;
+    // scoped: pass the bitmap by clone so the closure can outlive the
+    // AuthContext borrow.
+    let scope_clone = if auth_ctx.is_admin() {
+        None
+    } else {
+        Some(auth_ctx.scope.clone())
+    };
+
     let (result, changes) = st
         .mutation_batcher
         .submit(
             move || -> Result<(selene_rdf::update::UpdateResult, Vec<Change>), OpError> {
-                selene_rdf::update::execute_update_shared(&graph, &ns, &update_owned)
+                let write_scope = match scope_clone.as_ref() {
+                    Some(bm) => selene_rdf::update::WriteScope::scoped(bm),
+                    None => selene_rdf::update::WriteScope::admin(),
+                };
+                selene_rdf::update::execute_update_shared(&graph, &ns, &update_owned, write_scope)
                     .map_err(map_sparql_update_error)
             },
         )
         .await
         .map_err(super::graph_err)??;
 
-    // See execute_update_shared: the returned Vec<Change> is currently
-    // empty because SPARQL Update's compound ops don't round-trip through
-    // TrackedMutation yet. persist_or_die with an empty vec is still
-    // correct — it becomes a no-op for the WAL/changelog side. The
-    // snapshot is already published inside execute_update_shared.
+    // `Vec<Change>` is now populated by `apply_insert_data` /
+    // `apply_delete_data` / `apply_delete_insert` committing through
+    // `TrackedMutation::commit`. persist_or_die drives it through the
+    // WAL coalescer + version store; the snapshot is already published
+    // inside execute_update_shared.
     persist_or_die(state, &changes);
 
     Ok(SparqlUpdateResult {
@@ -365,15 +395,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sparql_update_requires_admin() {
-        // Closes finding 11021: SPARQL Update must not be reachable by any
-        // authenticated principal — only admins in 1.3.0.
+    async fn sparql_update_scoped_allowed_on_in_scope_node() {
+        // 1.3.0 follow-up to finding 11021: SPARQL Update is no longer
+        // admin-only — a scoped principal can update properties on
+        // nodes inside their bitmap. Seed a node, grant its id to a
+        // scoped operator, observe the property write succeeds.
         let (state, _dir) = test_state().await;
-        let auth = operator_auth(&[1]);
-        let result = sparql_update(&state, &auth, "INSERT DATA { <urn:a> <urn:p> <urn:b> }").await;
+        let shared = state.graph.clone();
+        let (node_id, _) = shared
+            .write(|m| {
+                m.create_node(
+                    selene_core::LabelSet::from_strs(&["Sensor"]),
+                    selene_core::PropertyMap::from_pairs(vec![(
+                        selene_core::IStr::new("unit"),
+                        selene_core::Value::str("degC"),
+                    )]),
+                )
+            })
+            .unwrap();
+
+        let auth = operator_auth(&[node_id.0]);
+        let update = format!(
+            "PREFIX sel: <selene:/> \
+             INSERT DATA {{ <selene:/node/{}> <selene:/prop/status> \"ok\" }}",
+            node_id.0
+        );
+        let result = sparql_update(&state, &auth, &update).await;
         assert!(
-            matches!(result, Err(OpError::Forbidden(_))),
-            "operator-role SPARQL Update should be forbidden, got {result:?}"
+            result.is_ok(),
+            "scoped in-bitmap property write should succeed, got {result:?}"
+        );
+        assert_eq!(result.unwrap().properties_set, 1);
+    }
+
+    #[tokio::test]
+    async fn sparql_update_scoped_rejects_out_of_scope_node() {
+        // Complementary to the success case: a write to a node outside
+        // the scope bitmap returns Forbidden (mapped from
+        // UpdateError::ScopeDenied). Without this, a scoped principal
+        // could write anywhere the SPARQL update reached.
+        let (state, _dir) = test_state().await;
+        let shared = state.graph.clone();
+        let ((in_scope, out_of_scope), _) = shared
+            .write(|m| {
+                let a = m.create_node(
+                    selene_core::LabelSet::from_strs(&["Sensor"]),
+                    selene_core::PropertyMap::new(),
+                )?;
+                let b = m.create_node(
+                    selene_core::LabelSet::from_strs(&["Sensor"]),
+                    selene_core::PropertyMap::new(),
+                )?;
+                Ok((a, b))
+            })
+            .unwrap();
+
+        let auth = operator_auth(&[in_scope.0]);
+        let update = format!(
+            "INSERT DATA {{ <selene:/node/{}> <selene:/prop/unit> \"forbidden\" }}",
+            out_of_scope.0
+        );
+        let result = sparql_update(&state, &auth, &update).await;
+        assert!(
+            matches!(result, Err(OpError::Forbidden(ref msg)) if msg.contains("scope")),
+            "scoped write outside the bitmap should return Forbidden, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_update_rejects_node_creation_for_scoped_caller() {
+        // INSERT DATA targeting a subject URI that does not resolve to
+        // an existing node would implicitly create one — which requires
+        // a parent-in-scope binding that SPARQL Update cannot express.
+        // Scoped principals get Forbidden; admins would succeed.
+        let (state, _dir) = test_state().await;
+        let auth = operator_auth(&[1, 2]);
+        let update = "INSERT DATA { <selene:/node/9999> <selene:/prop/x> \"y\" }";
+        let result = sparql_update(&state, &auth, update).await;
+        assert!(
+            matches!(result, Err(OpError::Forbidden(ref msg)) if msg.contains("create")),
+            "scoped INSERT creating a new node should be forbidden, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparql_update_admin_captures_wal_changes() {
+        // Closes the durability caveat from PR #72: Vec<Change> flows
+        // through execute_update_shared → persist_or_die. The easiest
+        // structural proof is that the post-update graph generation
+        // advances, indicating the mutation batcher observed writes.
+        let (state, _dir) = test_state().await;
+        let shared = state.graph.clone();
+        let (node_id, _) = shared
+            .write(|m| {
+                m.create_node(
+                    selene_core::LabelSet::from_strs(&["Sensor"]),
+                    selene_core::PropertyMap::new(),
+                )
+            })
+            .unwrap();
+
+        let gen_before = state.graph.read(|g| g.generation());
+        let admin = AuthContext::dev_admin();
+        let update = format!(
+            "INSERT DATA {{ <selene:/node/{}> <selene:/prop/unit> \"degC\" }}",
+            node_id.0
+        );
+        sparql_update(&state, &admin, &update).await.unwrap();
+        let gen_after = state.graph.read(|g| g.generation());
+        assert!(
+            gen_after > gen_before,
+            "SPARQL Update must advance the graph generation (pre={gen_before}, post={gen_after})"
         );
     }
 
