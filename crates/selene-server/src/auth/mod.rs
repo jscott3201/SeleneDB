@@ -10,6 +10,7 @@ pub mod handshake;
 pub mod oauth;
 pub(crate) mod policies;
 pub(crate) mod projection;
+pub(crate) mod reserved;
 
 pub use credential::{CredentialError, hash_credential, verify_credential};
 pub use engine::AuthEngine;

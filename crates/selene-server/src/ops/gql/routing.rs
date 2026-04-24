@@ -178,6 +178,16 @@ pub(super) fn execute_local_graph_query(
         return error_result("42501", "insufficient privilege");
     }
 
+    // Reserved-label reservation: named local graphs share mutation semantics
+    // with the default graph, so the same reservation applies here. Vault
+    // access routes through `execute_vault_query` and is exempt.
+    if let selene_gql::GqlStatement::Mutate(ref pipeline) = stmt
+        && let Err(e) = crate::auth::reserved::reject_reserved_in_mutation(pipeline)
+    {
+        audit_log(auth, query, "local_graph_reserved_label", 0, start.elapsed());
+        return error_result("42501", &e.to_string());
+    }
+
     if start.elapsed().as_millis() as u64 > deadline_ms {
         return error_result("57014", "query cancelled: timeout");
     }

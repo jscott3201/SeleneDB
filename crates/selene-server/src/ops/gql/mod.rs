@@ -220,6 +220,17 @@ pub fn execute_gql_with_timeout(
         return Ok(error_result("42501", "insufficient privilege"));
     }
 
+    // Reserved-label reservation: reject mutations that would create or widen
+    // auth-reserved labels (principal, api_key, etc.) or auth-reserved edges
+    // (scoped_to) in the main graph. This closes the escalation surface where
+    // a scoped writer could otherwise mint a `:principal` via generic GQL.
+    if let selene_gql::GqlStatement::Mutate(ref pipeline) = *stmt
+        && let Err(e) = crate::auth::reserved::reject_reserved_in_mutation(pipeline)
+    {
+        audit_log(auth, query, "reserved_label", 0, start.elapsed());
+        return Ok(error_result("42501", &e.to_string()));
+    }
+
     // EXPLAIN: return plan text without executing
     if explain {
         let result = execute_explain(state, &stmt, profile);
