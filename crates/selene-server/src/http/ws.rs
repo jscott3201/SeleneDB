@@ -82,16 +82,32 @@ struct ChangeEntry {
 }
 
 /// WebSocket upgrade handler.
+///
+/// Atomically reserves a slot under `max_ws_subscriptions` before
+/// accepting the upgrade. Closes Selene_Bug_v1 finding #10 (11027): the
+/// pre-1.3.0 logic did a separate load → compare → fetch_add, so a burst
+/// of concurrent upgrades all passed the load-check and then each
+/// incremented past the cap.
 pub async fn ws_subscribe(
     ws: WebSocketUpgrade,
     auth: HttpAuth,
     State(state): State<Arc<ServerState>>,
 ) -> impl IntoResponse {
     let limit = state.config.http.max_ws_subscriptions;
-    let current = WS_CONNECTIONS.load(Ordering::Relaxed);
-    if current >= limit {
+
+    // Atomic reservation: fetch_update returns the old value; we compute
+    // the new value as `n + 1` only when `n < limit`. If every
+    // observation of the counter already meets or exceeds the limit the
+    // update returns Err and we reject — no other thread observed us
+    // holding a slot.
+    if WS_CONNECTIONS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            if n < limit { Some(n + 1) } else { None }
+        })
+        .is_err()
+    {
         tracing::warn!(
-            current,
+            current = WS_CONNECTIONS.load(Ordering::Relaxed),
             limit,
             principal = auth.0.principal_node_id.0,
             "WebSocket subscription rejected: at max_ws_subscriptions limit"
@@ -99,11 +115,16 @@ pub async fn ws_subscribe(
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
+    // Slot is ours. `handle_ws` is responsible for releasing it on exit.
     ws.on_upgrade(move |socket| handle_ws(socket, auth.0, state))
 }
 
 async fn handle_ws(mut socket: WebSocket, auth: AuthContext, state: Arc<ServerState>) {
-    WS_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+    // Slot already reserved in `ws_subscribe` under fetch_update — do
+    // NOT increment again here. Every code path in this function must
+    // release the slot on exit; the `fetch_sub` at the bottom + the
+    // early-return `fetch_sub` in the invalid-filter branch together
+    // cover that contract.
 
     // Wait for the client's filter message (with timeout)
     let filter = match tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv()).await
@@ -317,7 +338,11 @@ fn filter_changes(
                 source,
                 target,
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                // Both endpoints must be in scope (aligns with SSE +
+                // RDF exporter). Pre-1.3.0 this accepted "either
+                // endpoint in scope", which leaked out-of-scope node
+                // identifiers via relationship visibility.
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 if let Some(ref wanted) = filter.edge_types
@@ -338,7 +363,7 @@ fn filter_changes(
                 source,
                 target,
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 if let Some(ref wanted) = filter.edge_types
@@ -365,7 +390,7 @@ fn filter_changes(
                 target,
                 ..
             } => {
-                if !auth.in_scope(*source) && !auth.in_scope(*target) {
+                if !auth.in_scope(*source) || !auth.in_scope(*target) {
                     continue;
                 }
                 result.push(ChangeEntry {
@@ -379,4 +404,47 @@ fn filter_changes(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Closes finding 11027: verify the atomic reservation pattern. Under
+    /// concurrency, N threads racing to reserve a slot against a cap of K
+    /// must see exactly K successes and (N - K) failures. The pre-fix
+    /// `load → compare → fetch_add` pattern could let all N pass the
+    /// load-check before any incremented, over-provisioning the cap.
+    #[test]
+    fn fetch_update_cap_is_strict_under_concurrency() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let limit: usize = 4;
+        let attempts: usize = 64;
+
+        let mut handles = Vec::with_capacity(attempts);
+        for _ in 0..attempts {
+            let c = Arc::clone(&counter);
+            handles.push(thread::spawn(move || -> bool {
+                c.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    if n < limit { Some(n + 1) } else { None }
+                })
+                .is_ok()
+            }));
+        }
+
+        let successes: usize = handles
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum();
+
+        assert_eq!(
+            successes, limit,
+            "expected exactly {limit} reservations to succeed under \
+             {attempts}-way contention; got {successes}"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), limit);
+    }
 }

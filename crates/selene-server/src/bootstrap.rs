@@ -74,6 +74,15 @@ pub struct ServerState {
     pub(crate) csr_cache: Arc<ArcSwap<(u64, Arc<CsrAdjacency>)>>,
     /// Projection catalog for graph algorithms (persists across requests).
     pub(crate) projection_catalog: selene_gql::runtime::procedures::algorithms::SharedCatalog,
+    /// Set when a schema mutation has been applied in memory but its
+    /// corresponding durable snapshot has failed. Subsequent schema
+    /// operations will retry the snapshot before allowing any idempotent
+    /// early-return path (`AlreadyExistsEqual`, `NotFound` on unregister)
+    /// to report success. This closes the durability window flagged in
+    /// the 2026-04-24 review for finding 11026: without the flag a
+    /// retry of a schema call could hit the idempotent path and return
+    /// success while the schema change is still not on disk.
+    pub(crate) schema_persist_pending: std::sync::atomic::AtomicBool,
 }
 
 // ── Accessors (pub for embedder/test API, pub(crate) for internal) ─
@@ -937,6 +946,7 @@ pub async fn bootstrap(
         rdf_namespace,
         csr_cache,
         projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+        schema_persist_pending: std::sync::atomic::AtomicBool::new(false),
     };
 
     // Sweep any orphaned snapshot temp files left from previous runs.
@@ -1293,6 +1303,7 @@ impl ServerState {
                 Arc::new(CsrAdjacency::build(&SeleneGraph::new())),
             ))),
             projection_catalog: selene_gql::runtime::procedures::algorithms::new_shared_catalog(),
+            schema_persist_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
