@@ -143,9 +143,8 @@ pub(crate) fn resolve_scope_two_graphs(
     role: Role,
 ) -> RoaringBitmap {
     vault_graph.read(|vg| {
-        main_graph.read(|mg| {
-            AuthEngine::resolve_scope(vg, mg, principal_id, role).unwrap_or_default()
-        })
+        main_graph
+            .read(|mg| AuthEngine::resolve_scope(vg, mg, principal_id, role).unwrap_or_default())
     })
 }
 

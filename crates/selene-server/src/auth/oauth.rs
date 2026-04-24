@@ -346,12 +346,17 @@ impl OAuthTokenService {
             self.principal_cache.write().remove(&claims.sub);
         }
 
-        let principal_id =
-            vault_graph.read(|g| find_enabled_principal(g, &claims.sub))?;
+        let principal_id = vault_graph.read(|g| find_enabled_principal(g, &claims.sub))?;
         self.principal_cache
             .write()
             .insert(claims.sub.clone(), (principal_id, vault_gen));
-        build_auth_context(vault_graph, main_graph, principal_id, &claims.sub, vault_gen)
+        build_auth_context(
+            vault_graph,
+            main_graph,
+            principal_id,
+            &claims.sub,
+            vault_gen,
+        )
     }
 
     /// Validate a JWT without a graph lookup.
@@ -617,12 +622,8 @@ fn build_auth_context(
             .map_err(|_| AuthError::InvalidRole(role_str))
     })?;
 
-    let scope = super::handshake::resolve_scope_two_graphs(
-        vault_graph,
-        main_graph,
-        principal_id,
-        role,
-    );
+    let scope =
+        super::handshake::resolve_scope_two_graphs(vault_graph, main_graph, principal_id, role);
 
     Ok(AuthContext {
         principal_node_id: principal_id,

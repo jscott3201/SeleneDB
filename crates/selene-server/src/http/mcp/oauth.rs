@@ -27,7 +27,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::auth::credential;
 use crate::auth::handshake;
 use crate::auth::oauth::{OAuthTokenService, now_secs, uuid_v4};
 use crate::bootstrap::ServerState;
@@ -454,73 +453,24 @@ pub async fn oauth_register(
     let client_id = format!("mcp-{}", uuid_v4());
     let client_secret = generate_secret();
 
-    // Hash the secret for storage.
-    let credential_hash = match credential::hash_credential(&client_secret) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to hash credential during OAuth registration");
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "registration failed",
-            );
-        }
-    };
-
-    // Build parameterized GQL INSERT for the principal node.
-    let gql = "INSERT (:principal {identity: $identity, credential_hash: $hash, \
-         role: $role, enabled: true, client_name: $name, redirect_uri: $uri})";
-
-    let mut params = selene_gql::ParameterMap::new();
-    params.insert(
-        selene_core::IStr::new("identity"),
-        selene_gql::GqlValue::from(&selene_core::Value::from(client_id.as_str())),
-    );
-    params.insert(
-        selene_core::IStr::new("hash"),
-        selene_gql::GqlValue::from(&selene_core::Value::from(credential_hash.as_str())),
-    );
-    params.insert(
-        selene_core::IStr::new("role"),
-        selene_gql::GqlValue::from(&selene_core::Value::from(scope.as_str())),
-    );
-    params.insert(
-        selene_core::IStr::new("name"),
-        selene_gql::GqlValue::from(&selene_core::Value::from(req.client_name.as_str())),
-    );
-    params.insert(
-        selene_core::IStr::new("uri"),
-        selene_gql::GqlValue::from(&selene_core::Value::from(req.redirect_uris[0].as_str())),
-    );
-
-    let shared = state.graph.clone();
-    let batcher_result = state
-        .mutation_batcher
-        .submit(move || {
-            selene_gql::MutationBuilder::new(gql)
-                .with_parameters(&params)
-                .execute(&shared)
-                .map(|_| ())
-        })
-        .await;
-    match batcher_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::error!(error = %e, "failed to create principal during OAuth registration");
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "registration failed",
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "mutation batcher error during OAuth registration");
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "registration failed",
-            );
-        }
+    // Write the new client into the vault — the single source of truth for
+    // principals since 1.3.0. `oauth_register_principal` hashes the secret
+    // internally, flushes the vault, and enforces uniqueness on identity.
+    if let Err(e) = crate::ops::principals::oauth_register_principal(
+        &state,
+        &client_id,
+        &scope,
+        &client_secret,
+        &req.client_name,
+        &req.redirect_uris[0],
+    ) {
+        tracing::error!(error = %e, "failed to create principal during OAuth registration");
+        let status = match e {
+            crate::ops::OpError::Conflict(_) => StatusCode::CONFLICT,
+            crate::ops::OpError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return oauth_error(status, "server_error", "registration failed");
     }
 
     (
@@ -601,8 +551,17 @@ pub async fn oauth_authorize(
         );
     }
 
-    // Validate client exists in graph, is enabled, and redirect_uri matches.
-    let valid = state.graph.read(|g| {
+    // Validate client exists in the vault, is enabled, and redirect_uri matches.
+    // Since 1.3.0 OAuth clients live in the vault alongside other principals;
+    // absence of the vault here is a deployment misconfiguration.
+    let Some(vault_svc) = state.services.get::<crate::vault::VaultService>() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "vault not configured",
+        );
+    };
+    let valid = vault_svc.handle.graph.read(|g| {
         g.nodes_by_label("principal").any(|nid| {
             g.get_node(nid).is_some_and(|n| {
                 n.property("identity")
@@ -781,8 +740,15 @@ pub async fn oauth_approve(
         );
     }
 
-    // Re-validate client_id and redirect_uri against the graph.
-    let valid = state.graph.read(|g| {
+    // Re-validate client_id and redirect_uri against the vault.
+    let Some(vault_svc) = state.services.get::<crate::vault::VaultService>() else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "vault not configured",
+        );
+    };
+    let valid = vault_svc.handle.graph.read(|g| {
         g.nodes_by_label("principal").any(|nid| {
             g.get_node(nid).is_some_and(|n| {
                 n.property("identity")

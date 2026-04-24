@@ -77,9 +77,7 @@ pub fn reject_reserved_label_istrs(labels: &[IStr]) -> Result<(), OpError> {
 /// `SetLabel` (which widens a node's label set — equivalent to creating one).
 /// `RemoveLabel` is not rejected — removing a reserved label from a stray
 /// node cleans up legacy data and poses no escalation risk.
-pub fn reject_reserved_in_mutation(
-    pipeline: &selene_gql::MutationPipeline,
-) -> Result<(), OpError> {
+pub fn reject_reserved_in_mutation(pipeline: &selene_gql::MutationPipeline) -> Result<(), OpError> {
     for op in &pipeline.mutations {
         match op {
             selene_gql::MutationOp::InsertPattern(pattern) => {
@@ -189,10 +187,8 @@ mod tests {
 
     #[test]
     fn mutation_scan_rejects_set_label_to_reserved() {
-        let stmt = selene_gql::parse_statement(
-            "MATCH (n) WHERE id(n) = 1 SET n IS principal",
-        )
-        .unwrap();
+        let stmt =
+            selene_gql::parse_statement("MATCH (n) WHERE id(n) = 1 SET n IS principal").unwrap();
         let selene_gql::GqlStatement::Mutate(ref pipeline) = stmt else {
             panic!("expected Mutate");
         };

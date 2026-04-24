@@ -811,6 +811,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_writer_cannot_insert_principal_in_main_graph() {
+        // Closes the privilege-escalation path described in finding 11019:
+        // an operator-role principal with scoped write access must not be
+        // able to mint a `:principal` node in the main graph, because doing
+        // so previously allowed self-promotion to admin.
+        let state = test_state().await;
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(1);
+        let auth = AuthContext {
+            principal_node_id: selene_core::NodeId(100),
+            role: crate::auth::Role::Operator,
+            scope,
+            scope_generation: 0,
+        };
+
+        let result = execute_gql(
+            &state,
+            &auth,
+            "INSERT (:principal {identity: 'attacker', role: 'admin', credential_hash: 'x'})",
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.status_code, "42501",
+            "expected auth-denied GQLSTATUS"
+        );
+        assert!(
+            result.message.contains("reserved"),
+            "message should mention reservation: {}",
+            result.message
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_writer_cannot_insert_scoped_to_edge_in_main_graph() {
+        // Complementary to the label check: even if a writer could get a
+        // principal node somehow, the `scoped_to` edge itself is reserved so
+        // there is no way to attach a scope root.
+        let state = test_state().await;
+        let mut scope = roaring::RoaringBitmap::new();
+        scope.insert(1);
+        scope.insert(2);
+        let auth = AuthContext {
+            principal_node_id: selene_core::NodeId(100),
+            role: crate::auth::Role::Operator,
+            scope,
+            scope_generation: 0,
+        };
+
+        // First create two ordinary nodes to attach the edge between.
+        execute_gql(
+            &state,
+            &AuthContext::dev_admin(),
+            "INSERT (:zone {name: 'z1'})",
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .unwrap();
+        execute_gql(
+            &state,
+            &AuthContext::dev_admin(),
+            "INSERT (:zone {name: 'z2'})",
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .unwrap();
+
+        let result = execute_gql(
+            &state,
+            &auth,
+            "MATCH (a) WHERE id(a) = 1 MATCH (b) WHERE id(b) = 2 INSERT (a)-[:scoped_to]->(b)",
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .unwrap();
+
+        assert_eq!(result.status_code, "42501");
+        assert!(
+            result.message.contains("reserved"),
+            "message should mention reservation: {}",
+            result.message
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_also_cannot_insert_principal_in_main_graph() {
+        // The reservation is total, not role-gated. Even admins must go
+        // through the vault-targeted dedicated flow (USE secure; or the
+        // principal management ops).
+        let state = test_state().await;
+        let auth = AuthContext::dev_admin();
+
+        let result = execute_gql(
+            &state,
+            &auth,
+            "INSERT (:principal {identity: 'also-no', role: 'admin'})",
+            None,
+            false,
+            false,
+            ResultFormat::Json,
+        )
+        .unwrap();
+
+        assert_eq!(result.status_code, "42501");
+    }
+
+    #[tokio::test]
     async fn vault_audit_log_created() {
         let (state, _dir) = test_state_with_vault().await;
         let auth = AuthContext::dev_admin();

@@ -38,10 +38,15 @@ impl Drop for TestServer {
 
 impl TestServer {
     /// Boot a dev-mode HTTP server on a random port.
+    ///
+    /// The vault is enabled by default: since 1.3.0 all authentication
+    /// routes through the vault, and absence of it in a test harness would
+    /// simulate a misconfigured deployment rather than a typical one.
     pub async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = SeleneConfig::dev(dir.path());
         config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
+        config.vault.enabled = true;
 
         selene_server::ops::init_start_time();
         let state = bootstrap::bootstrap(config, None).await.unwrap();
@@ -65,6 +70,9 @@ impl TestServer {
     }
 
     /// Boot a production-mode HTTP server (dev_mode=false) with an API key.
+    /// The vault is enabled so OAuth registration and principal auth work;
+    /// a deterministic passphrase is supplied so `resolve_master_key`
+    /// succeeds without a real key file on disk.
     pub async fn start_with_api_key(api_key: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = SeleneConfig::dev(dir.path());
@@ -72,9 +80,12 @@ impl TestServer {
         config.mcp.enabled = true;
         config.mcp.api_key = Some(api_key.into());
         config.http.listen_addr = "127.0.0.1:0".parse().unwrap();
+        config.vault.enabled = true;
 
         selene_server::ops::init_start_time();
-        let state = bootstrap::bootstrap(config, None).await.unwrap();
+        let state = bootstrap::bootstrap(config, Some("test-vault-passphrase".into()))
+            .await
+            .unwrap();
         let state = Arc::new(state);
 
         let app = selene_server::http::router(state.clone());

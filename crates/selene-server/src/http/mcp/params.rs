@@ -586,6 +586,11 @@ pub(crate) struct CreatePrincipalParams {
     /// Optional password. If omitted, the principal has no credential (OAuth-only).
     #[serde(default)]
     pub(crate) password: Option<String>,
+    /// Main-graph node ids that bound this principal's scope. The principal's
+    /// access bitmap is the union of containment descendants beneath each id.
+    /// Leave empty for admins (global by role) or for scope-less principals.
+    #[serde(default)]
+    pub(crate) scope_root_ids: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -598,6 +603,10 @@ pub(crate) struct UpdatePrincipalParams {
     /// Set to true/false to enable/disable. Leave unset to keep current.
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
+    /// Replace the principal's scope roots. Empty list clears all scope
+    /// (principal sees nothing). Omit to leave the existing roots untouched.
+    #[serde(default)]
+    pub(crate) scope_root_ids: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

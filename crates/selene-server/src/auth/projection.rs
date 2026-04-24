@@ -215,6 +215,90 @@ mod tests {
     }
 
     #[test]
+    fn scope_roots_reads_property_from_principal() {
+        let vault = SharedGraph::new(SeleneGraph::new());
+        let (principal_id, _) = vault
+            .write(|m| {
+                m.create_node(
+                    LabelSet::from_strs(&["principal"]),
+                    PropertyMap::from_pairs(vec![
+                        (IStr::new("identity"), selene_core::Value::str("alice")),
+                        (
+                            IStr::new("scope_root_ids"),
+                            selene_core::Value::List(std::sync::Arc::from(vec![
+                                selene_core::Value::Int(7),
+                                selene_core::Value::Int(12),
+                                selene_core::Value::Int(99),
+                            ])),
+                        ),
+                    ]),
+                )
+            })
+            .unwrap();
+
+        vault.read(|g| {
+            let roots = scope_roots(g, principal_id);
+            assert_eq!(roots, vec![NodeId(7), NodeId(12), NodeId(99)]);
+        });
+    }
+
+    #[test]
+    fn scope_roots_missing_property_is_empty() {
+        let vault = SharedGraph::new(SeleneGraph::new());
+        let (principal_id, _) = vault
+            .write(|m| {
+                m.create_node(
+                    LabelSet::from_strs(&["principal"]),
+                    PropertyMap::from_pairs(vec![(
+                        IStr::new("identity"),
+                        selene_core::Value::str("bob"),
+                    )]),
+                )
+            })
+            .unwrap();
+
+        vault.read(|g| {
+            let roots = scope_roots(g, principal_id);
+            assert!(roots.is_empty());
+        });
+    }
+
+    #[test]
+    fn scope_roots_unknown_node_is_empty() {
+        let vault = SharedGraph::new(SeleneGraph::new());
+        vault.read(|g| {
+            let roots = scope_roots(g, NodeId(999));
+            assert!(roots.is_empty());
+        });
+    }
+
+    #[test]
+    fn scope_roots_ignores_non_integer_items() {
+        let vault = SharedGraph::new(SeleneGraph::new());
+        let (principal_id, _) = vault
+            .write(|m| {
+                m.create_node(
+                    LabelSet::from_strs(&["principal"]),
+                    PropertyMap::from_pairs(vec![(
+                        IStr::new("scope_root_ids"),
+                        selene_core::Value::List(std::sync::Arc::from(vec![
+                            selene_core::Value::Int(3),
+                            selene_core::Value::str("not-an-id"),
+                            selene_core::Value::Int(-1), // negative rejected
+                            selene_core::Value::UInt(42),
+                        ])),
+                    )]),
+                )
+            })
+            .unwrap();
+
+        vault.read(|g| {
+            let roots = scope_roots(g, principal_id);
+            assert_eq!(roots, vec![NodeId(3), NodeId(42)]);
+        });
+    }
+
+    #[test]
     fn is_in_scope_check() {
         let (shared, site, building, _, zone) = test_graph();
         shared.read(|g| {

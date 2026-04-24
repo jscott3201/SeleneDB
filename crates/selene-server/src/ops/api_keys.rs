@@ -537,7 +537,8 @@ mod tests {
         let auth = admin_ctx();
         create_api_key(&state, &auth, "a", "admin", None, None).unwrap();
         create_api_key(&state, &auth, "b", "admin", None, None).unwrap();
-        crate::ops::principals::create_principal(&state, &auth, "svc", "service", None).unwrap();
+        crate::ops::principals::create_principal(&state, &auth, "svc", "service", None, &[])
+            .unwrap();
         create_api_key(&state, &auth, "c", "svc", None, None).unwrap();
 
         let all = list_api_keys(&state, &auth, None).unwrap();

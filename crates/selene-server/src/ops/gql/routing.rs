@@ -184,7 +184,13 @@ pub(super) fn execute_local_graph_query(
     if let selene_gql::GqlStatement::Mutate(ref pipeline) = stmt
         && let Err(e) = crate::auth::reserved::reject_reserved_in_mutation(pipeline)
     {
-        audit_log(auth, query, "local_graph_reserved_label", 0, start.elapsed());
+        audit_log(
+            auth,
+            query,
+            "local_graph_reserved_label",
+            0,
+            start.elapsed(),
+        );
         return error_result("42501", &e.to_string());
     }
 
