@@ -35,8 +35,11 @@ fn resolve_node_schema_inheritance(
     if let Some(ref parent_label) = resolved.parent
         && let Some(parent) = schema_reader.node_schema(parent_label)
     {
-        let child_names: std::collections::HashSet<&str> =
-            resolved.properties.iter().map(|p| p.name.as_ref()).collect();
+        let child_names: std::collections::HashSet<&str> = resolved
+            .properties
+            .iter()
+            .map(|p| p.name.as_ref())
+            .collect();
         let mut merged: Vec<_> = parent
             .properties
             .iter()
