@@ -16,6 +16,7 @@ pub mod health;
 pub mod info;
 pub mod nodes;
 pub mod principals;
+pub mod rdf;
 pub mod reactflow;
 pub mod schema;
 pub mod signing_key;

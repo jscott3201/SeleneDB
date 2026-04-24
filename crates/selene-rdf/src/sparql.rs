@@ -94,13 +94,7 @@ impl SparqlResultFormat {
     }
 }
 
-/// Execute a SPARQL query against a Selene graph and return serialized results.
-///
-/// For SELECT/ASK queries, results are serialized in the SPARQL Results format
-/// (JSON, XML, CSV, or TSV). For CONSTRUCT/DESCRIBE queries, results are
-/// serialized as N-Triples (the format parameter is ignored for graph results).
-///
-/// Returns the serialized bytes and content type string.
+/// Execute a SPARQL query against a Selene graph (admin/global view).
 pub fn execute_sparql(
     graph: &SeleneGraph,
     csr: &CsrAdjacency,
@@ -109,11 +103,39 @@ pub fn execute_sparql(
     query_str: &str,
     format: SparqlResultFormat,
 ) -> Result<(Vec<u8>, &'static str), SparqlError> {
+    execute_sparql_scoped(graph, csr, namespace, ontology, query_str, format, None)
+}
+
+/// Execute a SPARQL query with an optional principal-scope filter.
+///
+/// When `scope` is `None` this is equivalent to [`execute_sparql`]. When
+/// `Some`, the underlying dataset adapter drops any default-graph quad whose
+/// subject or object refers to a node outside the bitmap before the SPARQL
+/// evaluator sees it — so SELECT/CONSTRUCT/ASK/DESCRIBE queries from scoped
+/// principals cannot read past the principal's authority. Ontology triples
+/// (schema/types) are not scope-filtered; they describe classes, not
+/// instance data.
+///
+/// For SELECT/ASK queries, results are serialized in the SPARQL Results
+/// format (JSON, XML, CSV, or TSV). For CONSTRUCT/DESCRIBE queries, results
+/// are serialized as N-Triples (the format parameter is ignored for graph
+/// results).
+///
+/// Returns the serialized bytes and content type string.
+pub fn execute_sparql_scoped(
+    graph: &SeleneGraph,
+    csr: &CsrAdjacency,
+    namespace: &RdfNamespace,
+    ontology: Option<&OntologyStore>,
+    query_str: &str,
+    format: SparqlResultFormat,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Result<(Vec<u8>, &'static str), SparqlError> {
     // Parse the SPARQL query (cached).
     let query = get_or_parse_query(query_str)?;
 
-    // Build the dataset adapter.
-    let dataset = SeleneDataset::new(graph, csr, namespace, ontology);
+    // Build the dataset adapter with the principal's scope.
+    let dataset = SeleneDataset::new_scoped(graph, csr, namespace, ontology, scope);
 
     // Execute the query. `execute` takes the dataset by value.
     let results = QueryEvaluator::new()
