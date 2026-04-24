@@ -75,6 +75,45 @@ pub fn apply_changes(graph: &mut SeleneGraph, changes: &[Change], _origin: Origi
             Change::EdgePropertyRemoved { edge_id, key, .. } => {
                 graph.remove_edge_property_raw(*edge_id, *key);
             }
+            Change::SchemaMutation(op) => {
+                apply_schema_mutation(graph, op);
+            }
+        }
+    }
+}
+
+/// Replay a `SchemaMutation` onto the graph's schema registry.
+///
+/// Used by both the replica's `apply_changes` path and the recovery
+/// consumer in `selene-server::bootstrap` after a WAL replay. Errors
+/// from the underlying registry are logged and then swallowed — a
+/// WAL-replay mismatch (e.g. a schema that was already registered
+/// before the WAL's replay window) is not a hard failure; the goal is
+/// eventual convergence with the live state.
+pub fn apply_schema_mutation(graph: &mut SeleneGraph, op: &selene_core::changeset::SchemaMutation) {
+    use selene_core::changeset::SchemaMutation;
+    let schema = graph.schema_mut();
+    match op {
+        SchemaMutation::RegisterNode(ns) => {
+            if let Err(e) = schema.register_node_schema_if_new((**ns).clone()) {
+                tracing::warn!(error = %e, "schema replay: register_node_schema_if_new failed");
+            }
+        }
+        SchemaMutation::RegisterNodeForce(ns) => {
+            if let Err(e) = schema.register_node_schema((**ns).clone()) {
+                tracing::warn!(error = %e, "schema replay: register_node_schema (force) failed");
+            }
+        }
+        SchemaMutation::RegisterEdge(es) => {
+            if let Err(e) = schema.register_edge_schema_if_new((**es).clone()) {
+                tracing::warn!(error = %e, "schema replay: register_edge_schema_if_new failed");
+            }
+        }
+        SchemaMutation::UnregisterNode(label) => {
+            schema.unregister_node_schema(label.as_str());
+        }
+        SchemaMutation::UnregisterEdge(label) => {
+            schema.unregister_edge_schema(label.as_str());
         }
     }
 }
@@ -163,6 +202,51 @@ mod tests {
         assert_eq!(
             node.properties.get(IStr::new("temp")),
             Some(&Value::Float(22.5))
+        );
+    }
+
+    #[test]
+    fn apply_schema_mutation_register_and_unregister_node() {
+        use selene_core::changeset::SchemaMutation;
+        use selene_core::schema::NodeSchema;
+
+        let mut graph = SeleneGraph::new();
+        let schema = NodeSchema {
+            label: "Sensor".into(),
+            parent: None,
+            properties: Vec::new(),
+            valid_edge_labels: Vec::new(),
+            description: String::new(),
+            annotations: Default::default(),
+            version: Default::default(),
+            validation_mode: None,
+            key_properties: Vec::new(),
+        };
+
+        // Register via WAL replay.
+        apply_changes(
+            &mut graph,
+            &[Change::SchemaMutation(SchemaMutation::RegisterNode(
+                Box::new(schema),
+            ))],
+            Origin::Local,
+        );
+        assert!(
+            graph.schema().node_schema("Sensor").is_some(),
+            "schema replay should register the node schema"
+        );
+
+        // Unregister via WAL replay.
+        apply_changes(
+            &mut graph,
+            &[Change::SchemaMutation(SchemaMutation::UnregisterNode(
+                IStr::new("Sensor"),
+            ))],
+            Origin::Local,
+        );
+        assert!(
+            graph.schema().node_schema("Sensor").is_none(),
+            "schema replay should unregister the node schema"
         );
     }
 

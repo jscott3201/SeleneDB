@@ -400,6 +400,10 @@ fn filter_changes(
                     labels: None,
                 });
             }
+            // Schema mutations don't carry an entity id and are only
+            // meaningful to admin DDL consumers — skip them here so the
+            // WS subscription stream stays focused on data-plane events.
+            Change::SchemaMutation(_) => {}
         }
     }
 

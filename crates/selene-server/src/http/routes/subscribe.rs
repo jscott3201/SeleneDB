@@ -230,6 +230,10 @@ fn change_in_scope(change: &Change, scope: Option<&roaring::RoaringBitmap>) -> b
         | Change::EdgePropertyRemoved { source, target, .. } => {
             in_scope(source.0) && in_scope(target.0)
         }
+        // Schema mutations are DDL events — not visible to scoped
+        // principals. Admins see them through the DDL audit path, not
+        // through data-plane subscriptions.
+        Change::SchemaMutation(_) => false,
     }
 }
 
@@ -287,6 +291,7 @@ fn change_type_name(change: &Change) -> &'static str {
         Change::EdgeDeleted { .. } => "EdgeDeleted",
         Change::EdgePropertySet { .. } => "EdgePropertySet",
         Change::EdgePropertyRemoved { .. } => "EdgePropertyRemoved",
+        Change::SchemaMutation(_) => "SchemaMutation",
     }
 }
 
@@ -368,6 +373,14 @@ fn change_to_json(change: &Change, timestamp_nanos: i64) -> serde_json::Value {
             "type": "EdgePropertyRemoved",
             "edge_id": edge_id.0,
             "key": key.as_str(),
+            "timestamp_ms": ts_ms,
+        }),
+        // Schema mutations are filtered out by `change_in_scope` before
+        // this point for non-admin subscribers, so this JSON shape is
+        // only reachable on an admin pass-through. Keep the payload
+        // minimal and typed so clients can dispatch on `type`.
+        Change::SchemaMutation(_) => serde_json::json!({
+            "type": "SchemaMutation",
             "timestamp_ms": ts_ms,
         }),
     }

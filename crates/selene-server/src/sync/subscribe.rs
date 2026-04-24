@@ -226,6 +226,11 @@ pub fn handle_sync_subscribe(
                     | Change::EdgePropertyRemoved { source, target, .. } => {
                         bitmap.contains(source.0 as u32) && bitmap.contains(target.0 as u32)
                     }
+                    // Schema mutations ship to non-admin sync peers
+                    // only when they're subscribed admins; the
+                    // role check above already diverted the admin
+                    // path, so here we filter them out.
+                    Change::SchemaMutation(_) => false,
                 })
                 .collect()
         }
