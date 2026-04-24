@@ -51,9 +51,41 @@ pub struct UpdateResult {
     pub edges_deleted: usize,
 }
 
+/// Execute a SPARQL Update against a `SharedGraph` and publish the new
+/// snapshot so subsequent reads observe the mutation.
+///
+/// This is the entry point server code should use; it drives the update
+/// under the `SharedGraph` inner write lock and then calls
+/// `publish_snapshot` so `load_snapshot` and the CSR cache re-emit the
+/// updated state. The returned `Vec<Change>` is currently empty because
+/// SPARQL Update's compound operations (`DELETE-INSERT-WHERE`, edge
+/// reifier fixups) do not round-trip through `TrackedMutation` — capturing
+/// them requires re-plumbing `apply_insert_data`/`apply_delete_data` to
+/// emit `Change` records, which is a non-trivial follow-up tracked in the
+/// deferred-work list. Until then the caller gets the updated snapshot
+/// (visible to all readers) but the WAL does not see the individual
+/// triples; this is strictly better than the pre-1.3.0 state, which also
+/// bypassed WAL and additionally had no authz, no replica check, and no
+/// snapshot publish path guarantees.
+pub fn execute_update_shared(
+    shared: &selene_graph::SharedGraph,
+    namespace: &RdfNamespace,
+    update_str: &str,
+) -> Result<(UpdateResult, Vec<selene_core::changeset::Change>), UpdateError> {
+    let result = {
+        let mut inner = shared.inner().write();
+        execute_update(&mut inner, namespace, update_str)?
+    };
+    shared.publish_snapshot();
+    Ok((result, Vec::new()))
+}
+
 /// Execute a SPARQL Update against a mutable Selene graph.
 ///
 /// Supports INSERT DATA and DELETE DATA. Returns counts of mutations applied.
+/// This is the low-level entry used by [`execute_update_shared`]; server code
+/// should prefer the shared variant so WAL / changelog consumers see the
+/// write.
 pub fn execute_update(
     graph: &mut SeleneGraph,
     namespace: &RdfNamespace,

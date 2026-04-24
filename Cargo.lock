@@ -4562,6 +4562,7 @@ dependencies = [
  "criterion",
  "oxrdf",
  "oxttl",
+ "roaring",
  "rustc-hash",
  "selene-core",
  "selene-graph",

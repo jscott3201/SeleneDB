@@ -60,18 +60,12 @@ const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
 
 /// Import RDF data into the property graph and/or ontology store.
 ///
-/// - `data` -- raw RDF bytes in the format indicated by `format`.
-/// - `format` -- Turtle, N-Triples, or N-Quads.
-/// - `target_graph` -- if `Some("ontology")`, ALL triples are routed to the
-///   ontology store regardless of their content.
-/// - `shared` -- the shared property graph for ABox mutations.
-/// - `ns` -- namespace for URI minting/parsing.
-/// - `ontology` -- the ontology store for TBox triples.
-///
-/// Returns an [`RdfImportResult`] with counts of created/modified entities.
-///
-/// The import is bounded to [`DEFAULT_MAX_QUADS`] quads. Inputs exceeding
-/// this limit produce [`RdfError::TooManyQuads`].
+/// Thin wrapper over [`import_rdf_with_changes`] that discards the
+/// mutation changeset. Use this when you do not need to forward the
+/// changeset to a WAL/changelog coalescer (e.g., in tests or stand-alone
+/// ingestion tools). Production callers should prefer
+/// [`import_rdf_with_changes`] so their mutation bookkeeping stays
+/// consistent with every other write path.
 pub fn import_rdf(
     data: &[u8],
     format: RdfFormat,
@@ -80,6 +74,34 @@ pub fn import_rdf(
     ns: &RdfNamespace,
     ontology: &mut OntologyStore,
 ) -> Result<RdfImportResult, RdfError> {
+    import_rdf_with_changes(data, format, target_graph, shared, ns, ontology)
+        .map(|(result, _changes)| result)
+}
+
+/// Import RDF data and return both the summary counts and the property-graph
+/// changeset.
+///
+/// - `data` -- raw RDF bytes in the format indicated by `format`.
+/// - `format` -- Turtle, N-Triples, or N-Quads.
+/// - `target_graph` -- if `Some("ontology")`, ALL triples are routed to the
+///   ontology store regardless of their content.
+/// - `shared` -- the shared property graph for ABox mutations.
+/// - `ns` -- namespace for URI minting/parsing.
+/// - `ontology` -- the ontology store for TBox triples.
+///
+/// Returns `(RdfImportResult, Vec<Change>)`. The `Vec<Change>` is empty when
+/// all triples are routed to the ontology store (no property-graph writes).
+///
+/// The import is bounded to [`DEFAULT_MAX_QUADS`] quads. Inputs exceeding
+/// this limit produce [`RdfError::TooManyQuads`].
+pub fn import_rdf_with_changes(
+    data: &[u8],
+    format: RdfFormat,
+    target_graph: Option<&str>,
+    shared: &SharedGraph,
+    ns: &RdfNamespace,
+    ontology: &mut OntologyStore,
+) -> Result<(RdfImportResult, Vec<selene_core::changeset::Change>), RdfError> {
     let quads = parse_quads(data, format, DEFAULT_MAX_QUADS)?;
 
     // If target is explicitly "ontology" or matches the ontology graph URI,
@@ -97,10 +119,13 @@ pub fn import_rdf(
             );
         }
         debug!(count, "imported all triples to ontology store");
-        return Ok(RdfImportResult {
-            ontology_triples_loaded: count,
-            ..Default::default()
-        });
+        return Ok((
+            RdfImportResult {
+                ontology_triples_loaded: count,
+                ..Default::default()
+            },
+            Vec::new(),
+        ));
     }
 
     // Classify each quad as TBox or ABox and collect mutations.
@@ -120,8 +145,9 @@ pub fn import_rdf(
         }
     }
 
-    // Apply collected ABox mutations to the property graph.
-    apply_abox_mutations(shared, &collector, &mut result)?;
+    // Apply collected ABox mutations to the property graph, capturing the
+    // changeset so callers can route it through WAL + changelog consumers.
+    let changes = apply_abox_mutations(shared, &collector, &mut result)?;
 
     debug!(
         nodes_created = result.nodes_created,
@@ -132,7 +158,7 @@ pub fn import_rdf(
         "RDF import complete"
     );
 
-    Ok(result)
+    Ok((result, changes))
 }
 
 // ---------------------------------------------------------------------------
@@ -440,21 +466,25 @@ impl ABoxCollector {
 // ---------------------------------------------------------------------------
 
 /// Apply the collected ABox data as property graph mutations.
+///
+/// Returns the captured `Vec<Change>` so upstream WAL/changelog consumers
+/// can observe the mutation — pre-1.3.0 RDF imports discarded this and the
+/// WAL never saw the writes.
 fn apply_abox_mutations(
     shared: &SharedGraph,
     collector: &ABoxCollector,
     result: &mut RdfImportResult,
-) -> Result<(), RdfError> {
+) -> Result<Vec<selene_core::changeset::Change>, RdfError> {
     // Skip the write lock entirely if there is nothing to mutate.
     if collector.nodes.is_empty()
         && collector.edges.is_empty()
         && collector.edge_reifiers.is_empty()
         && collector.external_nodes.is_empty()
     {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let ((), _changes) = shared.write(|m| {
+    let ((), changes) = shared.write(|m| {
         // Maps from subject URI to the NodeId assigned by Selene. We need
         // this to wire up edges after nodes are created.
         let mut uri_to_node: HashMap<String, NodeId> = HashMap::new();
@@ -544,7 +574,7 @@ fn apply_abox_mutations(
         Ok(())
     })?;
 
-    Ok(())
+    Ok(changes)
 }
 
 // ---------------------------------------------------------------------------

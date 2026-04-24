@@ -9,7 +9,7 @@ use oxrdf::TripleRef;
 use oxttl::{NQuadsSerializer, NTriplesSerializer, TurtleSerializer};
 use selene_graph::SeleneGraph;
 
-use crate::mapping::graph_to_quads;
+use crate::mapping::graph_to_quads_scoped;
 use crate::namespace::RdfNamespace;
 use crate::ontology::OntologyStore;
 use crate::{RdfError, RdfFormat};
@@ -27,20 +27,49 @@ pub fn export_graph(
     ontology: Option<&OntologyStore>,
     include_all_graphs: bool,
 ) -> Result<Vec<u8>, RdfError> {
+    export_graph_scoped(graph, ns, format, ontology, include_all_graphs, None)
+}
+
+/// Serialize a [`SeleneGraph`] to RDF bytes, optionally filtering the output
+/// to a principal's scope bitmap.
+///
+/// When `scope` is `None`, the output is identical to [`export_graph`]. When
+/// `Some`, only in-scope nodes and their fully-in-scope edges are emitted.
+/// Ontology quads — schema-level triples loaded at import time — are shared
+/// and not scope-filtered: they describe types, not instance data, so they
+/// do not leak per-tenant information. Scoped SPARQL query enforcement
+/// follows the same rule (see `sparql::execute_sparql_scoped`).
+pub fn export_graph_scoped(
+    graph: &SeleneGraph,
+    ns: &RdfNamespace,
+    format: RdfFormat,
+    ontology: Option<&OntologyStore>,
+    include_all_graphs: bool,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Result<Vec<u8>, RdfError> {
     match format {
-        RdfFormat::Turtle => export_turtle(graph, ns),
-        RdfFormat::NTriples => export_ntriples(graph, ns),
-        RdfFormat::NQuads => export_nquads(graph, ns, ontology, include_all_graphs),
+        RdfFormat::Turtle => export_turtle_scoped(graph, ns, scope),
+        RdfFormat::NTriples => export_ntriples_scoped(graph, ns, scope),
+        RdfFormat::NQuads => export_nquads_scoped(graph, ns, ontology, include_all_graphs, scope),
     }
 }
 
-/// Serialize a [`SeleneGraph`] to Turtle format.
+/// Serialize a [`SeleneGraph`] to Turtle format (full graph).
+pub fn export_turtle(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>, RdfError> {
+    export_turtle_scoped(graph, ns, None)
+}
+
+/// Serialize a [`SeleneGraph`] to Turtle format, optionally scope-filtered.
 ///
 /// Turtle does not support named graphs, so only default-graph quads are
 /// written. Each quad is converted to a triple (subject, predicate, object)
 /// before serialization. Namespace prefixes are declared for compact output.
-pub fn export_turtle(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>, RdfError> {
-    let quads = graph_to_quads(graph, ns);
+pub fn export_turtle_scoped(
+    graph: &SeleneGraph,
+    ns: &RdfNamespace,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Result<Vec<u8>, RdfError> {
+    let quads = graph_to_quads_scoped(graph, ns, scope);
 
     let mut buf = Vec::new();
 
@@ -70,12 +99,21 @@ pub fn export_turtle(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>, 
     Ok(buf)
 }
 
-/// Serialize a [`SeleneGraph`] to N-Triples format.
+/// Serialize a [`SeleneGraph`] to N-Triples format (full graph).
+pub fn export_ntriples(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>, RdfError> {
+    export_ntriples_scoped(graph, ns, None)
+}
+
+/// Serialize a [`SeleneGraph`] to N-Triples format, optionally scope-filtered.
 ///
 /// N-Triples is a line-based triple format with no abbreviations or named
 /// graphs. Each quad is written as a triple (subject, predicate, object).
-pub fn export_ntriples(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>, RdfError> {
-    let quads = graph_to_quads(graph, ns);
+pub fn export_ntriples_scoped(
+    graph: &SeleneGraph,
+    ns: &RdfNamespace,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Result<Vec<u8>, RdfError> {
+    let quads = graph_to_quads_scoped(graph, ns, scope);
 
     let mut buf = Vec::new();
     let mut writer = NTriplesSerializer::new().for_writer(&mut buf);
@@ -92,19 +130,30 @@ pub fn export_ntriples(graph: &SeleneGraph, ns: &RdfNamespace) -> Result<Vec<u8>
     Ok(buf)
 }
 
-/// Serialize a [`SeleneGraph`] to N-Quads format.
-///
-/// N-Quads extends N-Triples with an optional graph name per statement.
-/// Default-graph quads from the property graph are always written. If
-/// `include_all_graphs` is true and an ontology store is provided, ontology
-/// quads are also included (they carry their own named graph).
+/// Serialize a [`SeleneGraph`] to N-Quads format (full graph).
 pub fn export_nquads(
     graph: &SeleneGraph,
     ns: &RdfNamespace,
     ontology: Option<&OntologyStore>,
     include_all_graphs: bool,
 ) -> Result<Vec<u8>, RdfError> {
-    let quads = graph_to_quads(graph, ns);
+    export_nquads_scoped(graph, ns, ontology, include_all_graphs, None)
+}
+
+/// Serialize a [`SeleneGraph`] to N-Quads format, optionally scope-filtered.
+///
+/// N-Quads extends N-Triples with an optional graph name per statement.
+/// Default-graph quads from the property graph are scope-filtered when
+/// `scope` is `Some`. Ontology quads (a named graph) are schema-level
+/// metadata and are included unfiltered when `include_all_graphs` is set.
+pub fn export_nquads_scoped(
+    graph: &SeleneGraph,
+    ns: &RdfNamespace,
+    ontology: Option<&OntologyStore>,
+    include_all_graphs: bool,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Result<Vec<u8>, RdfError> {
+    let quads = graph_to_quads_scoped(graph, ns, scope);
 
     let mut buf = Vec::new();
     let mut writer = NQuadsSerializer::new().for_writer(&mut buf);

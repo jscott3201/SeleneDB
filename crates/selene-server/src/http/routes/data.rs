@@ -230,21 +230,13 @@ pub(in crate::http) async fn export_rdf(
     auth: HttpAuth,
     Query(params): Query<RdfExportParams>,
 ) -> Result<impl IntoResponse, HttpError> {
-    let _ = auth.0;
     let format_str = params.format.as_deref().unwrap_or("turtle");
     let format: selene_rdf::RdfFormat = format_str
         .parse()
         .map_err(|e: String| HttpError::bad_request(e))?;
-
-    let ns = &state.rdf_namespace;
-    let snap = state.graph.load_snapshot();
     let include_all = params.graphs.as_deref() == Some("all");
 
-    let ontology_ref = state.rdf_ontology.as_ref().map(|o| o.read());
-
-    let data =
-        selene_rdf::export::export_graph(&snap, ns, format, ontology_ref.as_deref(), include_all)
-            .map_err(|e| HttpError(OpError::Internal(e.to_string())))?;
+    let data = crate::ops::rdf::rdf_export(&state, &auth.0, format, include_all)?;
 
     Ok((
         StatusCode::OK,
@@ -265,58 +257,17 @@ pub(in crate::http) async fn import_rdf(
     Query(params): Query<RdfImportParams>,
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, HttpError> {
-    reject_if_replica(&state)?;
-    let _ = auth.0;
-
     let format_str = params.format.as_deref().unwrap_or("turtle");
     let format: selene_rdf::RdfFormat = format_str
         .parse()
         .map_err(|e: String| HttpError::bad_request(e))?;
 
-    let target_graph = params.graph.clone();
-    let ns = state.rdf_namespace.clone();
-
-    // Take write lock on ontology for the duration of the import.
-    let ontology_arc = state
-        .rdf_ontology
-        .as_ref()
-        .ok_or_else(|| {
-            HttpError(OpError::Internal(
-                "RDF ontology store not initialized".into(),
-            ))
-        })?
-        .clone();
-
-    let graph = state.graph.clone();
-    let st = Arc::clone(&state);
-
-    let result = st
-        .mutation_batcher
-        .submit(move || {
-            let mut ontology = ontology_arc.write();
-            selene_rdf::import::import_rdf(
-                &body,
-                format,
-                target_graph.as_deref(),
-                &graph,
-                &ns,
-                &mut ontology,
-            )
-            .map_err(|e| selene_graph::error::GraphError::Other(e.to_string()))
-        })
-        .await
-        .map_err(HttpError::from_graph_error)?
-        .map_err(|e| HttpError(crate::ops::graph_err(e)))?;
+    let result =
+        crate::ops::rdf::rdf_import(&state, &auth.0, format, params.graph.clone(), body).await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "nodes_created": result.nodes_created,
-            "edges_created": result.edges_created,
-            "labels_added": result.labels_added,
-            "properties_set": result.properties_set,
-            "ontology_triples_loaded": result.ontology_triples_loaded,
-        })),
+        Json(serde_json::to_value(&result).unwrap()),
     ))
 }
 
@@ -382,9 +333,7 @@ pub(in crate::http) async fn sparql_get(
     headers: axum::http::HeaderMap,
     Query(params): Query<SparqlQueryParams>,
 ) -> Result<axum::response::Response, HttpError> {
-    let _ = auth.0;
-
-    // No query parameter: return Service Description
+    // Service Description needs no auth — it describes the endpoint, not data.
     if params.query.is_none() {
         return Ok(sparql_service_description(&state));
     }
@@ -394,7 +343,7 @@ pub(in crate::http) async fn sparql_get(
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let format = resolve_sparql_format(params.format.as_deref(), accept);
-    execute_sparql_handler(&state, query_str, format)
+    execute_sparql_handler(&state, &auth.0, query_str, format)
 }
 
 /// `POST /sparql`
@@ -410,8 +359,6 @@ pub(in crate::http) async fn sparql_post(
     Query(params): Query<SparqlQueryParams>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, HttpError> {
-    let _ = auth.0;
-
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -424,7 +371,7 @@ pub(in crate::http) async fn sparql_post(
         if update_str.is_empty() {
             return Err(HttpError::bad_request("empty SPARQL Update body"));
         }
-        return execute_sparql_update_handler(&state, update_str);
+        return execute_sparql_update_handler(&state, &auth.0, update_str).await;
     }
 
     // Form-encoded path: check for `update=` or `query=` field
@@ -433,7 +380,7 @@ pub(in crate::http) async fn sparql_post(
             .map_err(|_| HttpError::bad_request("request body is not valid UTF-8"))?;
         // Check for update= field first (SPARQL Update via form)
         if let Ok(update_str) = form_decode_field(body_str, "update") {
-            return execute_sparql_update_handler(&state, &update_str);
+            return execute_sparql_update_handler(&state, &auth.0, &update_str).await;
         }
         // Fall through to query= field
         let query_str = form_decode_field(body_str, "query").map_err(|_| {
@@ -443,7 +390,7 @@ pub(in crate::http) async fn sparql_post(
             .get(axum::http::header::ACCEPT)
             .and_then(|v| v.to_str().ok());
         let format = resolve_sparql_format(params.format.as_deref(), accept);
-        return execute_sparql_handler(&state, &query_str, format);
+        return execute_sparql_handler(&state, &auth.0, &query_str, format);
     }
 
     // Default: raw SPARQL query in body (application/sparql-query)
@@ -456,7 +403,7 @@ pub(in crate::http) async fn sparql_post(
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let format = resolve_sparql_format(params.format.as_deref(), accept);
-    execute_sparql_handler(&state, query_str, format)
+    execute_sparql_handler(&state, &auth.0, query_str, format)
 }
 
 /// Extract a named field from a URL-encoded form body.
@@ -477,17 +424,12 @@ fn form_decode_field(body: &str, field_name: &str) -> Result<String, HttpError> 
 }
 
 /// Execute a SPARQL Update and return a JSON summary.
-fn execute_sparql_update_handler(
-    state: &ServerState,
+async fn execute_sparql_update_handler(
+    state: &Arc<ServerState>,
+    auth: &crate::auth::AuthContext,
     update_str: &str,
 ) -> Result<axum::response::Response, HttpError> {
-    let ns = &state.rdf_namespace;
-    let mut graph = state.graph.inner().write();
-    let result = selene_rdf::update::execute_update(&mut graph, ns, update_str)
-        .map_err(|e| HttpError(OpError::QueryError(e.to_string())))?;
-    drop(graph);
-    state.graph.publish_snapshot();
-
+    let result = crate::ops::rdf::sparql_update(state, auth, update_str).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -551,24 +493,11 @@ fn sparql_service_description(state: &ServerState) -> axum::response::Response {
 
 fn execute_sparql_handler(
     state: &ServerState,
+    auth: &crate::auth::AuthContext,
     query_str: &str,
     format: selene_rdf::sparql::SparqlResultFormat,
 ) -> Result<axum::response::Response, HttpError> {
-    let ns = &state.rdf_namespace;
-    let snap = state.graph.load_snapshot();
-    let csr = crate::bootstrap::get_or_build_csr(&state.csr_cache, &snap);
-
-    let ontology_ref = state.rdf_ontology.as_ref().map(|o| o.read());
-
-    let (bytes, content_type) = selene_rdf::sparql::execute_sparql(
-        &snap,
-        &csr,
-        ns,
-        ontology_ref.as_deref(),
-        query_str,
-        format,
-    )
-    .map_err(|e| HttpError(OpError::QueryError(e.to_string())))?;
+    let (bytes, content_type) = crate::ops::rdf::sparql_query(state, auth, query_str, format)?;
 
     Ok((
         StatusCode::OK,

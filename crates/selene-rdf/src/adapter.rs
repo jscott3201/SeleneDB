@@ -34,18 +34,26 @@ use crate::terms::{RdfPredicate, SeleneRdfTerm};
 /// the RDF namespace configuration, and an optional ontology store.
 ///
 /// Lifetime `'a` is tied to the graph snapshot. Build one per query.
+///
+/// An optional scope bitmap filters default-graph quads at emission: any
+/// quad with a subject or object `SeleneRdfTerm::Node(id)` whose `id.0` is
+/// not set in the bitmap is dropped. Ontology graph quads are schema-level
+/// metadata and are not scope-filtered; the export path follows the same
+/// policy for consistency.
 pub struct SeleneDataset<'a> {
     graph: &'a SeleneGraph,
     csr: &'a CsrAdjacency,
     namespace: &'a RdfNamespace,
     ontology: Option<&'a OntologyStore>,
+    /// Optional principal-scope bitmap over `NodeId.0`. `None` = admin view.
+    scope: Option<&'a roaring::RoaringBitmap>,
     /// Per-query cache for externalized terms. Avoids repeated `format!()`
     /// heap allocations for the same type/predicate URIs across result rows.
     extern_cache: RefCell<FxHashMap<SeleneRdfTerm, Term>>,
 }
 
 impl<'a> SeleneDataset<'a> {
-    /// Create a new queryable dataset.
+    /// Create a new queryable dataset (no scope — admin/global view).
     ///
     /// The CSR must have been built from the same graph snapshot. The ontology
     /// store is optional; when present, quads in the `urn:selene:ontology`
@@ -56,11 +64,28 @@ impl<'a> SeleneDataset<'a> {
         namespace: &'a RdfNamespace,
         ontology: Option<&'a OntologyStore>,
     ) -> Self {
+        Self::new_scoped(graph, csr, namespace, ontology, None)
+    }
+
+    /// Create a new queryable dataset with an optional principal scope.
+    ///
+    /// When `scope` is `Some`, default-graph quads referencing an out-of-scope
+    /// node in either the subject or object position are filtered out before
+    /// reaching the SPARQL evaluator. Ontology quads are schema metadata and
+    /// are not scope-filtered.
+    pub fn new_scoped(
+        graph: &'a SeleneGraph,
+        csr: &'a CsrAdjacency,
+        namespace: &'a RdfNamespace,
+        ontology: Option<&'a OntologyStore>,
+        scope: Option<&'a roaring::RoaringBitmap>,
+    ) -> Self {
         Self {
             graph,
             csr,
             namespace,
             ontology,
+            scope,
             extern_cache: RefCell::new(FxHashMap::default()),
         }
     }
@@ -88,10 +113,28 @@ impl<'a> QueryableDataset<'a> for SeleneDataset<'a> {
         let iter: Box<dyn Iterator<Item = InternalQuad<SeleneRdfTerm>>> = match graph_name {
             Some(None) => {
                 // Default graph: instance data from the property graph.
-                self.collect_default_graph(subject, predicate, object)
+                // Scope filtering applies here — default-graph quads carry
+                // instance-level node references.
+                let raw = self.collect_default_graph(subject, predicate, object);
+                if let Some(scope) = self.scope {
+                    let scope_cloned = scope.clone();
+                    Box::new(raw.filter(move |q| {
+                        // Equivalent to quad_out_of_scope but uses the owned
+                        // bitmap so we don't borrow self across the iterator.
+                        let term_out = |t: &SeleneRdfTerm| match t {
+                            SeleneRdfTerm::Node(id) => !scope_cloned.contains(id.0 as u32),
+                            _ => false,
+                        };
+                        !(term_out(&q.subject) || term_out(&q.object))
+                    }))
+                } else {
+                    raw
+                }
             }
             Some(Some(g)) => {
                 // Specific named graph: check if it matches the ontology graph.
+                // Ontology quads are schema metadata (types, property keys,
+                // predicates) and are not scope-filtered.
                 if self.is_ontology_graph(g) {
                     Box::new(
                         self.collect_ontology_graph(subject, predicate, object)

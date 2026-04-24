@@ -152,15 +152,43 @@ pub fn edge_to_quads(graph: &SeleneGraph, edge_id: EdgeId, ns: &RdfNamespace) ->
 /// 2 quads per edge (most edges lack properties and emit only the base
 /// triple; the estimate is conservative).
 pub fn graph_to_quads(graph: &SeleneGraph, ns: &RdfNamespace) -> Vec<Quad> {
+    graph_to_quads_scoped(graph, ns, None)
+}
+
+/// Convert nodes and edges in the graph to RDF quads, optionally filtered
+/// by an authorization scope bitmap.
+///
+/// When `scope` is `None`, the output is identical to [`graph_to_quads`]
+/// (admin/global view). When `Some`, only nodes whose `NodeId.0` is set in
+/// the bitmap contribute quads; an edge contributes its base triple + any
+/// reifier/property quads only if **both** of its endpoints are in scope.
+/// This matches the semantics of `CRUD` scope enforcement elsewhere in the
+/// server: a principal cannot observe a relationship outside its subtree
+/// by virtue of one endpoint happening to be inside.
+pub fn graph_to_quads_scoped(
+    graph: &SeleneGraph,
+    ns: &RdfNamespace,
+    scope: Option<&roaring::RoaringBitmap>,
+) -> Vec<Quad> {
     let estimated = graph.node_count() * 4 + graph.edge_count() * 2;
     let mut quads = Vec::with_capacity(estimated);
 
+    let in_scope = |node_id: NodeId| -> bool { scope.is_none_or(|s| s.contains(node_id.0 as u32)) };
+
     for node_id in graph.all_node_ids() {
+        if !in_scope(node_id) {
+            continue;
+        }
         quads.extend(node_to_quads(graph, node_id, ns));
     }
 
     for edge_id in graph.all_edge_ids() {
-        quads.extend(edge_to_quads(graph, edge_id, ns));
+        if let Some(edge) = graph.get_edge(edge_id)
+            && in_scope(edge.source)
+            && in_scope(edge.target)
+        {
+            quads.extend(edge_to_quads(graph, edge_id, ns));
+        }
     }
 
     quads
