@@ -252,6 +252,7 @@ fn e2e_match_miss_insert_is_noop() {
     .execute(&shared)
     .unwrap();
 
+    assert_eq!(result.row_count(), 0, "empty MATCH → empty result set");
     assert_eq!(
         result.mutations.nodes_created, 0,
         "MATCH-miss must not create nodes"
@@ -287,6 +288,7 @@ fn e2e_match_miss_insert_in_transaction_is_noop() {
     .execute_in_transaction(&mut txn)
     .unwrap();
 
+    assert_eq!(result.row_count(), 0, "empty MATCH → empty result set");
     assert_eq!(result.mutations.nodes_created, 0);
     assert_eq!(result.mutations.edges_created, 0);
     assert_eq!(txn.graph().node_count(), nodes_before);
